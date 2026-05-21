@@ -560,10 +560,11 @@ class OpenAIClient(LLMClientBase):
         # Prompt-based tool calling: embed tool definitions in the system message
         # instead of using the native tools/tool_choice API fields. This enables
         # tool calling on models that don't support the tools parameter.
-        # Resolve "auto" mode by probing the model's capability.
-        from letta.llm_api.tool_capability_probe import resolve_tool_calling_mode
-
-        effective_tool_calling_mode = resolve_tool_calling_mode(llm_config)
+        # Read pre-resolved mode from the agent loop, or fall back to sync resolve.
+        effective_tool_calling_mode = llm_config.resolved_tool_calling_mode
+        if effective_tool_calling_mode is None:
+            from letta.llm_api.tool_capability_probe import resolve_tool_calling_mode
+            effective_tool_calling_mode = resolve_tool_calling_mode(llm_config)
         use_prompt_tool_calling = (
             effective_tool_calling_mode == "prompt" and tools is not None
         )
@@ -1009,9 +1010,11 @@ class OpenAIClient(LLMClientBase):
 
         # Prompt-based tool calling: if the model doesn't support native tool
         # calling, parse the text content as a tool call JSON.
-        from letta.llm_api.tool_capability_probe import resolve_tool_calling_mode
-
-        effective_tool_calling_mode = resolve_tool_calling_mode(llm_config)
+        # Read pre-resolved mode from the agent loop, or fall back to sync resolve.
+        effective_tool_calling_mode = llm_config.resolved_tool_calling_mode
+        if effective_tool_calling_mode is None:
+            from letta.llm_api.tool_capability_probe import resolve_tool_calling_mode
+            effective_tool_calling_mode = resolve_tool_calling_mode(llm_config)
         if (
             effective_tool_calling_mode == "prompt"
             and chat_completion_response.choices

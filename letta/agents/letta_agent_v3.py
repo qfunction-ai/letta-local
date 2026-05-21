@@ -1092,10 +1092,13 @@ class LettaAgentV3(LettaAgentV2):
                 # Prompt-based tool calling mode: for models that don't support
                 # native tool calling, tools are embedded in the system prompt
                 # and the text output is parsed as a tool call JSON.
-                # Resolve "auto" mode by probing the model's capability.
-                from letta.llm_api.tool_capability_probe import resolve_tool_calling_mode
+                # Resolve "auto" mode once per agent loop step using async probe.
+                if active_llm_config.resolved_tool_calling_mode is None:
+                    from letta.llm_api.tool_capability_probe import resolve_tool_calling_mode_async
 
-                effective_tool_calling_mode = resolve_tool_calling_mode(active_llm_config)
+                    await resolve_tool_calling_mode_async(active_llm_config)
+
+                effective_tool_calling_mode = active_llm_config.resolved_tool_calling_mode or "native"
                 if effective_tool_calling_mode == "prompt":
                     self.logger.info(
                         f"Prompt-based tool calling active for {active_llm_config.model}. "

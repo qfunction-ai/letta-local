@@ -115,15 +115,10 @@ class SimpleLLMStreamAdapter(LettaLLMStreamAdapter):
                 is_proxy = False
 
             # Determine tool_calling_mode for prompt-based tool calling support
-            # Resolve "auto" by probing the model's capability
-            from letta.llm_api.tool_capability_probe import resolve_tool_calling_mode
-
-            tool_calling_mode = None
-            if (
-                hasattr(self.llm_config, "constraints")
-                and self.llm_config.constraints is not None
-                and hasattr(self.llm_config.constraints, "tool_calling_mode")
-            ):
+            # Read pre-resolved mode from the agent loop, or fall back to sync resolve
+            tool_calling_mode = self.llm_config.resolved_tool_calling_mode
+            if tool_calling_mode is None:
+                from letta.llm_api.tool_capability_probe import resolve_tool_calling_mode
                 tool_calling_mode = resolve_tool_calling_mode(self.llm_config)
 
             if use_responses and not is_proxy:

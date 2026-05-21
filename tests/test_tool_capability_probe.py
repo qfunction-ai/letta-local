@@ -384,3 +384,95 @@ class TestAutoApplyConstraints:
             ),
         )
         assert config.constraints.tool_calling_mode == "prompt"
+
+
+# -------------------------------------------------------
+# Async probe tests
+# -------------------------------------------------------
+
+
+class TestAsyncProbe:
+    """Tests for the async probe methods using httpx."""
+
+    @pytest.mark.asyncio
+    async def test_probe_async_uses_cache(self):
+        """After first async probe, subsequent calls use cache."""
+        cache = ToolCapabilityCache()
+        config = _make_config()
+
+        # Pre-seed the cache so we don't need to mock httpx
+        cache.set_cached(config, True)
+        result = await cache.probe_async(config)
+        assert result is True
+
+        # Change the cache and verify the async probe reads it
+        cache.set_cached(config, False)
+        result2 = await cache.probe_async(config)
+        assert result2 is False
+
+    @pytest.mark.asyncio
+    async def test_resolve_async_uses_resolved_field(self):
+        """resolve_tool_calling_mode_async reads pre-resolved value."""
+        from letta.llm_api.tool_capability_probe import resolve_tool_calling_mode_async
+
+        ToolCapabilityCache.reset()
+        config = _make_config()
+        config.resolved_tool_calling_mode = "prompt"
+
+        result = await resolve_tool_calling_mode_async(config)
+        assert result == "prompt"
+        # No probe should have been called
+
+    @pytest.mark.asyncio
+    async def test_resolve_async_stores_on_config(self):
+        """resolve_tool_calling_mode_async stores result on resolved_tool_calling_mode."""
+        from letta.llm_api.tool_capability_probe import resolve_tool_calling_mode_async
+
+        ToolCapabilityCache.reset()
+        cache = ToolCapabilityCache.instance()
+        config = _make_config()
+
+        with patch.object(cache, "probe_async", return_value=True):
+            result = await resolve_tool_calling_mode_async(config)
+
+        assert result == "native"
+        assert config.resolved_tool_calling_mode == "native"
+
+
+# -------------------------------------------------------
+# resolved_tool_calling_mode field tests
+# -------------------------------------------------------
+
+
+class TestResolvedToolCallingMode:
+    """Tests for the resolved_tool_calling_mode field on LLMConfig."""
+
+    def test_field_defaults_to_none(self):
+        config = _make_config()
+        assert config.resolved_tool_calling_mode is None
+
+    def test_field_is_excluded_from_serialization(self):
+        """resolved_tool_calling_mode should not appear in dict/JSON export."""
+        config = _make_config()
+        config.resolved_tool_calling_mode = "prompt"
+        d = config.model_dump()
+        assert "resolved_tool_calling_mode" not in d
+
+    def test_sync_resolve_populates_field(self):
+        """resolve_tool_calling_mode() stores result on the config."""
+        config = _make_config(tool_calling_mode="auto")
+        cache = ToolCapabilityCache.instance()
+        cache.set_cached(config, True)
+
+        result = resolve_tool_calling_mode(config)
+        assert result == "native"
+        assert config.resolved_tool_calling_mode == "native"
+
+    def test_downstream_reads_resolved_field(self):
+        """If resolved_tool_calling_mode is set, resolve returns it directly."""
+        config = _make_config()
+        config.resolved_tool_calling_mode = "prompt"
+
+        # Should return "prompt" without calling probe at all
+        result = resolve_tool_calling_mode(config)
+        assert result == "prompt"

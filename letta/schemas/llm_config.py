@@ -158,6 +158,14 @@ class LLMConfig(BaseModel):
         description="Model capability constraints for graceful degradation. "
         "Set for models with known limitations (e.g., 1-bit models, small local models).",
     )
+    # Runtime-only field: set by the agent loop after probing tool calling capability.
+    # Not persisted to the database. If None, resolve_tool_calling_mode() must be called.
+    resolved_tool_calling_mode: Optional[str] = Field(
+        None,
+        description="Resolved tool_calling_mode ('native' or 'prompt'). "
+        "Set by the agent loop after probing. Ephemeral — not persisted.",
+        exclude=True,  # Don't include in serialization
+    )
     verbosity: Optional[Literal["low", "medium", "high"]] = Field(
         None,
         description="Soft control for how verbose model output should be, used for GPT-5 models.",
