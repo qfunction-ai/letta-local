@@ -25,7 +25,7 @@ from letta.constants import (
     RETRIEVAL_QUERY_DEFAULT_PAGE_SIZE,
     SUBAGENT_ROLE_TAG,
 )
-from letta.errors import LettaError
+from letta.errors import LettaError, LettaInvalidArgumentError
 from letta.helpers import ToolRulesSolver
 from letta.helpers.datetime_helpers import get_utc_time
 from letta.log import get_logger
@@ -340,6 +340,28 @@ class AgentManager:
         # validate required configs
         if not agent_create.llm_config:
             raise ValueError("llm_config is required")
+
+        # Minimum context window validation — Letta's system prompt requires
+        # at least 4K tokens to function. Models below this threshold will
+        # break in the agent loop.
+        MINIMUM_CONTEXT_WINDOW = 4096
+        if agent_create.llm_config.context_window < MINIMUM_CONTEXT_WINDOW:
+            raise LettaInvalidArgumentError(
+                f"Context window ({agent_create.llm_config.context_window}) is below minimum "
+                f"({MINIMUM_CONTEXT_WINDOW}). Letta's system prompt requires at least "
+                f"{MINIMUM_CONTEXT_WINDOW} tokens."
+            )
+
+        # Warn if the context window is dangerously small — the system prompt
+        # alone (persona, human, tool definitions) typically consumes 2-5K tokens.
+        DANGER_CONTEXT_WINDOW = 8192
+        if agent_create.llm_config.context_window < DANGER_CONTEXT_WINDOW:
+            logger.warning(
+                f"Context window ({agent_create.llm_config.context_window}) is below "
+                f"{DANGER_CONTEXT_WINDOW}. Letta's system prompt typically consumes "
+                f"2-5K tokens, leaving very little room for conversation. "
+                f"Consider using a model with a larger context window for best results."
+            )
 
         # For v1 agents, enforce sane defaults even when reasoning is omitted
         if agent_create.agent_type == AgentType.letta_v1_agent:

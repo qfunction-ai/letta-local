@@ -447,7 +447,15 @@ class OpenAIClient(LLMClientBase):
             text_config_kwargs["verbosity"] = llm_config.verbosity
 
         # Add response_format support for structured outputs via text.format
-        if hasattr(llm_config, "response_format") and llm_config.response_format is not None:
+        # Disable for models with degraded JSON capabilities
+        if (
+            hasattr(llm_config, "constraints")
+            and llm_config.constraints is not None
+            and llm_config.constraints.disable_structured_output
+        ):
+            # Skip structured output — model can't handle json_schema response_format
+            pass
+        elif hasattr(llm_config, "response_format") and llm_config.response_format is not None:
             format_dict = convert_response_format_to_responses_api(llm_config.response_format)
             if format_dict is not None:
                 text_config_kwargs["format"] = format_dict
@@ -549,6 +557,45 @@ class OpenAIClient(LLMClientBase):
 
         request_messages = self._apply_system_override(messages, system)
 
+        # Prompt-based tool calling: embed tool definitions in the system message
+        # instead of using the native tools/tool_choice API fields. This enables
+        # tool calling on models that don't support the tools parameter.
+        # Resolve "auto" mode by probing the model's capability.
+        from letta.llm_api.tool_capability_probe import resolve_tool_calling_mode
+
+        effective_tool_calling_mode = resolve_tool_calling_mode(llm_config)
+        use_prompt_tool_calling = (
+            effective_tool_calling_mode == "prompt" and tools is not None
+        )
+        if use_prompt_tool_calling:
+            from letta.agents.helpers import format_tools_as_text
+
+            tool_count = len(tools)
+            tool_documentation = format_tools_as_text(tools)
+            # Inject tool docs into the system message
+            system_msg = request_messages[0]
+            # Handle both string and list[TextContent] content formats
+            if system_msg.content:
+                if isinstance(system_msg.content, str):
+                    existing_text = system_msg.content
+                elif isinstance(system_msg.content, list):
+                    # Extract text from TextContent list
+                    existing_text = " ".join(
+                        part.text if hasattr(part, "text") else str(part)
+                        for part in system_msg.content
+                    )
+                else:
+                    existing_text = str(system_msg.content)
+            else:
+                existing_text = ""
+            # Set content as a list of TextContent to match the expected format
+            from letta.schemas.letta_message_content import TextContent as LettaTextContent
+            system_msg.content = [LettaTextContent(text=existing_text + "\n\n" + tool_documentation)]
+            request_messages[0] = system_msg
+            # Strip tools from the request — model will call them via text
+            tools = None
+            logger.info(f"Prompt-based tool calling: embedded {tool_count} tool definitions in system prompt")
+
         openai_message_list = [
             cast_message_to_subtype(m)
             for m in PydanticMessage.to_openai_dicts_from_list(
@@ -637,7 +684,15 @@ class OpenAIClient(LLMClientBase):
             data.parallel_tool_calls = llm_config.parallel_tool_calls
 
         # Add response_format support for structured outputs
-        if hasattr(llm_config, "response_format") and llm_config.response_format is not None:
+        # Disable for models with degraded JSON capabilities
+        if (
+            hasattr(llm_config, "constraints")
+            and llm_config.constraints is not None
+            and llm_config.constraints.disable_structured_output
+        ):
+            # Skip structured output — model can't handle json_schema response_format
+            pass
+        elif hasattr(llm_config, "response_format") and llm_config.response_format is not None:
             # For Chat Completions API, we need the full nested structure
             if isinstance(llm_config.response_format, JsonSchemaResponseFormat):
                 # Convert to the OpenAI SDK format
@@ -951,6 +1006,64 @@ class OpenAIClient(LLMClientBase):
         # OpenAI's response structure directly maps to ChatCompletionResponse
         # We just need to instantiate the Pydantic model for validation and type safety.
         chat_completion_response = ChatCompletionResponse(**response_data)
+
+        # Prompt-based tool calling: if the model doesn't support native tool
+        # calling, parse the text content as a tool call JSON.
+        from letta.llm_api.tool_capability_probe import resolve_tool_calling_mode
+
+        effective_tool_calling_mode = resolve_tool_calling_mode(llm_config)
+        if (
+            effective_tool_calling_mode == "prompt"
+            and chat_completion_response.choices
+            and len(chat_completion_response.choices) > 0
+        ):
+            choice = chat_completion_response.choices[0]
+            # Only parse if there's text content and no native tool calls
+            if choice.message.content and not choice.message.tool_calls:
+                from letta.agents.helpers import _safe_load_tool_call_str
+                from letta.utils import get_tool_call_id
+
+                text_content = choice.message.content
+                parsed = _safe_load_tool_call_str(text_content, llm_config=llm_config)
+
+                if parsed and parsed.get("function"):
+                    # Successfully parsed a tool call from text
+                    func_name = parsed["function"]
+                    func_params = parsed.get("params", {})
+                    logger.info(
+                        f"Prompt-based tool calling: parsed tool call "
+                        f"{func_name}({list(func_params.keys())}) from text output"
+                    )
+                    import json
+                    tool_call = ToolCall(
+                        id=get_tool_call_id(),
+                        type="function",
+                        function=FunctionCall(
+                            name=func_name,
+                            arguments=json.dumps(func_params),
+                        ),
+                    )
+                    choice.message.tool_calls = [tool_call]
+                    choice.message.content = None  # Clear text content since it was a tool call
+                    choice.finish_reason = "tool_calls"
+                else:
+                    # No tool call found in text — treat as a send_message fallback
+                    logger.info(
+                        "Prompt-based tool calling: no tool call found in text, "
+                        "falling back to send_message"
+                    )
+                    import json
+                    tool_call = ToolCall(
+                        id=get_tool_call_id(),
+                        type="function",
+                        function=FunctionCall(
+                            name="send_message",
+                            arguments=json.dumps({"message": text_content}),
+                        ),
+                    )
+                    choice.message.tool_calls = [tool_call]
+                    choice.message.content = None
+                    choice.finish_reason = "tool_calls"
 
         # Detect empty responses (no content and no tool calls)
         # Some providers (e.g., OpenRouter/GLM-5) return these instead of an error

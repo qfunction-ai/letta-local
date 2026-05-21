@@ -375,22 +375,77 @@ def generate_step_id(uid: Optional[UUID] = None) -> str:
     return f"step-{uid}"
 
 
-def _safe_load_tool_call_str(tool_call_args_str: str) -> dict:
-    """Lenient JSON → dict with fallback to eval on assertion failure."""
+def _safe_load_tool_call_str(tool_call_args_str: str, llm_config=None) -> dict:
+    """Lenient JSON → dict with fallback repair strategies for degraded models.
+
+    Repair intensity depends on ModelConstraints.json_repair_level:
+    - "none": fail fast, return {} on JSON errors
+    - "basic": try clean_json repair pipeline (default)
+    - "aggressive": also try regex extraction of JSON-like structures
+    """
     # Temp hack to gracefully handle parallel tool calling attempt, only take first one
     if "}{" in tool_call_args_str:
-        tool_call_args_str = tool_call_args_str.split("}{", 1)[0] + "}"
+        # Find the first complete JSON object (starting with {)
+        parts = tool_call_args_str.split("}{", 1)
+        first_part = parts[0]
+        # If the first part doesn't start with {, it's a closing brace from
+        # a previous object — skip it and use the second part
+        if not first_part.strip().startswith("{"):
+            first_part = "{" + parts[1] if len(parts) > 1 else first_part
+        tool_call_args_str = first_part.rstrip("}") + "}"
 
     try:
         tool_args = json.loads(tool_call_args_str)
         if not isinstance(tool_args, dict):
             # Load it again - this is due to sometimes Anthropic returning weird json @caren
             tool_args = json.loads(tool_args)
+        return tool_args
     except json.JSONDecodeError:
-        logger.error("Failed to JSON decode tool call argument string: %s", tool_call_args_str)
-        tool_args = {}
+        pass
 
-    return tool_args
+    # Determine repair level from constraints
+    repair_level = "basic"
+    if llm_config is not None and llm_config.constraints is not None:
+        repair_level = llm_config.constraints.json_repair_level
+
+    if repair_level == "none":
+        logger.error("Failed to JSON decode tool call argument string (repair=none): %s", tool_call_args_str)
+        return {}
+
+    # Basic repair: use the existing clean_json pipeline
+    if repair_level in ("basic", "aggressive"):
+        try:
+            from letta.local_llm.json_parser import clean_json
+            tool_args = clean_json(tool_call_args_str)
+            if isinstance(tool_args, dict):
+                return tool_args
+        except Exception as e:
+            logger.debug(f"clean_json repair failed for tool call: {e}")
+
+    # Aggressive repair: regex extraction of JSON-like structures
+    if repair_level == "aggressive":
+        import re
+        # Try to find a balanced JSON object
+        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', tool_call_args_str)
+        if json_match:
+            try:
+                tool_args = json.loads(json_match.group())
+                if isinstance(tool_args, dict):
+                    return tool_args
+            except json.JSONDecodeError:
+                pass
+
+        # Last resort: try removing common noise characters
+        cleaned = re.sub(r'[\x00-\x1f\x7f]', '', tool_call_args_str)
+        try:
+            tool_args = json.loads(cleaned)
+            if isinstance(tool_args, dict):
+                return tool_args
+        except json.JSONDecodeError:
+            pass
+
+    logger.error("Failed to JSON decode tool call argument string (all repairs failed): %s", tool_call_args_str)
+    return {}
 
 
 def _json_type_matches(value: Any, expected_type: Any) -> bool:
@@ -517,6 +572,55 @@ def _load_last_function_response(in_context_messages: list[Message]):
             except (json.JSONDecodeError, KeyError):
                 raise ValueError(f"Invalid JSON format in message: {text_content}")
     return None
+
+
+def format_tools_as_text(tools: list[dict], include_response_format: bool = True) -> str:
+    """Format OpenAI-style tool schemas as text for prompt-based tool calling.
+
+    Converts the JSON Schema tool definitions into a human-readable text block
+    that can be appended to the system prompt. This is used when the model
+    doesn't support native tool calling (tool_calling_mode == "prompt").
+
+    Args:
+        tools: List of tool dicts in OpenAI function format:
+            [{"type": "function", "function": {"name": ..., "description": ..., "parameters": {...}}}]
+        include_response_format: If True, include instructions on the expected JSON response format.
+
+    Returns:
+        A text block describing the available tools and expected response format.
+    """
+    if not tools:
+        return ""
+
+    lines = []
+    if include_response_format:
+        lines.append(
+            "You have access to the following functions. To call a function, "
+            "respond with a JSON object in this exact format:\n"
+            '{"function": "<function_name>", "params": {<param_name>: <param_value>}}\n'
+        )
+    lines.append("Available functions:")
+
+    for tool in tools:
+        # Handle both {"type": "function", "function": {...}} and bare {"name": ...} formats
+        func = tool.get("function", tool)
+        name = func.get("name", "unknown")
+        desc = func.get("description", "No description provided.")
+        params = func.get("parameters", {})
+        properties = params.get("properties", {})
+        required = params.get("required", [])
+
+        lines.append(f"\n  {name}:")
+        lines.append(f"    description: {desc}")
+        if properties:
+            lines.append("    params:")
+            for param_name, param_schema in properties.items():
+                param_desc = param_schema.get("description", "No description")
+                param_type = param_schema.get("type", "any")
+                req_marker = " (required)" if param_name in required else ""
+                lines.append(f"      {param_name}: {param_desc} [{param_type}{req_marker}]")
+
+    return "\n".join(lines)
 
 
 def _maybe_get_approval_messages(messages: list[Message]) -> Tuple[Message | None, Message | None]:

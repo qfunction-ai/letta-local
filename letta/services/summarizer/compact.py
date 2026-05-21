@@ -179,6 +179,25 @@ async def compact_messages(
     """
     summarizer_config = compaction_settings if compaction_settings else CompactionSettings()
 
+    # If the model has degraded capabilities, force external summarizer instead of
+    # self-compact modes. Small-context models may not have enough room for
+    # summarization in the same context window.
+    if (
+        agent_llm_config.constraints is not None
+        and agent_llm_config.constraints.force_external_summarizer
+        and summarizer_config.mode in ("self_compact_all", "self_compact_sliding_window")
+    ):
+        logger.info(
+            f"Forcing external summarizer for {agent_llm_config.model} "
+            f"(mode was {summarizer_config.mode}, overriding to all)"
+        )
+        summarizer_config = summarizer_config.model_copy(
+            update={
+                "mode": "all",
+                "prompt": get_default_prompt_for_mode("all"),
+            }
+        )
+
     # Build the LLMConfig used for summarization
     summarizer_llm_config = await build_summarizer_llm_config(
         agent_llm_config=agent_llm_config,  # used to set default compaction model

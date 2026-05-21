@@ -236,6 +236,21 @@ class ModelSettings(BaseSettings):
     # lmstudio
     lmstudio_base_url: Optional[str] = None
 
+    # localai
+    localai_base_url: Optional[str] = None
+
+    # llama.cpp server
+    llamacpp_base_url: Optional[str] = None
+
+    # llamafile
+    llamafile_base_url: Optional[str] = None
+
+    # MLX-LM server
+    mlx_base_url: Optional[str] = None
+
+    # generic OpenAI-compatible endpoint
+    openai_compatible_base_url: Optional[str] = None
+
     # openllm
     openllm_auth_type: Optional[str] = None
     openllm_api_key: Optional[str] = None
