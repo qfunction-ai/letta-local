@@ -16,6 +16,58 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+class ModelConstraints(BaseModel):
+    """Declares what a model CANNOT do, enabling graceful degradation.
+
+    Set this on LLMConfig for models with known limitations — small local
+    models, quantized models, 1-bit models, etc. The agent loop and
+    supporting systems check these constraints to avoid requesting
+    capabilities the model doesn't have.
+    """
+
+    # Tool calling
+    tool_calling_mode: Literal["native", "prompt", "auto"] = Field(
+        "auto",
+        description="Tool calling mode. 'native' uses OpenAI-style tool calling, "
+        "'prompt' embeds tools in the system prompt and parses JSON from output, "
+        "'auto' detects based on model capabilities.",
+    )
+    tool_call_retry_count: int = Field(
+        0,
+        description="Number of times to retry on malformed tool calls. "
+        "0 = fail fast, 2-3 = recommended for degraded models.",
+    )
+
+    # Output format
+    disable_structured_output: bool = Field(
+        False,
+        description="Disable structured output (json_schema response_format, strict mode). "
+        "Use for models with degraded JSON generation capabilities.",
+    )
+    disable_streaming: bool = Field(
+        False,
+        description="Force non-streaming mode for models that don't support SSE streaming.",
+    )
+
+    # Context
+    min_context_window: int = Field(
+        4096,
+        description="Minimum viable context window. Agent creation fails below this.",
+    )
+    force_external_summarizer: bool = Field(
+        False,
+        description="Don't use the agent's own model for summarization. "
+        "Force the external summarizer model instead.",
+    )
+
+    # JSON robustness
+    json_repair_level: Literal["none", "basic", "aggressive"] = Field(
+        "basic",
+        description="JSON repair aggressiveness. 'none' = fail fast, "
+        "'basic' = existing repair strategies, 'aggressive' = regex extraction + fuzzy matching.",
+    )
+
+
 class LLMConfig(BaseModel):
     """Configuration for Language Model (LLM) connection and generation parameters.
 
@@ -57,6 +109,11 @@ class LLMConfig(BaseModel):
         "fireworks",
         "openrouter",
         "chatgpt_oauth",
+        "localai",
+        "llamafile",
+        "mlx",
+        "openai_compatible",
+        "bitnet",
     ] = Field(..., description="The endpoint type for the model.")
     model_endpoint: Optional[str] = Field(None, description="The endpoint for the model.")
     provider_name: Optional[str] = Field(None, description="The provider name for the model.")
@@ -96,6 +153,11 @@ class LLMConfig(BaseModel):
         description="Positive values penalize new tokens based on their existing frequency in the text so far, decreasing the model's likelihood to repeat the same line verbatim. From OpenAI: Number between -2.0 and 2.0.",
     )
     compatibility_type: Optional[Literal["gguf", "mlx"]] = Field(None, description="The framework compatibility type for the model.")
+    constraints: Optional[ModelConstraints] = Field(
+        None,
+        description="Model capability constraints for graceful degradation. "
+        "Set for models with known limitations (e.g., 1-bit models, small local models).",
+    )
     verbosity: Optional[Literal["low", "medium", "high"]] = Field(
         None,
         description="Soft control for how verbose model output should be, used for GPT-5 models.",
@@ -204,6 +266,50 @@ class LLMConfig(BaseModel):
         #     values["enable_reasoner"] = True
         #     values["put_inner_thoughts_in_kwargs"] = False
         return values
+
+    @model_validator(mode="after")
+    def apply_default_constraints(self):
+        """Auto-apply ModelConstraints for models with known limitations.
+
+        Small-context models and local inference providers get sensible defaults
+        for degraded operation: forced external summarizer, disabled structured
+        output, tool-call retries, and aggressive JSON repair. This prevents the
+        agent loop from breaking on models that can't handle the full capability set.
+        """
+        if self.constraints is not None:
+            return self
+
+        # Providers that need prompt-based tool calling by default
+        local_provider_types = {"ollama", "vllm", "localai", "llamacpp", "llamafile", "mlx", "openai_compatible", "bitnet"}
+        endpoint_type = (self.model_endpoint_type or "").lower()
+
+        if endpoint_type in local_provider_types:
+            logger.info(
+                f"Auto-applying tool calling constraints for {self.model} "
+                f"(provider_type={endpoint_type})"
+            )
+            self.constraints = ModelConstraints(
+                tool_calling_mode="auto",
+                disable_structured_output=True,
+                tool_call_retry_count=3,
+                json_repair_level="aggressive",
+            )
+            return self
+
+        context_window = self.context_window
+        if context_window < 8192:
+            logger.info(
+                f"Auto-applying degraded model constraints for {self.model} "
+                f"(context_window={context_window})"
+            )
+            self.constraints = ModelConstraints(
+                force_external_summarizer=True,
+                disable_structured_output=True,
+                tool_call_retry_count=2,
+                json_repair_level="aggressive",
+            )
+
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -370,11 +476,13 @@ class LLMConfig(BaseModel):
             GoogleVertexModelSettings,
             GroqModelSettings,
             ModelSettings,
+            OllamaModelSettings,
             OpenAIModelSettings,
             OpenAIReasoning,
             OpenRouterModelSettings,
             SGLangModelSettings,
             TogetherModelSettings,
+            VLLMModelSettings,
             XAIModelSettings,
             ZAIModelSettings,
         )
@@ -478,6 +586,20 @@ class LLMConfig(BaseModel):
             return BasetenModelSettings(
                 max_output_tokens=self.max_tokens or 4096,
                 temperature=self.temperature,
+            )
+        elif self.model_endpoint_type == "ollama":
+            return OllamaModelSettings(
+                max_output_tokens=self.max_tokens or 2048,
+                temperature=self.temperature,
+                reasoning=OpenAIReasoning(reasoning_effort="none"),
+                strict=False,
+            )
+        elif self.model_endpoint_type == "vllm":
+            return VLLMModelSettings(
+                max_output_tokens=self.max_tokens or 4096,
+                temperature=self.temperature,
+                reasoning=OpenAIReasoning(reasoning_effort="none"),
+                strict=False,
             )
         elif self.model_endpoint_type == "minimax":
             # MiniMax uses Anthropic-compatible API

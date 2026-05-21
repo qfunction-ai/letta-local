@@ -261,6 +261,43 @@ class OpenAIModelSettings(ModelSettings):
         }
 
 
+class OllamaModelSettings(OpenAIModelSettings):
+    """Ollama model configuration (OpenAI-compatible local inference with prompt-based tool calling fallback)."""
+
+    provider_type: Literal[ProviderType.ollama] = Field(ProviderType.ollama, description="The type of the provider.")
+    # Ollama models typically do not support native tool calling;
+    # prompt-based tool calling is the default fallback
+    strict: bool = Field(
+        False,
+        description="Ollama models do not support strict tool calling mode.",
+    )
+
+    def _to_legacy_config_params(self) -> dict:
+        params = super()._to_legacy_config_params()
+        params["strict"] = self.strict
+        return params
+
+
+class VLLMModelSettings(OpenAIModelSettings):
+    """vLLM model configuration (OpenAI-compatible local inference server).
+
+    vLLM supports native tool calling for models that implements it (e.g., Qwen2.5,
+    Gemma 4). For models that don't, the auto-detection probe falls back to
+    prompt-based tool calling.
+    """
+
+    provider_type: Literal[ProviderType.vllm] = Field(ProviderType.vllm, description="The type of the provider.")
+    strict: bool = Field(
+        False,
+        description="vLLM does not enforce strict tool calling schema validation.",
+    )
+
+    def _to_legacy_config_params(self) -> dict:
+        params = super()._to_legacy_config_params()
+        params["strict"] = self.strict
+        return params
+
+
 class SGLangModelSettings(OpenAIModelSettings):
     """SGLang model configuration (OpenAI-compatible runtime with SGLang-specific parsing)."""
 
@@ -550,6 +587,8 @@ class BasetenModelSettings(ModelSettings):
 ModelSettingsUnion = Annotated[
     Union[
         OpenAIModelSettings,
+        OllamaModelSettings,
+        VLLMModelSettings,
         SGLangModelSettings,
         AnthropicModelSettings,
         GoogleAIModelSettings,
