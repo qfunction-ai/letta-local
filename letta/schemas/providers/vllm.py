@@ -40,7 +40,7 @@ class VLLMProvider(Provider):
             configs.append(
                 LLMConfig(
                     model=model_name,
-                    model_endpoint_type="openai",  # TODO (cliandy): this was previous vllm for the completions provider, why?
+                    model_endpoint_type="vllm",
                     model_endpoint=base_url,
                     model_wrapper=self.default_prompt_formatter,
                     context_window=model["max_model_len"],

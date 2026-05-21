@@ -183,6 +183,7 @@ class Provider(ProviderBase):
             AzureProvider,
             BasetenProvider,
             BedrockProvider,
+            BitNetProvider,
             CerebrasProvider,
             ChatGPTOAuthProvider,
             DeepSeekProvider,
@@ -190,10 +191,15 @@ class Provider(ProviderBase):
             GoogleVertexProvider,
             GroqProvider,
             LettaProvider,
+            LlamaCppProvider,
+            LlamafileProvider,
             LMStudioOpenAIProvider,
+            LocalAIProvider,
             MiniMaxProvider,
             MistralProvider,
+            MLXProvider,
             OllamaProvider,
+            OpenAICompatibleProvider,
             OpenAIProvider,
             OpenRouterProvider,
             SGLangProvider,
@@ -254,6 +260,18 @@ class Provider(ProviderBase):
                 return MiniMaxProvider(**self.model_dump(exclude_none=True))
             case ProviderType.openrouter:
                 return OpenRouterProvider(**self.model_dump(exclude_none=True))
+            case ProviderType.localai:
+                return LocalAIProvider(**self.model_dump(exclude_none=True))
+            case ProviderType.llamacpp:
+                return LlamaCppProvider(**self.model_dump(exclude_none=True))
+            case ProviderType.llamafile:
+                return LlamafileProvider(**self.model_dump(exclude_none=True))
+            case ProviderType.mlx:
+                return MLXProvider(**self.model_dump(exclude_none=True))
+            case ProviderType.openai_compatible:
+                return OpenAICompatibleProvider(**self.model_dump(exclude_none=True))
+            case ProviderType.bitnet:
+                return BitNetProvider(**self.model_dump(exclude_none=True))
             case _:
                 raise ValueError(f"Unknown provider type: {self.provider_type}")
 

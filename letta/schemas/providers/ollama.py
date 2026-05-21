@@ -44,12 +44,17 @@ class OllamaProvider(OpenAIProvider):
         """
         return self.base_url if self.base_url.endswith("/v1") else f"{self.base_url.rstrip('/')}" + "/v1"
 
-    async def list_llm_models_async(self) -> list[LLMConfig]:
+    async def list_llm_models_async(self, include_without_tools: bool = False) -> list[LLMConfig]:
         """List available LLM Models from Ollama.
 
         Note: Older Ollama versions do not expose a "capabilities" field on /api/show.
         We therefore avoid filtering on capabilities and instead infer support from
         /api/show model_info (falling back to safe defaults).
+
+        Args:
+            include_without_tools: If True, include models that don't declare
+                tool calling capability. These models are included with degraded
+                ModelConstraints (prompt-based tool calling, aggressive JSON repair).
 
         https://github.com/ollama/ollama/blob/main/docs/api.md#list-local-models
         """
@@ -76,9 +81,15 @@ class OllamaProvider(OpenAIProvider):
             caps = details.get("capabilities") or []
             if not isinstance(caps, list):
                 caps = []
-            if "tools" not in [str(c).lower() for c in caps]:
-                # Only include models that declare tools support
-                continue
+            caps_lower = [str(c).lower() for c in caps]
+            supports_tools = "tools" in caps_lower
+
+            if not supports_tools:
+                if not include_without_tools:
+                    logger.warning(f"Ollama model {model_name} does not declare tools capability, skipping")
+                    continue
+                else:
+                    logger.info(f"Ollama model {model_name} lacks tools capability — including with degraded constraints")
 
             # Derive context window from /api/show model_info if available
             context_window = None
@@ -98,12 +109,25 @@ class OllamaProvider(OpenAIProvider):
             # === Capability stubs ===
             # Compute support flags from /api/show capabilities. These are not
             # yet plumbed through LLMConfig, but are captured here for later use.
-            caps_lower = [str(c).lower() for c in caps]
-            supports_tools = "tools" in caps_lower
             supports_thinking = "thinking" in caps_lower
             supports_vision = "vision" in caps_lower
             supports_completion = "completion" in caps_lower
-            _ = (supports_tools, supports_thinking, supports_vision, supports_completion)
+            _ = (supports_thinking, supports_vision, supports_completion)
+
+            # Build ModelConstraints for models without tool calling
+            from letta.schemas.llm_config import ModelConstraints
+            if not supports_tools:
+                constraints = ModelConstraints(
+                    tool_calling_mode="prompt",
+                    tool_call_retry_count=3,
+                    disable_structured_output=True,
+                    json_repair_level="aggressive",
+                    # Also force external summarizer if context is too small
+                    # for the model to summarize its own context
+                    force_external_summarizer=context_window < 8192,
+                )
+            else:
+                constraints = None
 
             configs.append(
                 # Legacy Ollama using raw generate
@@ -129,6 +153,7 @@ class OllamaProvider(OpenAIProvider):
                     max_tokens=self.get_default_max_output_tokens(model_name),
                     provider_name=self.name,
                     provider_category=self.provider_category,
+                    constraints=constraints,
                     # put_inner_thoughts_in_kwargs=True,
                     # enable_reasoner=supports_thinking,
                 )
