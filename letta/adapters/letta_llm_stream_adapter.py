@@ -94,6 +94,15 @@ class LettaLLMStreamAdapter(LettaLLMAdapter):
         self.request_data = request_data
 
         # Instantiate streaming interface
+        # Determine tool_calling_mode for prompt-based tool calling support
+        tool_calling_mode = None
+        if (
+            hasattr(self.llm_config, "constraints")
+            and self.llm_config.constraints is not None
+            and hasattr(self.llm_config.constraints, "tool_calling_mode")
+        ):
+            tool_calling_mode = self.llm_config.constraints.tool_calling_mode
+
         if self.llm_config.model_endpoint_type in [ProviderType.anthropic, ProviderType.bedrock, ProviderType.minimax]:
             self.interface = AnthropicStreamingInterface(
                 use_assistant_message=use_assistant_message,
@@ -107,6 +116,14 @@ class LettaLLMStreamAdapter(LettaLLMAdapter):
             ProviderType.openrouter,
             ProviderType.baseten,
             ProviderType.fireworks,
+            # Local inference providers with OpenAI-compatible streaming
+            ProviderType.ollama,
+            ProviderType.vllm,
+            ProviderType.openai_compatible,
+            ProviderType.localai,
+            ProviderType.llamacpp,
+            ProviderType.llamafile,
+            ProviderType.mlx,
         ]:
             # For non-v1 agents, always use Chat Completions streaming interface
             self.interface = OpenAIStreamingInterface(
@@ -118,6 +135,7 @@ class LettaLLMStreamAdapter(LettaLLMAdapter):
                 requires_approval_tools=requires_approval_tools,
                 run_id=self.run_id,
                 step_id=step_id,
+                tool_calling_mode=tool_calling_mode,
             )
         else:
             raise ValueError(f"Streaming not supported for provider {self.llm_config.model_endpoint_type}")

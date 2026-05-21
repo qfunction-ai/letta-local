@@ -93,6 +93,7 @@ class OpenAIStreamingInterface:
         run_id: str | None = None,
         step_id: str | None = None,
         cancellation_event: Optional["asyncio.Event"] = None,
+        tool_calling_mode: str | None = None,
     ):
         self.use_assistant_message = use_assistant_message
 
@@ -148,6 +149,14 @@ class OpenAIStreamingInterface:
 
         self.requires_approval_tools = requires_approval_tools
 
+        # Prompt-based tool calling mode: when "prompt", tool calls are
+        # expected in text content rather than native tool_call deltas.
+        self.tool_calling_mode = tool_calling_mode
+
+        # Prompt-based tool calling mode: when "prompt", tool calls are
+        # expected in text content rather than native tool_call deltas.
+        self.tool_calling_mode = tool_calling_mode
+
         # Diagnostic: track last event for debugging
         self.last_event_type: str | None = None
         self.total_events_received: int = 0
@@ -192,17 +201,66 @@ class OpenAIStreamingInterface:
         return "".join(self._current_function_arguments_parts)
 
     def get_tool_call_object(self) -> ToolCall:
-        """Useful for agent loop"""
+        """Useful for agent loop.
+
+        When prompt-based tool calling is active and no native tool calls
+        were found in the stream, parses the accumulated text content as
+        a JSON tool call (same logic as convert_response_to_chat_completion).
+        """
         function_name = self.last_flushed_function_name if self.last_flushed_function_name else self._get_function_name_buffer()
-        if not function_name:
-            raise ValueError("No tool call ID available")
-        tool_call_id = self.last_flushed_function_id if self.last_flushed_function_id else self._get_function_id_buffer()
-        if not tool_call_id:
-            raise ValueError("No tool call ID available")
-        return ToolCall(
-            id=tool_call_id,
-            function=FunctionCall(arguments=self._get_current_function_arguments(), name=function_name),
-        )
+
+        # Native tool calls found in stream — return as usual
+        if function_name:
+            tool_call_id = self.last_flushed_function_id if self.last_flushed_function_id else self._get_function_id_buffer()
+            if not tool_call_id:
+                raise ValueError("No tool call ID available")
+            return ToolCall(
+                id=tool_call_id,
+                function=FunctionCall(arguments=self._get_current_function_arguments(), name=function_name),
+            )
+
+        # Prompt-based tool calling: parse text content as a JSON tool call
+        if self.tool_calling_mode == "prompt":
+            from letta.agents.helpers import _safe_load_tool_call_str
+            from letta.utils import get_tool_call_id
+
+            # Concatenate all content messages into a single string
+            text_content = "".join(self.content_buffer).strip()
+
+            if text_content:
+                parsed = _safe_load_tool_call_str(text_content)
+                if parsed and parsed.get("function"):
+                    # Successfully parsed a tool call from text
+                    import json
+                    func_name = parsed["function"]
+                    func_params = parsed.get("params", {})
+                    logger.info(
+                        f"Prompt-based tool calling (streaming): parsed tool call "
+                        f"{func_name}({list(func_params.keys())}) from text output"
+                    )
+                    return ToolCall(
+                        id=get_tool_call_id(),
+                        function=FunctionCall(
+                            name=func_name,
+                            arguments=json.dumps(func_params),
+                        ),
+                    )
+                else:
+                    # No tool call found — fall back to send_message
+                    import json
+                    logger.info(
+                        "Prompt-based tool calling (streaming): no tool call found "
+                        "in text, falling back to send_message"
+                    )
+                    return ToolCall(
+                        id=get_tool_call_id(),
+                        function=FunctionCall(
+                            name="send_message",
+                            arguments=json.dumps({"message": text_content}),
+                        ),
+                    )
+
+        raise ValueError("No tool call found in stream")
 
     def get_usage_statistics(self) -> "LettaUsageStatistics":
         """Extract usage statistics from accumulated streaming data.
@@ -591,6 +649,7 @@ class SimpleOpenAIStreamingInterface:
         run_id: str | None = None,
         step_id: str | None = None,
         cancellation_event: Optional["asyncio.Event"] = None,
+        tool_calling_mode: str | None = None,
     ):
         self.run_id = run_id
         self.step_id = step_id
@@ -636,6 +695,10 @@ class SimpleOpenAIStreamingInterface:
 
         self.requires_approval_tools = requires_approval_tools
 
+        # Prompt-based tool calling mode: when "prompt", tool calls are
+        # expected in text content rather than native tool_call deltas.
+        self.tool_calling_mode = tool_calling_mode
+
     def get_content(self) -> list[TextContent | OmittedReasoningContent | ReasoningContent]:
         shown_omitted = False
         merged_messages = []
@@ -671,19 +734,73 @@ class SimpleOpenAIStreamingInterface:
         return merged_messages
 
     def get_tool_call_objects(self) -> list[ToolCall]:
-        """Return finalized tool calls (parallel supported)."""
-        if not self._tool_calls_acc:
-            return []
-        ordered_indices = [i for i in self._tool_call_start_order if i in self._tool_calls_acc]
-        result: list[ToolCall] = []
-        for idx in ordered_indices:
-            ctx = self._tool_calls_acc[idx]
-            name = "".join(ctx.get("name_parts", [])) if "name_parts" in ctx else ctx.get("name", "")
-            args = "".join(ctx.get("arguments_parts", [])) if "arguments_parts" in ctx else ctx.get("arguments", "")
-            call_id = ctx["id_parts"][0] if ctx.get("id_parts") else ctx.get("id", "")
-            if call_id and name:
-                result.append(ToolCall(id=call_id, function=FunctionCall(arguments=args or "", name=name)))
-        return result
+        """Return finalized tool calls (parallel supported).
+
+        When prompt-based tool calling is active and no native tool calls
+        were found in the stream, parses the accumulated text content as
+        a JSON tool call (same logic as convert_response_to_chat_completion).
+        """
+        # Native tool calls found in stream
+        if self._tool_calls_acc:
+            ordered_indices = [i for i in self._tool_call_start_order if i in self._tool_calls_acc]
+            result: list[ToolCall] = []
+            for idx in ordered_indices:
+                ctx = self._tool_calls_acc[idx]
+                name = "".join(ctx.get("name_parts", [])) if "name_parts" in ctx else ctx.get("name", "")
+                args = "".join(ctx.get("arguments_parts", [])) if "arguments_parts" in ctx else ctx.get("arguments", "")
+                call_id = ctx["id_parts"][0] if ctx.get("id_parts") else ctx.get("id", "")
+                if call_id and name:
+                    result.append(ToolCall(id=call_id, function=FunctionCall(arguments=args or "", name=name)))
+            return result
+
+        # Prompt-based tool calling: parse text content as a JSON tool call
+        if self.tool_calling_mode == "prompt":
+            from letta.agents.helpers import _safe_load_tool_call_str
+            from letta.utils import get_tool_call_id
+
+            # Concatenate all text content from content_messages
+            text_parts = []
+            for msg in self.content_messages:
+                if isinstance(msg, AssistantMessage):
+                    if isinstance(msg.content, list):
+                        text_parts.append("".join([c.text for c in msg.content]))
+                    else:
+                        text_parts.append(msg.content)
+            text_content = "".join(text_parts).strip()
+
+            if text_content:
+                parsed = _safe_load_tool_call_str(text_content)
+                if parsed and parsed.get("function"):
+                    import json
+                    func_name = parsed["function"]
+                    func_params = parsed.get("params", {})
+                    logger.info(
+                        f"Prompt-based tool calling (streaming): parsed tool call "
+                        f"{func_name}({list(func_params.keys())}) from text output"
+                    )
+                    return [ToolCall(
+                        id=get_tool_call_id(),
+                        function=FunctionCall(
+                            name=func_name,
+                            arguments=json.dumps(func_params),
+                        ),
+                    )]
+                else:
+                    # No tool call found — fall back to send_message
+                    import json
+                    logger.info(
+                        "Prompt-based tool calling (streaming): no tool call found "
+                        "in text, falling back to send_message"
+                    )
+                    return [ToolCall(
+                        id=get_tool_call_id(),
+                        function=FunctionCall(
+                            name="send_message",
+                            arguments=json.dumps({"message": text_content}),
+                        ),
+                    )]
+
+        return []
 
     def get_tool_call_object(self) -> ToolCall:
         """Backwards-compatible single tool call accessor (first tool if multiple)."""

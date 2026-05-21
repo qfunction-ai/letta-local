@@ -95,6 +95,14 @@ class SimpleLLMStreamAdapter(LettaLLMStreamAdapter):
             ProviderType.baseten,
             ProviderType.fireworks,
             ProviderType.chatgpt_oauth,
+            # Local inference providers with OpenAI-compatible streaming
+            ProviderType.ollama,
+            ProviderType.vllm,
+            ProviderType.openai_compatible,
+            ProviderType.localai,
+            ProviderType.llamacpp,
+            ProviderType.llamafile,
+            ProviderType.mlx,
         ]:
             # Decide interface based on payload shape
             use_responses = "input" in request_data and "messages" not in request_data
@@ -105,6 +113,18 @@ class SimpleLLMStreamAdapter(LettaLLMStreamAdapter):
             if self.llm_config.model_endpoint_type == ProviderType.chatgpt_oauth:
                 use_responses = True
                 is_proxy = False
+
+            # Determine tool_calling_mode for prompt-based tool calling support
+            # Resolve "auto" by probing the model's capability
+            from letta.llm_api.tool_capability_probe import resolve_tool_calling_mode
+
+            tool_calling_mode = None
+            if (
+                hasattr(self.llm_config, "constraints")
+                and self.llm_config.constraints is not None
+                and hasattr(self.llm_config.constraints, "tool_calling_mode")
+            ):
+                tool_calling_mode = resolve_tool_calling_mode(self.llm_config)
 
             if use_responses and not is_proxy:
                 self.interface = SimpleOpenAIResponsesStreamingInterface(
@@ -126,6 +146,7 @@ class SimpleLLMStreamAdapter(LettaLLMStreamAdapter):
                     run_id=self.run_id,
                     step_id=step_id,
                     cancellation_event=cancellation_event,
+                    tool_calling_mode=tool_calling_mode,
                 )
         elif self.llm_config.model_endpoint_type in [ProviderType.google_ai, ProviderType.google_vertex]:
             self.interface = SimpleGeminiStreamingInterface(
