@@ -1089,6 +1089,19 @@ class LettaAgentV3(LettaAgentV2):
                     active_llm_config = self.agent_state.llm_config
                     active_llm_client = self.llm_client
 
+                # Prompt-based tool calling mode: for models that don't support
+                # native tool calling, tools are embedded in the system prompt
+                # and the text output is parsed as a tool call JSON.
+                # Resolve "auto" mode by probing the model's capability.
+                from letta.llm_api.tool_capability_probe import resolve_tool_calling_mode
+
+                effective_tool_calling_mode = resolve_tool_calling_mode(active_llm_config)
+                if effective_tool_calling_mode == "prompt":
+                    self.logger.info(
+                        f"Prompt-based tool calling active for {active_llm_config.model}. "
+                        f"Tools will be embedded in the system prompt and parsed from text output."
+                    )
+
                 force_tool_call = valid_tools[0]["name"] if len(valid_tools) == 1 and self._require_tool_call else None
                 for llm_request_attempt in range(summarizer_settings.max_summarizer_retries + 1):
                     try:
@@ -1772,9 +1785,40 @@ class LettaAgentV3(LettaAgentV2):
         for tc in tool_calls:
             call_id = tc.id or f"call_{uuid.uuid4().hex[:8]}"
             name = tc.function.name
-            args = _safe_load_tool_call_str(tc.function.arguments)
+            raw_args_str = tc.function.arguments or ""
+            args = _safe_load_tool_call_str(tc.function.arguments, llm_config=active_llm_config)
             args.pop(REQUEST_HEARTBEAT_PARAM, None)
             args.pop(INNER_THOUGHTS_KWARG, None)
+
+            # Detect malformed tool call arguments: the model attempted a tool
+            # call but the JSON was unparseable even after repair. Instead of
+            # executing with empty args (which will fail on required params),
+            # inject a structured error so the model can retry.
+            if not args and raw_args_str and active_llm_config.constraints and active_llm_config.constraints.tool_call_retry_count > 0:
+                retry_count = getattr(self, "_tool_call_retry_count", 0)
+                max_retries = active_llm_config.constraints.tool_call_retry_count
+                if retry_count < max_retries:
+                    self._tool_call_retry_count = retry_count + 1
+                    exec_specs.append(
+                        {
+                            "id": call_id,
+                            "name": name,
+                            "args": {},
+                            "violated": False,
+                            "error": (
+                                f"Tool call JSON parsing failed. Your tool call arguments were malformed JSON "
+                                f"that could not be repaired. Please retry the tool call with valid JSON. "
+                                f"Raw arguments: {raw_args_str[:200]}"
+                            ),
+                        }
+                    )
+                    continue
+                else:
+                    self._tool_call_retry_count = 0
+                    self.logger.warning(
+                        f"Tool call retry limit ({max_retries}) exceeded for {name}. "
+                        f"Proceeding with empty args."
+                    )
 
             # Validate against allowed tools
             tool_rule_violated = name not in valid_tool_names and not is_approval_response
