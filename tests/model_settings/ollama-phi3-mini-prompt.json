@@ -1,0 +1,17 @@
+{
+  "handle": "ollama/phi3:mini",
+  "model_settings": {
+    "provider_type": "openai",
+    "model_endpoint_type": "ollama",
+    "model_endpoint": "http://localhost:11434/v1",
+    "context_window": 131072,
+    "temperature": 0.7,
+    "max_output_tokens": 2048,
+    "constraints": {
+      "tool_calling_mode": "prompt",
+      "tool_call_retry_count": 3,
+      "disable_structured_output": true,
+      "json_repair_level": "aggressive"
+    }
+  }
+}
