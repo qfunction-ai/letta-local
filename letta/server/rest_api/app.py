@@ -256,9 +256,10 @@ async def lifespan(app_: FastAPI):
     # Initialize EcoLogits for emissions tracking (optional dependency)
     try:
         from letta.emissions.ecologits_bridge import init_ecologits
+        from letta.settings import emissions_settings
 
-        if settings.track_emissions and init_ecologits(zone=settings.ecologits_default_zone):
-            logger.info(f"[Worker {worker_id}] EcoLogits initialized (zone={settings.ecologits_default_zone})")
+        if emissions_settings.track_emissions and init_ecologits(zone=emissions_settings.ecologits_default_zone):
+            logger.info(f"[Worker {worker_id}] EcoLogits initialized (zone={emissions_settings.ecologits_default_zone})")
         else:
             logger.info(f"[Worker {worker_id}] EcoLogits not available, falling back to size-class estimator")
     except Exception as e:

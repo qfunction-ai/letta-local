@@ -229,50 +229,6 @@ class LLMConfig(BaseModel):
         "Used by the SGLang native adapter to parse tool calls from raw model output.",
     )
 
-    # Emissions tracking
-    electricity_mix_zone: Optional[str] = Field(
-        None,
-        description="Grid carbon intensity zone for emissions estimation. "
-        "ISO 3166-1 alpha-2 country code (e.g., 'SE', 'FI', 'US') or "
-        "a sub-region key (e.g., 'US-OR', 'US-OR-BPA'). "
-        "If None, uses provider datacenter location (cloud) or 'WOR' world average.",
-    )
-    grid_intensity_gco2e_per_kwh: Optional[float] = Field(
-        None,
-        description="Override grid carbon intensity in gCO2e/kWh. "
-        "If set, takes priority over electricity_mix_zone lookup.",
-    )
-    gpu_power_watts: Optional[float] = Field(
-        None,
-        description="GPU TDP in watts for local inference energy estimation. "
-        "E.g., 300 for A100, 450 for H100, 150 for RTX 4090.",
-    )
-    model_tokens_per_second: Optional[float] = Field(
-        None,
-        description="Measured tokens per second for local inference. "
-        "Used with gpu_power_watts for direct energy estimation.",
-    )
-    enable_hardware_monitor: Optional[bool] = Field(
-        None,
-        description="Enable CodeCarbon GPU power measurement for local inference. "
-        "Requires --gpus all and /sys/class/powercap bind mount in Docker. "
-        "None = auto-detect (enable if pynvml available and GPU accessible).",
-    )
-    gpu_metrics_url: Optional[str] = Field(
-        None,
-        description="URL of GPU metrics sidecar on the inference host. "
-        "Supports nvidia-gpu-metrics-api (http://host:8000/gpu), "
-        "DCGM-Exporter Prometheus endpoint (http://host:9400/metrics), "
-        "or nvidia-smi-web/agent (http://host:8000/status). "
-        "Takes priority over CodeCarbon and size-class estimates.",
-    )
-    real_time_grid_api: Optional[str] = Field(
-        None,
-        description="Real-time grid carbon intensity API. "
-        "'electricity_maps' or 'watttime'. "
-        "Requires API key in environment. Falls back to static averages on failure.",
-    )
-
     @model_validator(mode="before")
     @classmethod
     def redirect_deprecated_google_models(cls, values):

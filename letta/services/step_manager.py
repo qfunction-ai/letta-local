@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 
 from letta.helpers.singleton import singleton
 from letta.log import get_logger
-from letta.settings import settings
 
 logger = get_logger(__name__)
 from letta.orm.errors import NoResultFound
@@ -450,50 +449,25 @@ class StepManager:
             step.prompt_tokens = usage.prompt_tokens
             step.total_tokens = usage.total_tokens
 
-            # Emissions tracking: estimate emissions for this step
-            if settings.track_emissions and step.prompt_tokens and step.completion_tokens:
-                try:
-                    from letta.emissions.tracker import EmissionsTracker
-                    from letta.emissions.ecologits_bridge import extract_impacts
+            # Emissions tracking: observer of the agent loop, not a participant.
+            # estimate_step_emissions reads deployment-level config from
+            # emissions_settings and returns an EmissionsRecord dict.
+            # Summaries are computed on demand from step records, not stored.
+            try:
+                from letta.settings import emissions_settings
 
-                    # Get emissions config from the provider if available
-                    grid_intensity = None
-                    electricity_mix_zone = None
-                    gpu_power_watts = None
-                    model_tokens_per_second = None
-                    gpu_metrics_url = None
+                if emissions_settings.track_emissions and step.prompt_tokens and step.completion_tokens:
+                    from letta.emissions.tracker import estimate_step_emissions
 
-                    # Try to get provider-level emissions config
-                    if step.provider_id:
-                        from letta.orm.provider import Provider as ProviderModel
-                        provider = await session.get(ProviderModel, step.provider_id)
-                        if provider and hasattr(provider, "llm_config"):
-                            llm_config = provider.llm_config
-                            if hasattr(llm_config, "grid_intensity_gco2e_per_kwh"):
-                                grid_intensity = llm_config.grid_intensity_gco2e_per_kwh
-                            if hasattr(llm_config, "electricity_mix_zone"):
-                                electricity_mix_zone = llm_config.electricity_mix_zone
-                            if hasattr(llm_config, "gpu_power_watts"):
-                                gpu_power_watts = llm_config.gpu_power_watts
-                            if hasattr(llm_config, "model_tokens_per_second"):
-                                model_tokens_per_second = llm_config.model_tokens_per_second
-                            if hasattr(llm_config, "gpu_metrics_url"):
-                                gpu_metrics_url = llm_config.gpu_metrics_url
-
-                    tracker = EmissionsTracker()
-                    record = tracker.estimate_and_record(
+                    record = estimate_step_emissions(
                         model_name=step.model or "unknown",
                         prompt_tokens=step.prompt_tokens,
                         completion_tokens=step.completion_tokens,
-                        grid_intensity_gco2e_per_kwh=grid_intensity,
-                        electricity_mix_zone=electricity_mix_zone,
-                        gpu_power_watts=gpu_power_watts,
-                        model_tokens_per_second=model_tokens_per_second,
-                        agent_id=step.agent_id,
                     )
-                    step.emissions = record.model_dump()
-                except Exception as e:
-                    logger.warning(f"Failed to estimate emissions for step {step_id}: {e}")
+                    if record is not None:
+                        step.emissions = record.model_dump()
+            except Exception as e:
+                logger.warning(f"Failed to estimate emissions for step {step_id}: {e}")
             if stop_reason:
                 step.stop_reason = stop_reason.stop_reason
 

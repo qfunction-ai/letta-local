@@ -483,24 +483,6 @@ class Settings(BaseSettings):
         description="When true, prevents fallback to default actor in get_actor_or_default_async. Raises NoResultFound if actor_id is None.",
     )
 
-    # Emissions tracking
-    track_emissions: bool = Field(
-        default=True,
-        description="Enable per-request emissions estimation for all LLM calls.",
-    )
-    ecologits_default_zone: str = Field(
-        default="WOR",
-        description="Default EcoLogits electricity_mix_zone (ISO 3166-1 alpha-3). Used at server startup.",
-    )
-    electricity_maps_api_key: Optional[str] = Field(
-        default=None,
-        description="Electricity Maps API key for real-time grid carbon intensity lookup.",
-    )
-    watttime_api_key: Optional[str] = Field(
-        default=None,
-        description="WattTime API key for real-time grid carbon intensity lookup.",
-    )
-
     @property
     def letta_pg_uri(self) -> str:
         if self.pg_uri:
@@ -679,3 +661,59 @@ summarizer_settings = SummarizerSettings()
 log_settings = LogSettings()
 telemetry_settings = TelemetrySettings()
 readiness_settings = ReadinessSettings()
+
+
+class EmissionsSettings(BaseSettings):
+    """Infrastructure-level emissions tracking configuration.
+
+    These are deployment properties, not model properties. A model doesn't have
+    a grid zone — the server it runs on does. Read via env vars with
+    LETTA_EMISSIONS_ prefix.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="letta_emissions_", extra="ignore")
+
+    track_emissions: bool = Field(
+        default=True,
+        description="Enable per-request emissions estimation for all LLM calls.",
+    )
+    electricity_mix_zone: Optional[str] = Field(
+        default=None,
+        description="Grid carbon intensity zone (ISO 3166-1 alpha-2 or sub-region). "
+        "e.g. 'SE', 'US-OR', 'US-OR-BPA'. None = world average.",
+    )
+    grid_intensity_gco2e_per_kwh: Optional[float] = Field(
+        default=None,
+        description="Override grid carbon intensity in gCO2e/kWh. Takes priority over zone lookup.",
+    )
+    gpu_power_watts: Optional[float] = Field(
+        default=None,
+        description="GPU TDP in watts for local inference energy estimation.",
+    )
+    model_tokens_per_second: Optional[float] = Field(
+        default=None,
+        description="Measured tokens/second for local inference.",
+    )
+    gpu_metrics_url: Optional[str] = Field(
+        default=None,
+        description="URL of GPU metrics sidecar (nvidia-gpu-metrics-api, DCGM-Exporter, or nvidia-smi-web).",
+    )
+    enable_hardware_monitor: bool = Field(
+        default=False,
+        description="Enable CodeCarbon hardware measurement. Requires --gpus all and /sys/class/powercap.",
+    )
+    ecologits_default_zone: str = Field(
+        default="WOR",
+        description="EcoLogits zone for server startup (ISO 3166-1 alpha-3).",
+    )
+    electricity_maps_api_key: Optional[str] = Field(
+        default=None,
+        description="Electricity Maps API key for real-time grid carbon intensity.",
+    )
+    watttime_api_key: Optional[str] = Field(
+        default=None,
+        description="WattTime API key for real-time grid carbon intensity.",
+    )
+
+
+emissions_settings = EmissionsSettings()

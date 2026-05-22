@@ -71,10 +71,8 @@ class TestEstimateFromSizeClass:
             grid_intensity_gco2e_per_kwh=37,
             electricity_mix_zone="SE",
         )
-        # Same energy, but Sweden grid => much lower emissions
         assert record.energy_kwh > 0
         assert record.emissions_gco2e > 0
-        # Sweden emissions should be ~7x lower than Virginia
         va_record = estimate_from_size_class(
             model_name="gpt-4",
             prompt_tokens=1000,
@@ -84,7 +82,7 @@ class TestEstimateFromSizeClass:
         assert record.emissions_gco2e < va_record.emissions_gco2e / 5
 
     def test_manual_math_medium_model(self):
-        """Verify the math from the plan: 1000 input + 500 output on medium model."""
+        """Verify the math: 1000 input + 500 output on medium model."""
         record = estimate_from_size_class(
             model_name="llama-3-8b",
             prompt_tokens=1000,
@@ -92,8 +90,6 @@ class TestEstimateFromSizeClass:
             grid_intensity_gco2e_per_kwh=37,
             electricity_mix_zone="SE",
         )
-        # Medium: input=0.1J, output=0.25J
-        # energy = (1000*0.1 + 500*0.25) J = 225 J = 6.25e-5 kWh
         expected_energy_j = 1000 * 0.1 + 500 * 0.25  # 225 J
         expected_energy_kwh = expected_energy_j / JOULES_PER_KWH
         assert abs(record.energy_kwh - expected_energy_kwh) < 1e-10
@@ -112,9 +108,7 @@ class TestEstimateFromUserConfig:
         )
         assert record.estimation_method == "user_config"
         assert record.gpu_power_watts == 300
-        # Duration = 1500 tokens / 2000 tps = 0.75s
         assert abs(record.request_latency_s - 0.75) < 0.01
-        # Energy = 300W * 0.75s = 225 J = 6.25e-5 kWh
         expected_energy_kwh = 225 / JOULES_PER_KWH
         assert abs(record.energy_kwh - expected_energy_kwh) < 1e-10
 
@@ -140,7 +134,6 @@ class TestEstimateFromSidecar:
             duration_s=0.75,
         )
         assert record.estimation_method == "sidecar"
-        # Avg power = 325W, energy = 325 * 0.75 = 243.75 J
         expected_energy_kwh = 243.75 / JOULES_PER_KWH
         assert abs(record.energy_kwh - expected_energy_kwh) < 1e-10
         assert record.gpu_power_watts == 325.0
@@ -148,7 +141,6 @@ class TestEstimateFromSidecar:
 
 class TestEstimateEmissions:
     def test_ecologits_priority(self):
-        """EcoLogits data takes priority over all other methods."""
         record = estimate_emissions(
             prompt_tokens=1000,
             completion_tokens=500,
@@ -158,24 +150,22 @@ class TestEstimateEmissions:
         )
         assert record.estimation_method == "ecologits"
         assert abs(record.energy_kwh - 1.5e-5) < 1e-12
-        assert abs(record.emissions_gco2e - 4.05e-3) < 1e-8  # 4.05e-6 kg * 1000 = 4.05e-3 g
+        assert abs(record.emissions_gco2e - 4.05e-3) < 1e-8
 
     def test_codecarbon_priority_over_sidecar(self):
-        """CodeCarbon data takes priority over sidecar/user config."""
         record = estimate_emissions(
             prompt_tokens=1000,
             completion_tokens=500,
             grid_intensity_gco2e_per_kwh=270,
             codecarbon_energy_kwh=2.0e-5,
             codecarbon_emissions_kgco2eq=5.4e-6,
-            start_power_watts=300,  # Should be ignored
+            start_power_watts=300,
             end_power_watts=350,
             duration_s=0.75,
         )
         assert record.estimation_method == "codecarbon"
 
     def test_sidecar_priority_over_user_config(self):
-        """Sidecar data takes priority over user config."""
         record = estimate_emissions(
             prompt_tokens=1000,
             completion_tokens=500,
@@ -183,13 +173,12 @@ class TestEstimateEmissions:
             start_power_watts=300,
             end_power_watts=350,
             duration_s=0.75,
-            gpu_power_watts=300,  # Should be ignored
+            gpu_power_watts=300,
             model_tokens_per_second=2000,
         )
         assert record.estimation_method == "sidecar"
 
     def test_user_config_priority_over_size_class(self):
-        """User config takes priority over size-class fallback."""
         record = estimate_emissions(
             prompt_tokens=1000,
             completion_tokens=500,
@@ -200,7 +189,6 @@ class TestEstimateEmissions:
         assert record.estimation_method == "user_config"
 
     def test_size_class_fallback(self):
-        """Size-class fallback when nothing else available."""
         record = estimate_emissions(
             prompt_tokens=1000,
             completion_tokens=500,

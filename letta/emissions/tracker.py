@@ -1,153 +1,149 @@
-"""EmissionsTracker — the main orchestrator for per-request emissions estimation.
+"""Stateless emissions estimation for per-step recording.
 
-Dispatches to the right estimation tier based on available data and config:
+The estimator does the math, the step records the result, summaries are
+computed on demand from the DB. No in-memory state, no accumulation.
+
+Dispatches to the right estimation tier based on server-level config:
   Layer 1: EcoLogits (cloud API calls via supported providers)
   Layer 2: Model-size-class estimator (unsupported cloud providers)
-  Layer 3:
+  Layer 3: Local inference with four-tier accuracy chain:
     Tier 1: GPU metrics sidecar (remote hardware measurement)
     Tier 2: CodeCarbon (same-machine hardware measurement)
-    Tier 3: User-provided hardware config
+    Tier 3: User-provided hardware config (gpu_power_watts + tps)
     Tier 4: Model-size-class fallback
-
-Also manages cumulative EmissionsSummary per agent.
 """
 
-import time
 from typing import Optional
-
-from pydantic import BaseModel, Field
 
 from letta.emissions.estimator import EmissionsRecord, estimate_emissions
 from letta.emissions.grid_intensity import resolve_grid_intensity
 from letta.log import get_logger
+from letta.settings import emissions_settings
 
 logger = get_logger(__name__)
 
 
-class EmissionsSummary(BaseModel):
-    """Cumulative emissions for an agent. Stored on AgentState."""
+def estimate_step_emissions(
+    model_name: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    ecologits_energy_kwh: Optional[float] = None,
+    ecologits_gwp_kgco2eq: Optional[float] = None,
+    codecarbon_energy_kwh: Optional[float] = None,
+    codecarbon_emissions_kgco2eq: Optional[float] = None,
+    start_power_watts: Optional[float] = None,
+    end_power_watts: Optional[float] = None,
+    request_latency_s: Optional[float] = None,
+) -> Optional[EmissionsRecord]:
+    """Estimate emissions for a single LLM request. Stateless.
 
-    total_energy_kwh: float = 0.0
-    total_emissions_gco2e: float = 0.0
-    total_prompt_tokens: int = 0
-    total_completion_tokens: int = 0
-    step_count: int = 0
-    grid_zones_used: dict[str, int] = Field(
-        default_factory=dict,
-        description="Zone → count of requests using that zone.",
-    )
-    estimation_methods_used: dict[str, int] = Field(
-        default_factory=dict,
-        description="Method → count of requests using that method.",
-    )
+    Reads deployment-level config from emissions_settings (grid zone, GPU
+    power, sidecar URL, etc.). The step_manager writes the result to the DB.
+    Summaries are computed on demand from step records.
 
+    Args:
+        model_name: Model identifier (e.g. "gpt-4", "llama3.1:8b").
+        prompt_tokens: Input token count.
+        completion_tokens: Output token count.
+        ecologits_energy_kwh: EcoLogits-provided energy (if available).
+        ecologits_gwp_kgco2eq: EcoLogits-provided GWP (if available).
+        codecarbon_energy_kwh: CodeCarbon-provided energy (if available).
+        codecarbon_emissions_kgco2eq: CodeCarbon-provided GWP (if available).
+        start_power_watts: GPU power at request start (from sidecar).
+        end_power_watts: GPU power at request end (from sidecar).
+        request_latency_s: Wall-clock request duration (for sidecar/CodeCarbon).
 
-class EmissionsTracker:
-    """Orchestrates per-request emissions estimation and cumulative tracking.
-
-    Usage:
-        tracker = EmissionsTracker()
-
-        # Per-request estimation
-        record = tracker.estimate_and_record(
-            llm_config=config,
-            prompt_tokens=1000,
-            completion_tokens=500,
-            request_latency_s=2.5,
-        )
-
-        # Cumulative summary
-        summary = tracker.get_summary(agent_id="agent-123")
+    Returns:
+        EmissionsRecord, or None if tracking is disabled.
     """
+    if not emissions_settings.track_emissions:
+        return None
 
-    def __init__(self):
-        # Per-agent cumulative summaries
-        self._summaries: dict[str, EmissionsSummary] = {}
+    if not prompt_tokens and not completion_tokens:
+        return None
 
-    def estimate_and_record(
-        self,
-        model_name: str,
-        prompt_tokens: int,
-        completion_tokens: int,
-        grid_intensity_gco2e_per_kwh: Optional[float] = None,
-        electricity_mix_zone: Optional[str] = None,
-        gpu_power_watts: Optional[float] = None,
-        model_tokens_per_second: Optional[float] = None,
-        gpu_metrics_url: Optional[str] = None,
-        start_power_watts: Optional[float] = None,
-        end_power_watts: Optional[float] = None,
-        request_latency_s: Optional[float] = None,
-        ecologits_energy_kwh: Optional[float] = None,
-        ecologits_gwp_kgco2eq: Optional[float] = None,
-        codecarbon_energy_kwh: Optional[float] = None,
-        codecarbon_emissions_kgco2eq: Optional[float] = None,
-        agent_id: Optional[str] = None,
-    ) -> EmissionsRecord:
-        """Estimate emissions for a single LLM request.
+    # Resolve grid intensity from deployment-level config
+    resolved_intensity, resolved_zone = resolve_grid_intensity(
+        zone=emissions_settings.electricity_mix_zone,
+        override_gco2e_per_kwh=emissions_settings.grid_intensity_gco2e_per_kwh,
+    )
 
-        Resolves grid intensity, dispatches to the right estimation method,
-        and optionally updates the cumulative summary for the agent.
-        """
-        # Resolve grid intensity
-        resolved_intensity, resolved_zone = resolve_grid_intensity(
-            zone=electricity_mix_zone,
-            override_gco2e_per_kwh=grid_intensity_gco2e_per_kwh,
+    # Collect optional hardware telemetry from sidecar if configured
+    gpu_power_watts = emissions_settings.gpu_power_watts
+    model_tokens_per_second = emissions_settings.model_tokens_per_second
+
+    # If GPU metrics sidecar is configured, try to get power readings
+    if emissions_settings.gpu_metrics_url and start_power_watts is None:
+        start_power_watts, end_power_watts, request_latency_s = _probe_sidecar(
+            emissions_settings.gpu_metrics_url, request_latency_s
         )
 
-        # Dispatch to the right estimation method
-        record = estimate_emissions(
+    # If CodeCarbon hardware monitor is enabled, try to get readings
+    if emissions_settings.enable_hardware_monitor and codecarbon_energy_kwh is None:
+        codecarbon_energy_kwh, codecarbon_emissions_kgco2eq = _probe_codecarbon(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            grid_intensity_gco2e_per_kwh=resolved_intensity,
-            electricity_mix_zone=resolved_zone,
-            model_name=model_name,
-            gpu_power_watts=gpu_power_watts,
-            model_tokens_per_second=model_tokens_per_second,
-            start_power_watts=start_power_watts,
-            end_power_watts=end_power_watts,
-            duration_s=request_latency_s,
-            ecologits_energy_kwh=ecologits_energy_kwh,
-            ecologits_gwp_kgco2eq=ecologits_gwp_kgco2eq,
-            codecarbon_energy_kwh=codecarbon_energy_kwh,
-            codecarbon_emissions_kgco2eq=codecarbon_emissions_kgco2eq,
+            request_latency_s=request_latency_s,
         )
 
-        # Override the resolved zone on the record if our resolution found one
-        # When grid_intensity_gco2e_per_kwh is provided (override), resolve_grid_intensity
-        # returns None for the zone, but we still want to record the original zone
-        if electricity_mix_zone is not None and record.electricity_mix_zone is None:
-            record = record.model_copy(update={"electricity_mix_zone": electricity_mix_zone})
+    # Dispatch to the right estimation method
+    record = estimate_emissions(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        grid_intensity_gco2e_per_kwh=resolved_intensity,
+        electricity_mix_zone=resolved_zone or emissions_settings.electricity_mix_zone,
+        model_name=model_name,
+        gpu_power_watts=gpu_power_watts,
+        model_tokens_per_second=model_tokens_per_second,
+        start_power_watts=start_power_watts,
+        end_power_watts=end_power_watts,
+        duration_s=request_latency_s,
+        ecologits_energy_kwh=ecologits_energy_kwh,
+        ecologits_gwp_kgco2eq=ecologits_gwp_kgco2eq,
+        codecarbon_energy_kwh=codecarbon_energy_kwh,
+        codecarbon_emissions_kgco2eq=codecarbon_emissions_kgco2eq,
+    )
 
-        # Update cumulative summary
-        if agent_id is not None:
-            self._update_summary(agent_id, record)
+    return record
 
-        return record
 
-    def _update_summary(self, agent_id: str, record: EmissionsRecord) -> None:
-        """Update the cumulative EmissionsSummary for an agent."""
-        if agent_id not in self._summaries:
-            self._summaries[agent_id] = EmissionsSummary()
+def _probe_sidecar(
+    gpu_metrics_url: str,
+    request_latency_s: Optional[float],
+) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """Try to get GPU power readings from the sidecar. Lazy import."""
+    try:
+        from letta.emissions.remote_gpu_bridge import RemoteGPUMonitor
 
-        summary = self._summaries[agent_id]
-        summary.total_energy_kwh += record.energy_kwh
-        summary.total_emissions_gco2e += record.emissions_gco2e
-        summary.total_prompt_tokens += record.prompt_tokens
-        summary.total_completion_tokens += record.completion_tokens
-        summary.step_count += 1
+        monitor = RemoteGPUMonitor(gpu_metrics_url)
+        power_data = monitor.get_power_reading()
+        if power_data:
+            return (
+                power_data.get("power_watts"),
+                power_data.get("power_watts"),  # same reading for start/end
+                request_latency_s,
+            )
+    except Exception as e:
+        logger.debug(f"GPU sidecar probe failed: {e}")
+    return None, None, request_latency_s
 
-        # Track zone usage
-        zone = record.electricity_mix_zone or "unknown"
-        summary.grid_zones_used[zone] = summary.grid_zones_used.get(zone, 0) + 1
 
-        # Track method usage
-        method = record.estimation_method
-        summary.estimation_methods_used[method] = summary.estimation_methods_used.get(method, 0) + 1
+def _probe_codecarbon(
+    prompt_tokens: int,
+    completion_tokens: int,
+    request_latency_s: Optional[float],
+) -> tuple[Optional[float], Optional[float]]:
+    """Try to get CodeCarbon readings. Lazy import."""
+    try:
+        from letta.emissions.codecarbon_bridge import LocalInferenceTracker
 
-    def get_summary(self, agent_id: str) -> Optional[EmissionsSummary]:
-        """Get the cumulative emissions summary for an agent."""
-        return self._summaries.get(agent_id)
-
-    def reset_summary(self, agent_id: str) -> None:
-        """Reset the cumulative emissions summary for an agent."""
-        self._summaries.pop(agent_id, None)
+        tracker = LocalInferenceTracker()
+        tracker.start_task("emissions_step")
+        # CodeCarbon needs to run alongside the request; if we reach here
+        # after the fact, we can only provide an estimate based on duration
+        energy_kwh = tracker.stop_task("emissions_step")
+        if energy_kwh is not None:
+            return energy_kwh, None  # CodeCarbon gives energy, not GWP directly
+    except Exception as e:
+        logger.debug(f"CodeCarbon probe failed: {e}")
+    return None, None
