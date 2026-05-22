@@ -67,6 +67,29 @@ class ModelConstraints(BaseModel):
         "'basic' = existing repair strategies, 'aggressive' = regex extraction + fuzzy matching.",
     )
 
+    def relax_constraints_after_probe(self, resolved_tool_calling_mode: str) -> None:
+        """Relax aggressive defaults after probe confirms model capability.
+
+        Called by the agent loop after resolve_tool_calling_mode_async().
+        When a model supports native tool calling, the defensive constraints
+        auto-applied by apply_default_constraints are unnecessary overhead.
+
+        If the probe resolves to "prompt", constraints stay as-is — the model
+        needs the aggressive repair pipeline.
+        """
+        if resolved_tool_calling_mode != "native":
+            return
+
+        # Native tool calling — no need for repair retries
+        if self.tool_call_retry_count > 0:
+            self.tool_call_retry_count = 0
+        # Model can handle structured output natively
+        if self.disable_structured_output:
+            self.disable_structured_output = False
+        # Native tool calling means basic JSON repair is sufficient
+        if self.json_repair_level == "aggressive":
+            self.json_repair_level = "basic"
+
 
 class LLMConfig(BaseModel):
     """Configuration for Language Model (LLM) connection and generation parameters.

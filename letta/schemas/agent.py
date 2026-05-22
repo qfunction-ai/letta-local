@@ -173,14 +173,6 @@ class AgentState(OrmMetadataBase, validate_assignment=True):
         description="If set to True, the agent will be hidden.",
     )
 
-    # Emissions tracking
-    emissions_summary: Optional[Dict] = Field(
-        None,
-        description="Cumulative emissions tracking for this agent. "
-        "Dict matching EmissionsSummary schema. Updated after each step. "
-        "None if tracking is disabled.",
-    )
-
     def get_agent_env_vars_as_dict(self) -> Dict[str, str]:
         # Get environment variables for this agent (value is already decrypted via from_orm_async)
         per_agent_env_vars = {}

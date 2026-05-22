@@ -469,6 +469,9 @@ def resolve_tool_calling_mode(llm_config: LLMConfig) -> str:
         )
         # Store on config for downstream callers
         llm_config.resolved_tool_calling_mode = resolved
+        # Relax defensive constraints now that we know the model's capability
+        if llm_config.constraints is not None:
+            llm_config.constraints.relax_constraints_after_probe(resolved)
         return resolved
 
     # Unknown mode — default to native
@@ -507,6 +510,9 @@ async def resolve_tool_calling_mode_async(llm_config: LLMConfig) -> str:
             f"{llm_config.model} on {llm_config.model_endpoint_type}"
         )
         llm_config.resolved_tool_calling_mode = resolved
+        # Relax defensive constraints now that we know the model's capability
+        if llm_config.constraints is not None:
+            llm_config.constraints.relax_constraints_after_probe(resolved)
         return resolved
 
     logger.warning(f"Unknown tool_calling_mode '{mode}', defaulting to 'native'")
