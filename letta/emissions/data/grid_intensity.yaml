@@ -1,0 +1,42 @@
+# Grid carbon intensity table (location-based, gCO2e/kWh)
+# Sources: Ember Global Electricity Review 2025, EPA eGRID 2023, EMA Singapore 2025,
+# Oregon DEQ 2025, CarbonBench.
+# All values are location-based (actual grid mix), not market-based (PPAs).
+
+# Europe (Ember 2025)
+SE: 37      # Sweden — 99% low-carbon (hydro + nuclear + wind)
+FI: 92      # Finland — ended coal April 2025
+FR: 85      # France — nuclear-dominated
+DK: 150     # Denmark
+IE: 162     # Ireland
+DE: 350     # Germany
+NL: 294     # Netherlands
+"NO": 26      # Norway — nearly all hydro
+IS: 12      # Iceland — geothermal + hydro
+CH: 59      # Switzerland — hydro + nuclear
+
+# North America (EPA eGRID 2023 unless noted)
+US: 349       # US average
+US-OR: 165    # Oregon statewide
+US-OR-BPA: 23 # Oregon BPA utilities — nearly all hydro
+US-VA: 339    # Virginia — SERC Virginia/Carolina subregion
+US-CA: 226    # California
+US-TX: 380    # Texas — ERCOT, wind + gas
+US-WA: 91     # Washington — hydro-heavy
+US-NY: 188    # New York
+US-MA: 240    # Massachusetts
+"CA-ON": 33     # Ontario — nuclear + hydro
+CA-QC: 6      # Quebec — nearly all hydro
+
+# Asia-Pacific
+SG: 400       # Singapore (EMA 2025) — ~95% natural gas
+JP: 460       # Japan
+KR: 430       # South Korea
+AU: 580       # Australia — coal-heavy
+IN: 630       # India — coal-dominated
+
+# South America
+BR: 80        # Brazil — hydro-dominated
+
+# Defaults
+WOR: 458      # World average (Ember 2025)

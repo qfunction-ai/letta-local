@@ -1,7 +1,7 @@
 import asyncio
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 
 from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, select
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_object_session
@@ -122,6 +122,12 @@ class Agent(SqlalchemyBase, OrganizationMixin, ProjectMixin, TemplateEntityMixin
 
     # indexing controls
     hidden: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=None, doc="If set to True, the agent will be hidden.")
+
+    # Emissions tracking
+    emissions_summary: Mapped[Optional[Dict]] = mapped_column(
+        JSON, nullable=True, doc="Cumulative emissions tracking. Dict matching EmissionsSummary schema."
+    )
+
     _vector_db_namespace: Mapped[Optional[str]] = mapped_column(String, nullable=True, doc="Private field for vector database namespace")
 
     # relationships

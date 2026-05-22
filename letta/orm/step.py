@@ -86,6 +86,11 @@ class Step(SqlalchemyBase, ProjectMixin):
     )
     status: Mapped[Optional[StepStatus]] = mapped_column(None, nullable=True, doc="Step status: pending, success, or failed")
 
+    # Emissions tracking
+    emissions: Mapped[Optional[Dict]] = mapped_column(
+        JSON, nullable=True, doc="Per-request emissions estimate. Dict matching EmissionsRecord schema."
+    )
+
     # Relationships (foreign keys)
     organization: Mapped[Optional["Organization"]] = relationship("Organization", lazy="raise")
     provider: Mapped[Optional["Provider"]] = relationship("Provider", lazy="raise")

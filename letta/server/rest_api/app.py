@@ -253,6 +253,17 @@ async def lifespan(app_: FastAPI):
     except Exception as e:
         logger.error(f"[Worker {worker_id}] Scheduler initialization failed: {e}", exc_info=True)
 
+    # Initialize EcoLogits for emissions tracking (optional dependency)
+    try:
+        from letta.emissions.ecologits_bridge import init_ecologits
+
+        if settings.track_emissions and init_ecologits(zone=settings.ecologits_default_zone):
+            logger.info(f"[Worker {worker_id}] EcoLogits initialized (zone={settings.ecologits_default_zone})")
+        else:
+            logger.info(f"[Worker {worker_id}] EcoLogits not available, falling back to size-class estimator")
+    except Exception as e:
+        logger.warning(f"[Worker {worker_id}] EcoLogits initialization failed: {e}")
+
     set_readiness_state(reason="ready", source="lifespan_startup_complete")
     logger.info(f"[Worker {worker_id}] Lifespan startup completed")
     yield

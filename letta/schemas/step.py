@@ -64,6 +64,13 @@ class Step(StepBase):
     error_data: Optional[Dict] = Field(None, description="Error details including message, traceback, and additional context")
     status: Optional[StepStatus] = Field(StepStatus.PENDING, description="Step status: pending, success, or failed")
 
+    # Emissions tracking
+    emissions: Optional[Dict] = Field(
+        None,
+        description="Per-request emissions estimate for this step. "
+        "Dict matching EmissionsRecord schema. None if tracking is disabled.",
+    )
+
 
 class StepProgression(int, Enum):
     START = auto()

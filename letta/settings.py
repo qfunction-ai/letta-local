@@ -483,6 +483,24 @@ class Settings(BaseSettings):
         description="When true, prevents fallback to default actor in get_actor_or_default_async. Raises NoResultFound if actor_id is None.",
     )
 
+    # Emissions tracking
+    track_emissions: bool = Field(
+        default=True,
+        description="Enable per-request emissions estimation for all LLM calls.",
+    )
+    ecologits_default_zone: str = Field(
+        default="WOR",
+        description="Default EcoLogits electricity_mix_zone (ISO 3166-1 alpha-3). Used at server startup.",
+    )
+    electricity_maps_api_key: Optional[str] = Field(
+        default=None,
+        description="Electricity Maps API key for real-time grid carbon intensity lookup.",
+    )
+    watttime_api_key: Optional[str] = Field(
+        default=None,
+        description="WattTime API key for real-time grid carbon intensity lookup.",
+    )
+
     @property
     def letta_pg_uri(self) -> str:
         if self.pg_uri:

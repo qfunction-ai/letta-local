@@ -1,0 +1,71 @@
+# Clean-grid provider configs for emissions-aware routing.
+# Pre-configured endpoints with grid carbon intensity baked in.
+# Reference: reference/grid-carbon-intensity.md, reference/emissions-integration-plan.md
+
+providers:
+  google_cloud_sweden:
+    url: https://europe-north1-aiplatform.googleapis.com/v1
+    model_endpoint_type: openai
+    electricity_mix_zone: SE
+    grid_intensity_gco2e_per_kwh: 37
+    carbon_intensity_source: Ember 2025
+
+  together_ai_sweden:
+    url: https://api.together.xyz/v1
+    model_endpoint_type: openai
+    electricity_mix_zone: SE
+    grid_intensity_gco2e_per_kwh: 37
+    carbon_intensity_source: Ember 2025
+
+  groq_finland:
+    url: https://api.groq.com/v1
+    model_endpoint_type: groq
+    electricity_mix_zone: FI
+    grid_intensity_gco2e_per_kwh: 92
+    carbon_intensity_source: Ember 2025
+
+  azure_denmark:
+    url: https://eastus.openai.azure.com/v1
+    model_endpoint_type: azure
+    electricity_mix_zone: DK
+    grid_intensity_gco2e_per_kwh: 150
+    carbon_intensity_source: Ember 2025
+
+  aws_oregon:
+    url: https://us-west-2.amazonaws.com
+    model_endpoint_type: bedrock
+    electricity_mix_zone: US-OR
+    grid_intensity_gco2e_per_kwh: 165
+    carbon_intensity_source: EPA eGRID 2023
+
+  aws_virginia:
+    url: https://us-east-1.amazonaws.com
+    model_endpoint_type: bedrock
+    electricity_mix_zone: US-VA
+    grid_intensity_gco2e_per_kwh: 339
+    carbon_intensity_source: CarbonBench/Ember 2025
+
+# Grid intensity table (location-based, gCO2e/kWh)
+# Full table in letta/emissions/data/grid_intensity.yaml
+grid_intensity:
+  # Europe (Ember 2025)
+  SE: 37    # Sweden
+  FI: 92    # Finland
+  DK: 150   # Denmark
+  NL: 294   # Netherlands
+  IE: 162   # Ireland
+  FR: 85    # France (nuclear)
+
+  # North America (EPA eGRID 2023)
+  US-OR: 165  # Oregon statewide
+  US-OR-BPA: 23  # Oregon BPA utilities
+  US-VA: 339   # Virginia
+  US-CA: 226   # California
+  US-TX: 380   # Texas
+  US: 349       # US average
+
+  # Asia-Pacific
+  SG: 400   # Singapore (EMA 2025)
+
+  # Defaults
+  WOR: 458   # World average (Ember 2025)
