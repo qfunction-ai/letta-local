@@ -125,3 +125,114 @@ def json_dumps(data, indent=2) -> str:
         raise TypeError(f"Type {type(obj)} not serializable")
 
     return json.dumps(sanitized_data, indent=indent, default=safe_serializer, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# Tool call JSON repair — fork-specific logic for handling malformed LLM output
+# ---------------------------------------------------------------------------
+
+def _extract_first_json_object(s: str) -> str:
+    """Extract the first balanced JSON object from a string.
+
+    Handles parallel tool calls (}{  boundary), leading/trailing
+    noise, and nested braces. Returns the first complete JSON object
+    found, or the original string if no balanced object is found.
+
+    Limitation: does not handle braces inside JSON string values
+    (e.g., {"key": "hello {world}"}). This is acceptable because
+    LLM output in the tool-calling context does not produce
+    unbalanced braces inside string values while also concatenating
+    two JSON objects.
+    """
+    depth = 0
+    start = None
+    for i, ch in enumerate(s):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    return s[start:i + 1]
+    # No balanced object found — return original
+    return s
+
+
+def safe_load_tool_call_str(tool_call_args_str: str, llm_config=None) -> dict:
+    """Lenient JSON → dict with fallback repair strategies for degraded models.
+
+    Moved from helpers.py to keep fork-specific repair logic in a
+    module with zero upstream overlap.
+
+    Repair intensity depends on ModelConstraints.json_repair_level:
+    - "none": fail fast, return {} on JSON errors
+    - "basic": try clean_json repair pipeline (default)
+    - "aggressive": also try regex extraction of JSON-like structures
+    """
+    # Handle parallel tool calling — extract first complete JSON object
+    if "}{" in tool_call_args_str:
+        tool_call_args_str = _extract_first_json_object(tool_call_args_str)
+
+    try:
+        tool_args = json.loads(tool_call_args_str, strict=False)
+        if not isinstance(tool_args, dict):
+            # Anthropic sometimes returns weird nested JSON
+            tool_args = json.loads(tool_args)
+        return tool_args
+    except json.JSONDecodeError:
+        pass
+
+    # Envelope-aware extraction for prompt-based tool calling
+    # ({"function": "...", "params": {...}} format)
+    # This runs before clean_json so the envelope structure is preserved
+    if "function" in tool_call_args_str and "params" in tool_call_args_str:
+        try:
+            extracted = _extract_first_json_object(tool_call_args_str)
+            candidate = json.loads(extracted, strict=False)
+            if isinstance(candidate, dict) and "function" in candidate and "params" in candidate:
+                return candidate
+        except json.JSONDecodeError:
+            pass
+
+    # Determine repair level from constraints
+    repair_level = "basic"
+    if llm_config is not None and llm_config.constraints is not None:
+        repair_level = llm_config.constraints.json_repair_level
+
+    if repair_level == "none":
+        return {}
+
+    # Basic repair: use the existing clean_json pipeline
+    if repair_level in ("basic", "aggressive"):
+        try:
+            from letta.local_llm.json_parser import clean_json
+            tool_args = clean_json(tool_call_args_str)
+            if isinstance(tool_args, dict):
+                return tool_args
+        except Exception:
+            pass
+
+    # Aggressive repair: regex extraction of JSON-like structures
+    if repair_level == "aggressive":
+        # Try to find a balanced JSON object
+        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', tool_call_args_str)
+        if json_match:
+            try:
+                tool_args = json.loads(json_match.group(), strict=False)
+                if isinstance(tool_args, dict):
+                    return tool_args
+            except json.JSONDecodeError:
+                pass
+
+        # Last resort: try removing common noise characters
+        cleaned = re.sub(r'[\x00-\x1f\x7f]', '', tool_call_args_str)
+        try:
+            tool_args = json.loads(cleaned, strict=False)
+            if isinstance(tool_args, dict):
+                return tool_args
+        except json.JSONDecodeError:
+            pass
+
+    return {}

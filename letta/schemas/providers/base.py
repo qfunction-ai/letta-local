@@ -183,7 +183,6 @@ class Provider(ProviderBase):
             AzureProvider,
             BasetenProvider,
             BedrockProvider,
-            BitNetProvider,
             CerebrasProvider,
             ChatGPTOAuthProvider,
             DeepSeekProvider,
@@ -191,13 +190,9 @@ class Provider(ProviderBase):
             GoogleVertexProvider,
             GroqProvider,
             LettaProvider,
-            LlamaCppProvider,
-            LlamafileProvider,
             LMStudioOpenAIProvider,
-            LocalAIProvider,
             MiniMaxProvider,
             MistralProvider,
-            MLXProvider,
             OllamaProvider,
             OpenAICompatibleProvider,
             OpenAIProvider,
@@ -260,18 +255,19 @@ class Provider(ProviderBase):
                 return MiniMaxProvider(**self.model_dump(exclude_none=True))
             case ProviderType.openrouter:
                 return OpenRouterProvider(**self.model_dump(exclude_none=True))
-            case ProviderType.localai:
-                return LocalAIProvider(**self.model_dump(exclude_none=True))
-            case ProviderType.llamacpp:
-                return LlamaCppProvider(**self.model_dump(exclude_none=True))
-            case ProviderType.llamafile:
-                return LlamafileProvider(**self.model_dump(exclude_none=True))
-            case ProviderType.mlx:
-                return MLXProvider(**self.model_dump(exclude_none=True))
+            # --- Local inference providers (fork-specific) ---
+            case ProviderType.localai | ProviderType.llamacpp | ProviderType.llamafile | ProviderType.mlx | ProviderType.bitnet:
+                if self.provider_type == ProviderType.bitnet:
+                    import warnings
+                    warnings.warn(
+                        "BitNetProvider is deprecated, using OpenAICompatibleProvider. "
+                        "Set provider_type to 'openai_compatible' instead.",
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
+                return OpenAICompatibleProvider(**self.model_dump(exclude_none=True))
             case ProviderType.openai_compatible:
                 return OpenAICompatibleProvider(**self.model_dump(exclude_none=True))
-            case ProviderType.bitnet:
-                return BitNetProvider(**self.model_dump(exclude_none=True))
             case _:
                 raise ValueError(f"Unknown provider type: {self.provider_type}")
 

@@ -5,7 +5,6 @@ from .azure import AzureProvider
 from .base import Provider, ProviderBase, ProviderCheck, ProviderCreate, ProviderUpdate
 from .baseten import BasetenProvider
 from .bedrock import BedrockProvider
-from .bitnet import BitNetProvider
 from .cerebras import CerebrasProvider
 from .chatgpt_oauth import ChatGPTOAuthProvider
 from .deepseek import DeepSeekProvider
@@ -13,13 +12,9 @@ from .google_gemini import GoogleAIProvider
 from .google_vertex import GoogleVertexProvider
 from .groq import GroqProvider
 from .letta import LettaProvider
-from .llamacpp import LlamaCppProvider
-from .llamafile import LlamafileProvider
 from .lmstudio import LMStudioOpenAIProvider
-from .localai import LocalAIProvider
 from .minimax import MiniMaxProvider
 from .mistral import MistralProvider
-from .mlx import MLXProvider
 from .ollama import OllamaProvider
 from .openai import OpenAIProvider
 from .openai_compatible import OpenAICompatibleProvider
@@ -35,7 +30,6 @@ __all__ = [
     "AzureProvider",
     "BasetenProvider",
     "BedrockProvider",
-    "BitNetProvider",
     "CerebrasProvider",
     "ChatGPTOAuthProvider",
     "DeepSeekProvider",
@@ -44,10 +38,6 @@ __all__ = [
     "GroqProvider",
     "LMStudioOpenAIProvider",
     "LettaProvider",
-    "LlamaCppProvider",
-    "LlamafileProvider",
-    "LocalAIProvider",
-    "MLXProvider",
     "MiniMaxProvider",
     "MistralProvider",
     "OllamaProvider",

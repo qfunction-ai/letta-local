@@ -375,77 +375,10 @@ def generate_step_id(uid: Optional[UUID] = None) -> str:
     return f"step-{uid}"
 
 
-def _safe_load_tool_call_str(tool_call_args_str: str, llm_config=None) -> dict:
-    """Lenient JSON → dict with fallback repair strategies for degraded models.
 
-    Repair intensity depends on ModelConstraints.json_repair_level:
-    - "none": fail fast, return {} on JSON errors
-    - "basic": try clean_json repair pipeline (default)
-    - "aggressive": also try regex extraction of JSON-like structures
-    """
-    # Temp hack to gracefully handle parallel tool calling attempt, only take first one
-    if "}{" in tool_call_args_str:
-        # Find the first complete JSON object (starting with {)
-        parts = tool_call_args_str.split("}{", 1)
-        first_part = parts[0]
-        # If the first part doesn't start with {, it's a closing brace from
-        # a previous object — skip it and use the second part
-        if not first_part.strip().startswith("{"):
-            first_part = "{" + parts[1] if len(parts) > 1 else first_part
-        tool_call_args_str = first_part.rstrip("}") + "}"
-
-    try:
-        tool_args = json.loads(tool_call_args_str)
-        if not isinstance(tool_args, dict):
-            # Load it again - this is due to sometimes Anthropic returning weird json @caren
-            tool_args = json.loads(tool_args)
-        return tool_args
-    except json.JSONDecodeError:
-        pass
-
-    # Determine repair level from constraints
-    repair_level = "basic"
-    if llm_config is not None and llm_config.constraints is not None:
-        repair_level = llm_config.constraints.json_repair_level
-
-    if repair_level == "none":
-        logger.error("Failed to JSON decode tool call argument string (repair=none): %s", tool_call_args_str)
-        return {}
-
-    # Basic repair: use the existing clean_json pipeline
-    if repair_level in ("basic", "aggressive"):
-        try:
-            from letta.local_llm.json_parser import clean_json
-            tool_args = clean_json(tool_call_args_str)
-            if isinstance(tool_args, dict):
-                return tool_args
-        except Exception as e:
-            logger.debug(f"clean_json repair failed for tool call: {e}")
-
-    # Aggressive repair: regex extraction of JSON-like structures
-    if repair_level == "aggressive":
-        import re
-        # Try to find a balanced JSON object
-        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', tool_call_args_str)
-        if json_match:
-            try:
-                tool_args = json.loads(json_match.group())
-                if isinstance(tool_args, dict):
-                    return tool_args
-            except json.JSONDecodeError:
-                pass
-
-        # Last resort: try removing common noise characters
-        cleaned = re.sub(r'[\x00-\x1f\x7f]', '', tool_call_args_str)
-        try:
-            tool_args = json.loads(cleaned)
-            if isinstance(tool_args, dict):
-                return tool_args
-        except json.JSONDecodeError:
-            pass
-
-    logger.error("Failed to JSON decode tool call argument string (all repairs failed): %s", tool_call_args_str)
-    return {}
+# Delegated to letta.helpers.json_helpers to keep fork-specific
+# repair logic in a module with zero upstream overlap.
+from letta.helpers.json_helpers import safe_load_tool_call_str as _safe_load_tool_call_str
 
 
 def _json_type_matches(value: Any, expected_type: Any) -> bool:
