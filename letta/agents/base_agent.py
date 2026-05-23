@@ -63,6 +63,12 @@ class BaseAgent(ABC):
         from letta.observability.tool_call_recorder import ToolCallRecorder
         self.tool_call_recorder = ToolCallRecorder()
 
+        # Security: audit_logger writes security events to the
+        # security_events table. Append-only timeline for incident
+        # reconstruction. Creates its own session per call.
+        from letta.security.audit import AuditLogger
+        self.audit_logger = AuditLogger()
+
     @abstractmethod
     async def step(
         self,

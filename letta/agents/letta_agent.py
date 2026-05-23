@@ -1829,11 +1829,37 @@ class LettaAgent(BaseAgent):
             messages_to_persist = (initial_messages or []) + approval_messages
             continue_stepping = False
             stop_reason = LettaStopReason(stop_reason=StopReasonType.requires_approval.value)
+
+            # Security audit: log approval request
+            try:
+                await self.audit_logger.log(
+                    agent_id=self.agent_id,
+                    organization_id=self.actor.organization_id if self.actor else None,
+                    event_type="tool_approval_requested",
+                    event_data={"tool_name": tool_call_name},
+                    step_id=step_id,
+                    run_id=self.current_run_id,
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to write audit log: {e}")
         else:
             # 2.  Execute the tool (or synthesize an error result if disallowed)
             tool_rule_violated = tool_call_name not in valid_tool_names and not is_approval
             if tool_rule_violated:
                 tool_execution_result = _build_rule_violation_result(tool_call_name, valid_tool_names, tool_rules_solver)
+
+                # Security audit: log tool denial
+                try:
+                    await self.audit_logger.log(
+                        agent_id=self.agent_id,
+                        organization_id=self.actor.organization_id if self.actor else None,
+                        event_type="tool_denied",
+                        event_data={"tool_name": tool_call_name, "reason": "tool_rule_violation"},
+                        step_id=step_id,
+                        run_id=self.current_run_id,
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to write audit log: {e}")
             else:
                 # Track tool execution time
                 tool_start_time = get_utc_timestamp_ns()
@@ -1874,6 +1900,19 @@ class LettaAgent(BaseAgent):
                     )
                 except Exception as e:
                     self.logger.warning(f"Failed to persist tool call record: {e}")
+
+                # Security audit: log tool execution
+                try:
+                    await self.audit_logger.log(
+                        agent_id=self.agent_id,
+                        organization_id=self.actor.organization_id if self.actor else None,
+                        event_type="tool_executed",
+                        event_data={"tool_call_id": tool_call_id, "tool_name": tool_call_name},
+                        step_id=step_id,
+                        run_id=self.current_run_id,
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to write audit log: {e}")
 
             log_telemetry(
                 self.logger,
