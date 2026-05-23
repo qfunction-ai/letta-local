@@ -52,6 +52,11 @@ class BaseAgent(ABC):
         self.client_skills: list = []
         self.conversation_id: str | None = None
 
+        # Observability: recorder receives step lifecycle events and
+        # emits OTel data. No-op when tracing is disabled.
+        from letta.observability.agent_step_recorder import AgentStepRecorder
+        self.recorder = AgentStepRecorder()
+
     @abstractmethod
     async def step(
         self,
@@ -140,6 +145,14 @@ class BaseAgent(ABC):
 
             system_prompt_changed = agent_state.system not in curr_system_message_text
             memory_changed = curr_memory_str not in curr_system_message_text
+
+            # Observability: record memory rebuild state
+            self.recorder.on_memory_rebuilt(
+                block_count=len(agent_state.memory.blocks) if agent_state.memory.blocks else 0,
+                system_prompt_changed=system_prompt_changed,
+                memory_changed=memory_changed,
+            )
+
             if (not system_prompt_changed) and (not memory_changed):
                 logger.debug(
                     f"Memory and sources haven't changed for agent id={agent_state.id} and actor=({self.actor.id}, {self.actor.name}), skipping system prompt rebuild"

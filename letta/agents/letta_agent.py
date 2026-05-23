@@ -1435,6 +1435,15 @@ class LettaAgent(BaseAgent):
                 )
                 log_event("agent.stream_no_tokens.llm_request.created")
 
+                # Observability: record context window composition
+                self.recorder.on_context_composed(
+                    message_count=len(current_in_context_messages) + len(new_in_context_messages),
+                    prompt_tokens=request_data.get("tokens", 0) if isinstance(request_data, dict) else 0,
+                    window_limit=agent_state.llm_config.context_window,
+                    available_tools=valid_tool_names,
+                    tool_calling_mode=getattr(agent_state.llm_config, "resolved_tool_calling_mode", None) or "native",
+                )
+
                 async with AsyncTimer() as timer:
                     # Attempt LLM request with telemetry
                     llm_client.set_telemetry_context(
@@ -1615,6 +1624,16 @@ class LettaAgent(BaseAgent):
             actor=self.actor,
         )
 
+        # Observability: record summarization event
+        eviction_count = len(in_context_messages) - len(new_in_context_messages)
+        self.recorder.on_summarization_completed(
+            trigger_reason="forced_clear" if (force or (total_tokens and total_tokens > llm_config.context_window)) else "threshold",
+            eviction_count=max(0, eviction_count),
+            tokens_before=total_tokens or 0,
+            tokens_after=0,  # not readily available here
+            latency_ns=0,   # not readily available here
+        )
+
         return new_in_context_messages
 
     @trace_method
@@ -1765,6 +1784,22 @@ class LettaAgent(BaseAgent):
         # 1.  Parse and validate the tool-call envelope
         tool_call_name: str = tool_call.function.name
 
+        # Observability: record reasoning and action taken
+        reasoning_text = None
+        if reasoning_content:
+            for rc in reasoning_content:
+                if hasattr(rc, "reasoning") and rc.reasoning:
+                    reasoning_text = rc.reasoning
+                    break
+                elif hasattr(rc, "text") and rc.text:
+                    reasoning_text = rc.text
+                    break
+        self.recorder.on_llm_response(
+            reasoning_content=reasoning_text,
+            action_taken=tool_call_name,
+            model_name=agent_state.llm_config.model,
+        )
+
         tool_args = _safe_load_tool_call_str(tool_call.function.arguments)
         request_heartbeat: bool = _pop_heartbeat(tool_args)
         tool_args.pop(INNER_THOUGHTS_KWARG, None)
@@ -1811,6 +1846,15 @@ class LettaAgent(BaseAgent):
 
                 # Store tool execution time in metrics
                 step_metrics.tool_execution_ns = tool_end_time - tool_start_time
+
+                # Observability: record tool execution
+                self.recorder.on_tool_executed(
+                    tool_name=tool_call_name,
+                    tool_args=tool_args,
+                    tool_result=tool_execution_result.model_dump_json() if hasattr(tool_execution_result, "model_dump_json") else str(tool_execution_result),
+                    duration_ns=tool_end_time - tool_start_time,
+                    success=tool_execution_result.status == "success" if hasattr(tool_execution_result, "status") else True,
+                )
 
             log_telemetry(
                 self.logger,

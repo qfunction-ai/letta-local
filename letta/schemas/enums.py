@@ -48,6 +48,7 @@ class PrimitiveType(str, Enum):
 
     # Telemetry types
     PROVIDER_TRACE = "provider_trace"
+    TOOL_CALL = "toolcall"
 
 
 class ProviderType(str, Enum):
