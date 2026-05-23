@@ -57,6 +57,12 @@ class BaseAgent(ABC):
         from letta.observability.agent_step_recorder import AgentStepRecorder
         self.recorder = AgentStepRecorder()
 
+        # Observability: tool_call_recorder persists per-tool-call records
+        # to the DB. Separate from the OTel recorder so DB failures don't
+        # affect event emission. Creates its own session per call.
+        from letta.observability.tool_call_recorder import ToolCallRecorder
+        self.tool_call_recorder = ToolCallRecorder()
+
     @abstractmethod
     async def step(
         self,

@@ -149,11 +149,20 @@ class AgentStepRecorder:
         action_taken: str,
         model_name: str,
         reasoning_type: str = "inner_thoughts",
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
     ) -> None:
         """After LLM response is processed.
 
         Emits: reasoning.captured span event
         Attributes: reasoning.content, reasoning.action_taken, etc.
+        Sets: openinference.span.kind = "LLM", llm.model_name,
+              llm.token_count.prompt, llm.token_count.completion
+
+        Note: prompt_tokens and completion_tokens are cumulative across
+        steps (from UsageStatistics), not per-call. The OpenInference
+        spec treats these as per-call, so this is a semantic mismatch.
+        Will be fixed when we add child LLM spans with per-call counts.
 
         Framing: "reasoning capture", NOT "decision tracing". The model
         doesn't decide — it generates. The reasoning is post-hoc narration
@@ -169,6 +178,7 @@ class AgentStepRecorder:
             "reasoning.model": model_name,
         })
         _set_span_kind("llm")
+        _set_llm_attributes(model_name, prompt_tokens, completion_tokens)
 
     # -- Phase 4: Tool execution --------------------------------------------
 

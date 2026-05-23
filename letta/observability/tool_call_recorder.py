@@ -1,14 +1,17 @@
 """ToolCallRecorder — writes per-tool-call records to the DB.
 
-Called by the AgentStepRecorder after tool execution. Separate from the
-recorder so that DB writes can be batched or deferred without affecting
-OTel event emission.
+Called directly from the agent loop after tool execution. Separate from
+AgentStepRecorder (OTel) so that DB writes can fail without affecting
+event emission, and vice versa.
+
+Creates its own session per call via db_registry. One session per tool
+call — simple, correct, no batching. If batching is needed later, add
+a buffer and flush mechanism.
 
 Truncation happens here, not in the schema. The column is TEXT (unbounded).
 The recorder logs when truncation occurs.
 """
 
-import logging
 from typing import Optional
 from uuid import uuid4
 
@@ -23,14 +26,14 @@ class ToolCallRecorder:
     """Writes ToolCall records to the DB.
 
     Usage:
-        recorder = ToolCallRecorder(session)
+        recorder = ToolCallRecorder()
         await recorder.record_tool_call(
             step_id=step_id, agent_id=agent_id, ...
         )
     """
 
-    def __init__(self, session):
-        self._session = session
+    def __init__(self):
+        pass  # sessions created per-call
 
     async def record_tool_call(
         self,
@@ -47,6 +50,7 @@ class ToolCallRecorder:
     ) -> None:
         """Persist a ToolCall record to the DB."""
         from letta.orm.tool_call import ToolCall
+        from letta.server.db import db_registry
 
         if tool_result and len(tool_result) > _TRUNCATION_LIMIT:
             logger.debug(
@@ -68,5 +72,7 @@ class ToolCallRecorder:
             error=error,
             request_id=request_id,
         )
-        self._session.add(tool_call)
-        await self._session.flush()
+
+        async with db_registry.async_session() as session:
+            session.add(tool_call)
+            await session.flush()

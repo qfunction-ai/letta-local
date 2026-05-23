@@ -141,6 +141,28 @@ class TestOnLlmResponse:
         attrs = enabled_recorder._log_event.call_args[1]["attributes"]
         assert attrs["reasoning.content"] == ""
 
+    def test_llm_openinference_attributes(self, enabled_recorder):
+        """on_llm_response sets OpenInference LLM attributes on the span."""
+        with patch("letta.observability.agent_step_recorder._set_llm_attributes") as mock_set:
+            enabled_recorder.on_llm_response(
+                reasoning_content="thinking",
+                action_taken="send_message",
+                model_name="llama-3",
+                prompt_tokens=500,
+                completion_tokens=50,
+            )
+            mock_set.assert_called_once_with("llama-3", 500, 50)
+
+    def test_llm_attributes_default_zero(self, enabled_recorder):
+        """on_llm_response defaults token counts to 0."""
+        with patch("letta.observability.agent_step_recorder._set_llm_attributes") as mock_set:
+            enabled_recorder.on_llm_response(
+                reasoning_content="thinking",
+                action_taken="send_message",
+                model_name="llama-3",
+            )
+            mock_set.assert_called_once_with("llama-3", 0, 0)
+
     def test_disabled_recorder_no_ops(self, disabled_recorder):
         disabled_recorder.on_llm_response(
             reasoning_content="test",

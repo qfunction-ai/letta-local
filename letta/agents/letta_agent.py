@@ -1798,6 +1798,8 @@ class LettaAgent(BaseAgent):
             reasoning_content=reasoning_text,
             action_taken=tool_call_name,
             model_name=agent_state.llm_config.model,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
         )
 
         tool_args = _safe_load_tool_call_str(tool_call.function.arguments)
@@ -1855,6 +1857,23 @@ class LettaAgent(BaseAgent):
                     duration_ns=tool_end_time - tool_start_time,
                     success=tool_execution_result.status == "success" if hasattr(tool_execution_result, "status") else True,
                 )
+
+                # Observability: persist tool call to DB
+                try:
+                    await self.tool_call_recorder.record_tool_call(
+                        step_id=step_id,
+                        agent_id=self.agent_id,
+                        organization_id=self.actor.organization_id if self.actor else None,
+                        tool_name=tool_call_name,
+                        tool_args=tool_args,
+                        tool_result=tool_execution_result.model_dump_json() if hasattr(tool_execution_result, "model_dump_json") else str(tool_execution_result),
+                        duration_ns=tool_end_time - tool_start_time,
+                        success=tool_execution_result.status == "success" if hasattr(tool_execution_result, "status") else True,
+                        error=str(tool_execution_result.func_return) if hasattr(tool_execution_result, "status") and tool_execution_result.status == "error" else None,
+                        request_id=tool_call_id,
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to persist tool call record: {e}")
 
             log_telemetry(
                 self.logger,
