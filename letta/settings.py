@@ -717,3 +717,30 @@ class EmissionsSettings(BaseSettings):
 
 
 emissions_settings = EmissionsSettings()
+
+
+class FilePersistenceSettings(BaseSettings):
+    """Per-agent file workspace configuration.
+
+    Controls the agent's scratch directory for deliverable outputs
+    (reports, CSVs, JSON, source code). Read via env vars with
+    LETTA_FILE_PERSISTENCE_ prefix.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="letta_file_persistence_", extra="ignore")
+
+    max_file_size_bytes: int = Field(
+        default=1_000_000,
+        description="Per-file size limit in bytes. Default: 1MB.",
+    )
+    max_total_size_bytes: int = Field(
+        default=50_000_000,
+        description="Per-agent total storage limit in bytes. Default: 50MB.",
+    )
+    agent_files_dir: Optional[str] = Field(
+        default=None,
+        description="Root directory for agent file workspaces. Default: {letta_dir}/agent_files/.",
+    )
+
+
+file_persistence_settings = FilePersistenceSettings()

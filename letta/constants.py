@@ -43,6 +43,7 @@ LETTA_MULTI_AGENT_TOOL_MODULE_NAME = "letta.functions.function_sets.multi_agent"
 LETTA_VOICE_TOOL_MODULE_NAME = "letta.functions.function_sets.voice"
 LETTA_BUILTIN_TOOL_MODULE_NAME = "letta.functions.function_sets.builtin"
 LETTA_FILES_TOOL_MODULE_NAME = "letta.functions.function_sets.files"
+LETTA_FILE_PERSISTENCE_TOOL_MODULE_NAME = "letta.functions.function_sets.file_persistence"
 
 LETTA_TOOL_MODULE_NAMES = [
     LETTA_CORE_TOOL_MODULE_NAME,
@@ -50,6 +51,7 @@ LETTA_TOOL_MODULE_NAMES = [
     LETTA_VOICE_TOOL_MODULE_NAME,
     LETTA_BUILTIN_TOOL_MODULE_NAME,
     LETTA_FILES_TOOL_MODULE_NAME,
+    LETTA_FILE_PERSISTENCE_TOOL_MODULE_NAME,
 ]
 
 DEFAULT_ORG_ID = "org-00000000-0000-4000-8000-000000000000"
@@ -169,6 +171,9 @@ BUILTIN_TOOLS = ["run_code", "run_code_with_tools", "web_search", "fetch_webpage
 # Built in tools
 FILES_TOOLS = ["open_files", "grep_files", "semantic_search_files"]
 
+# File persistence tools (fork: agent-external file outputs)
+FILE_PERSISTENCE_TOOLS = ["file_write", "file_read", "file_list"]
+
 FILE_MEMORY_EXISTS_MESSAGE = "The following files are currently accessible in memory:"
 FILE_MEMORY_EMPTY_MESSAGE = (
     "There are no files currently available in memory. Files will appear here once they are uploaded directly to your system."
@@ -184,6 +189,7 @@ LETTA_TOOL_SET = set(
     + BASE_VOICE_SLEEPTIME_CHAT_TOOLS
     + BUILTIN_TOOLS
     + FILES_TOOLS
+    + FILE_PERSISTENCE_TOOLS
 )
 
 LETTA_PARALLEL_SAFE_TOOLS = {
@@ -194,6 +200,8 @@ LETTA_PARALLEL_SAFE_TOOLS = {
     "fetch_webpage",
     "grep_files",
     "semantic_search_files",
+    "file_read",
+    "file_list",
 }
 
 

@@ -1,4 +1,5 @@
 from letta.server.rest_api.routers.v1.agents import router as agents_router
+from letta.server.rest_api.routers.v1.agent_files import router as agent_files_router
 from letta.server.rest_api.routers.v1.anthropic import router as anthropic_router
 from letta.server.rest_api.routers.v1.archives import router as archives_router
 from letta.server.rest_api.routers.v1.blocks import router as blocks_router
@@ -39,6 +40,7 @@ ROUTERS = [
     sources_router,
     folders_router,
     agents_router,
+    agent_files_router,
     conversations_router,
     chat_completions_router,
     git_http_router,
