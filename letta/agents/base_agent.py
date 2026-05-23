@@ -69,6 +69,11 @@ class BaseAgent(ABC):
         from letta.security.audit import AuditLogger
         self.audit_logger = AuditLogger()
 
+        # Security: policy_checker enforces per-agent tool call policies.
+        # Loaded from tool_call_policies table at step start.
+        from letta.security.policy import PolicyChecker
+        self.policy_checker = PolicyChecker()
+
     @abstractmethod
     async def step(
         self,

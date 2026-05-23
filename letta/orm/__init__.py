@@ -44,6 +44,7 @@ from letta.orm.sources_agents import SourcesAgents as SourcesAgents
 from letta.orm.step import Step as Step
 from letta.orm.step_metrics import StepMetrics as StepMetrics
 from letta.orm.security_event import SecurityEvent as SecurityEvent
+from letta.orm.tool_call_policy import ToolCallPolicyModel as ToolCallPolicyModel
 from letta.orm.tool import Tool as Tool
 from letta.orm.tool_call import ToolCall as ToolCall
 from letta.orm.tools_agents import ToolsAgents as ToolsAgents

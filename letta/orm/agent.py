@@ -202,6 +202,13 @@ class Agent(SqlalchemyBase, OrganizationMixin, ProjectMixin, TemplateEntityMixin
         lazy="raise",
         doc="Conversations for concurrent messaging on this agent.",
     )
+    tool_call_policy: Mapped["ToolCallPolicyModel"] = relationship(
+        "ToolCallPolicyModel",
+        back_populates="agent",
+        uselist=False,
+        lazy="selectin",
+        doc="Security policy for tool calls.",
+    )
 
     def _get_per_file_view_window_char_limit(self) -> int:
         """Get the per_file_view_window_char_limit, calculating defaults if None."""

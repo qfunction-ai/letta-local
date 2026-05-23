@@ -152,6 +152,30 @@ class LettaAgent(BaseAgent):
             agent_id=self.agent_id,
         )
 
+    async def _load_tool_call_policy(self) -> None:
+        """Load the per-agent tool call policy from the DB.
+
+        Called at the start of each step. Falls back to allow-all
+        if the policy doesn't exist or the load fails.
+        """
+        from letta.security.policy import ToolCallPolicy
+        from letta.orm.tool_call_policy import ToolCallPolicyModel
+        from letta.server.db import db_registry
+        from sqlalchemy import select
+
+        try:
+            async with db_registry.async_session() as session:
+                stmt = select(ToolCallPolicyModel).where(ToolCallPolicyModel.agent_id == self.agent_id)
+                result = await session.execute(stmt)
+                policy_model = result.scalar_one_or_none()
+                if policy_model and policy_model.policy:
+                    self.policy_checker.update_policy(ToolCallPolicy(**policy_model.policy))
+                else:
+                    self.policy_checker.update_policy(ToolCallPolicy())
+        except Exception as e:
+            self.logger.warning(f"Failed to load tool call policy, defaulting to allow all: {e}")
+            self.policy_checker.update_policy(ToolCallPolicy())
+
     async def _check_run_cancellation(self) -> bool:
         """
         Check if the current run associated with this agent execution has been cancelled.
@@ -231,6 +255,7 @@ class LettaAgent(BaseAgent):
         initial_messages = new_in_context_messages
         in_context_messages = current_in_context_messages
         tool_rules_solver = ToolRulesSolver(agent_state.tool_rules)
+        await self._load_tool_call_policy()
         llm_client = LLMClient.create(
             provider_type=agent_state.llm_config.model_endpoint_type,
             put_inner_thoughts_first=True,
@@ -581,6 +606,7 @@ class LettaAgent(BaseAgent):
         initial_messages = new_in_context_messages
         in_context_messages = current_in_context_messages
         tool_rules_solver = ToolRulesSolver(agent_state.tool_rules)
+        await self._load_tool_call_policy()
         llm_client = LLMClient.create(
             provider_type=agent_state.llm_config.model_endpoint_type,
             put_inner_thoughts_first=True,
@@ -933,6 +959,7 @@ class LettaAgent(BaseAgent):
         in_context_messages = current_in_context_messages
 
         tool_rules_solver = ToolRulesSolver(agent_state.tool_rules)
+        await self._load_tool_call_policy()
         llm_client = LLMClient.create(
             provider_type=agent_state.llm_config.model_endpoint_type,
             put_inner_thoughts_first=True,
@@ -1814,7 +1841,56 @@ class LettaAgent(BaseAgent):
             tool_call_id=tool_call_id,
             request_heartbeat=request_heartbeat,
         )
-        if not is_approval and tool_rules_solver.is_requires_approval_tool(tool_call_name):
+        # Security: check tool call policy FIRST
+        from letta.security.policy import PolicyAction
+        policy_action = self.policy_checker.check(tool_call_name)
+        if policy_action == PolicyAction.DENY:
+            tool_execution_result = ToolExecutionResult(
+                status="error",
+                func_return=f"Tool '{tool_call_name}' is denied by the security policy.",
+            )
+            # Audit log
+            try:
+                await self.audit_logger.log(
+                    agent_id=self.agent_id,
+                    organization_id=self.actor.organization_id if self.actor else None,
+                    event_type="tool_denied",
+                    event_data={"tool_name": tool_call_name, "reason": "policy: denied_tools"},
+                    step_id=step_id,
+                    run_id=self.current_run_id,
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to write audit log: {e}")
+        elif policy_action == PolicyAction.REQUIRE_APPROVAL and not is_approval:
+            # Policy requires approval — same code path as RequiresApprovalToolRule
+            # SKIP the ToolRulesSolver approval check to prevent double approval
+            tool_args[REQUEST_HEARTBEAT_PARAM] = request_heartbeat
+            approval_messages = create_approval_request_message_from_llm_response(
+                agent_id=agent_state.id,
+                model=agent_state.llm_config.model,
+                requested_tool_calls=[
+                    ToolCall(id=tool_call_id, function=FunctionCall(name=tool_call_name, arguments=json.dumps(tool_args)))
+                ],
+                reasoning_content=reasoning_content,
+                pre_computed_assistant_message_id=pre_computed_assistant_message_id,
+                step_id=step_id,
+            )
+            messages_to_persist = (initial_messages or []) + approval_messages
+            continue_stepping = False
+            stop_reason = LettaStopReason(stop_reason=StopReasonType.requires_approval.value)
+            # Audit log
+            try:
+                await self.audit_logger.log(
+                    agent_id=self.agent_id,
+                    organization_id=self.actor.organization_id if self.actor else None,
+                    event_type="tool_approval_requested",
+                    event_data={"tool_name": tool_call_name, "reason": "policy: approval_required_tools"},
+                    step_id=step_id,
+                    run_id=self.current_run_id,
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to write audit log: {e}")
+        elif not is_approval and tool_rules_solver.is_requires_approval_tool(tool_call_name):
             tool_args[REQUEST_HEARTBEAT_PARAM] = request_heartbeat
             approval_messages = create_approval_request_message_from_llm_response(
                 agent_id=agent_state.id,
