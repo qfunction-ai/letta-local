@@ -176,6 +176,43 @@ class LettaAgent(BaseAgent):
             self.logger.warning(f"Failed to load tool call policy, defaulting to allow all: {e}")
             self.policy_checker.update_policy(ToolCallPolicy())
 
+    async def _load_canary(self, agent_state) -> None:
+        """Load the canary value from the __canary__ memory block.
+
+        Lazy creation: if the canary block doesn't exist, create it
+        with a random value. The canary is in place before any tool
+        calls happen because step initialization runs before the LLM
+        is called.
+        """
+        from letta.security.canary import CanaryChecker
+
+        try:
+            canary_block = None
+            for block in agent_state.memory.blocks:
+                if block.label == CanaryChecker.CANARY_BLOCK_LABEL:
+                    canary_block = block
+                    break
+
+            if canary_block and canary_block.value:
+                self.canary_checker.update_canary(canary_block.value)
+            else:
+                # Lazy creation: create the canary block on first use
+                canary_value = CanaryChecker.generate_canary_value()
+                agent_state.memory.update_block_value(
+                    label=CanaryChecker.CANARY_BLOCK_LABEL,
+                    value=canary_value,
+                )
+                # Mark the block as read_only and set description
+                for block in agent_state.memory.blocks:
+                    if block.label == CanaryChecker.CANARY_BLOCK_LABEL:
+                        block.read_only = True
+                        block.description = CanaryChecker.CANARY_BLOCK_DESCRIPTION
+                        break
+                self.canary_checker.update_canary(canary_value)
+        except Exception as e:
+            self.logger.warning(f"Failed to load/create canary, canary check disabled: {e}")
+            self.canary_checker.update_canary(None)
+
     async def _check_run_cancellation(self) -> bool:
         """
         Check if the current run associated with this agent execution has been cancelled.
@@ -256,6 +293,7 @@ class LettaAgent(BaseAgent):
         in_context_messages = current_in_context_messages
         tool_rules_solver = ToolRulesSolver(agent_state.tool_rules)
         await self._load_tool_call_policy()
+        await self._load_canary(agent_state)
         llm_client = LLMClient.create(
             provider_type=agent_state.llm_config.model_endpoint_type,
             put_inner_thoughts_first=True,
@@ -607,6 +645,7 @@ class LettaAgent(BaseAgent):
         in_context_messages = current_in_context_messages
         tool_rules_solver = ToolRulesSolver(agent_state.tool_rules)
         await self._load_tool_call_policy()
+        await self._load_canary(agent_state)
         llm_client = LLMClient.create(
             provider_type=agent_state.llm_config.model_endpoint_type,
             put_inner_thoughts_first=True,
@@ -960,6 +999,7 @@ class LettaAgent(BaseAgent):
 
         tool_rules_solver = ToolRulesSolver(agent_state.tool_rules)
         await self._load_tool_call_policy()
+        await self._load_canary(agent_state)
         llm_client = LLMClient.create(
             provider_type=agent_state.llm_config.model_endpoint_type,
             put_inner_thoughts_first=True,
@@ -1856,6 +1896,24 @@ class LettaAgent(BaseAgent):
                     organization_id=self.actor.organization_id if self.actor else None,
                     event_type="tool_denied",
                     event_data={"tool_name": tool_call_name, "reason": "policy: denied_tools"},
+                    step_id=step_id,
+                    run_id=self.current_run_id,
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to write audit log: {e}")
+        elif self.canary_checker.check(tool_args):
+            # Security: canary detected in tool arguments — prompt exfiltration attempt
+            tool_execution_result = ToolExecutionResult(
+                status="error",
+                func_return="Tool call blocked: potential prompt exfiltration detected.",
+            )
+            # Audit log
+            try:
+                await self.audit_logger.log(
+                    agent_id=self.agent_id,
+                    organization_id=self.actor.organization_id if self.actor else None,
+                    event_type="canary_detected",
+                    event_data={"tool_name": tool_call_name},
                     step_id=step_id,
                     run_id=self.current_run_id,
                 )

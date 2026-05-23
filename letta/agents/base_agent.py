@@ -74,6 +74,11 @@ class BaseAgent(ABC):
         from letta.security.policy import PolicyChecker
         self.policy_checker = PolicyChecker()
 
+        # Security: canary_checker detects prompt exfiltration attempts.
+        # Loaded from __canary__ memory block at step start.
+        from letta.security.canary import CanaryChecker
+        self.canary_checker = CanaryChecker()
+
     @abstractmethod
     async def step(
         self,
