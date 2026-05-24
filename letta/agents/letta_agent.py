@@ -329,10 +329,17 @@ class LettaAgent(BaseAgent):
 
         # Security: log message_sent when the agent responds to the user
         if stop_reason and stop_reason.stop_reason == StopReasonType.end_turn.value:
-            from letta.security.audit import audit_log
-            await audit_log(self.audit_logger, self.agent_id, self.actor,
-                            "message_sent", {"agent_id": self.agent_id},
-                            None, run_id, "message_sent")
+            try:
+                await self.audit_logger.log(
+                    agent_id=self.agent_id,
+                    organization_id=self.actor.organization_id if self.actor else None,
+                    event_type="message_sent",
+                    event_data={"agent_id": self.agent_id},
+                    step_id=None,
+                    run_id=run_id,
+                )
+            except Exception as _e:
+                self.logger.warning(f"Failed to write audit log (message_sent): {_e}")
 
         return _create_letta_response(
             new_in_context_messages=new_in_context_messages,
@@ -689,10 +696,17 @@ class LettaAgent(BaseAgent):
 
         # Security: log message_sent when the agent responds to the user
         if stop_reason and stop_reason.stop_reason == StopReasonType.end_turn.value:
-            from letta.security.audit import audit_log
-            await audit_log(self.audit_logger, self.agent_id, self.actor,
-                            "message_sent", {"agent_id": self.agent_id},
-                            None, run_id, "message_sent")
+            try:
+                await self.audit_logger.log(
+                    agent_id=self.agent_id,
+                    organization_id=self.actor.organization_id if self.actor else None,
+                    event_type="message_sent",
+                    event_data={"agent_id": self.agent_id},
+                    step_id=step_id,
+                    run_id=run_id,
+                )
+            except Exception as _e:
+                self.logger.warning(f"Failed to write audit log (message_sent): {_e}")
 
         await self._log_request(request_start_timestamp_ns, request_span, job_update_metadata, is_error=False)
 
@@ -1507,10 +1521,17 @@ class LettaAgent(BaseAgent):
 
         # Security: log message_sent when the agent responds to the user
         if stop_reason and stop_reason.stop_reason == StopReasonType.end_turn.value:
-            from letta.security.audit import audit_log
-            await audit_log(self.audit_logger, self.agent_id, self.actor,
-                            "message_sent", {"agent_id": self.agent_id},
-                            None, run_id, "message_sent")
+            try:
+                await self.audit_logger.log(
+                    agent_id=self.agent_id,
+                    organization_id=self.actor.organization_id if self.actor else None,
+                    event_type="message_sent",
+                    event_data={"agent_id": self.agent_id},
+                    step_id=step_id,
+                    run_id=run_id,
+                )
+            except Exception as _e:
+                self.logger.warning(f"Failed to write audit log (message_sent): {_e}")
 
         await self._log_request(request_start_timestamp_ns, request_span, job_update_metadata, is_error=False)
 

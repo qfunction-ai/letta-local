@@ -416,10 +416,17 @@ class LettaAgentV3(LettaAgentV2):
         # Security: log message_sent when the agent responds to the user
         # (end_turn means the agent produced text output instead of a tool call)
         if self.stop_reason.stop_reason == StopReasonType.end_turn.value:
-            from letta.security.audit import audit_log
-            await audit_log(self.audit_logger, self.agent_id, self.actor,
-                            "message_sent", {"agent_id": self.agent_id},
-                            None, run_id, "message_sent")
+            try:
+                await self.audit_logger.log(
+                    agent_id=self.agent_id,
+                    organization_id=self.actor.organization_id if self.actor else None,
+                    event_type="message_sent",
+                    event_data={"agent_id": self.agent_id},
+                    step_id=None,
+                    run_id=run_id,
+                )
+            except Exception as _e:
+                self.logger.warning(f"Failed to write audit log (message_sent): {_e}")
 
         # construct the response
         response_letta_messages = Message.to_letta_messages_from_list(
@@ -658,10 +665,17 @@ class LettaAgentV3(LettaAgentV2):
             # Security: log message_sent when the agent responds to the user
             # (end_turn means the agent produced text output instead of a tool call)
             if self.stop_reason.stop_reason == StopReasonType.end_turn.value:
-                from letta.security.audit import audit_log
-                await audit_log(self.audit_logger, self.agent_id, self.actor,
-                                "message_sent", {"agent_id": self.agent_id},
-                                None, run_id, "message_sent")
+                try:
+                    await self.audit_logger.log(
+                        agent_id=self.agent_id,
+                        organization_id=self.actor.organization_id if self.actor else None,
+                        event_type="message_sent",
+                        event_data={"agent_id": self.agent_id},
+                        step_id=None,
+                        run_id=run_id,
+                    )
+                except Exception as _e:
+                    self.logger.warning(f"Failed to write audit log (message_sent): {_e}")
 
         except Exception as e:
             # Use repr() if str() is empty (happens with Exception() with no args)
@@ -1889,37 +1903,85 @@ class LettaAgentV3(LettaAgentV2):
 
         # 5c. Execute tools (sequentially for single, parallel for multiple)
         async def _run_one(spec: Dict[str, Any]):
-            from letta.security.audit import audit_log, tool_denied_event, canary_detected_event, classify_tool
+            from letta.security.audit import classify_tool
 
             if spec.get("error"):
                 # Audit log: malformed tool call
-                await audit_log(self.audit_logger, self.agent_id, self.actor,
-                                "tool_denied", tool_denied_event(spec["name"], "malformed_arguments"),
-                                step_id, run_id, "tool_denied/malformed")
+                _tc = classify_tool(spec["name"])
+                _ed = {"tool_name": spec["name"], "reason": "malformed_arguments"}
+                if _tc:
+                    _ed["tool_category"] = _tc
+                try:
+                    await self.audit_logger.log(
+                        agent_id=self.agent_id,
+                        organization_id=self.actor.organization_id if self.actor else None,
+                        event_type="tool_denied",
+                        event_data=_ed,
+                        step_id=step_id,
+                        run_id=run_id,
+                    )
+                except Exception as _e:
+                    self.logger.warning(f"Failed to write audit log (tool_denied/malformed): {_e}")
                 return ToolExecutionResult(status="error", func_return=spec["error"]), 0
             if spec["violated"]:
                 result = _build_rule_violation_result(spec["name"], valid_tool_names, tool_rules_solver)
                 # Audit log: tool rule violation
-                await audit_log(self.audit_logger, self.agent_id, self.actor,
-                                "tool_denied", tool_denied_event(spec["name"], "tool_rule_violation"),
-                                step_id, run_id, "tool_denied/violation")
+                _tc = classify_tool(spec["name"])
+                _ed = {"tool_name": spec["name"], "reason": "tool_rule_violation"}
+                if _tc:
+                    _ed["tool_category"] = _tc
+                try:
+                    await self.audit_logger.log(
+                        agent_id=self.agent_id,
+                        organization_id=self.actor.organization_id if self.actor else None,
+                        event_type="tool_denied",
+                        event_data=_ed,
+                        step_id=step_id,
+                        run_id=run_id,
+                    )
+                except Exception as _e:
+                    self.logger.warning(f"Failed to write audit log (tool_denied/violation): {_e}")
                 return result, 0
             # Security: check tool call policy FIRST
             from letta.security.policy import PolicyAction
             policy_action = self.policy_checker.check(spec["name"])
             if policy_action == PolicyAction.DENY:
-                await audit_log(self.audit_logger, self.agent_id, self.actor,
-                                "tool_denied", tool_denied_event(spec["name"], "policy: denied_tools"),
-                                step_id, run_id, "tool_denied/policy")
+                _tc = classify_tool(spec["name"])
+                _ed = {"tool_name": spec["name"], "reason": "policy: denied_tools"}
+                if _tc:
+                    _ed["tool_category"] = _tc
+                try:
+                    await self.audit_logger.log(
+                        agent_id=self.agent_id,
+                        organization_id=self.actor.organization_id if self.actor else None,
+                        event_type="tool_denied",
+                        event_data=_ed,
+                        step_id=step_id,
+                        run_id=run_id,
+                    )
+                except Exception as _e:
+                    self.logger.warning(f"Failed to write audit log (tool_denied/policy): {_e}")
                 return ToolExecutionResult(
                     status="error",
                     func_return=f"Tool '{spec['name']}' is denied by the security policy.",
                 ), 0
             # Security: canary check on tool arguments
             if self.canary_checker.check(spec["args"]):
-                await audit_log(self.audit_logger, self.agent_id, self.actor,
-                                "canary_detected", canary_detected_event(spec["name"]),
-                                step_id, run_id, "canary_detected")
+                _tc = classify_tool(spec["name"])
+                _ed = {"tool_name": spec["name"]}
+                if _tc:
+                    _ed["tool_category"] = _tc
+                try:
+                    await self.audit_logger.log(
+                        agent_id=self.agent_id,
+                        organization_id=self.actor.organization_id if self.actor else None,
+                        event_type="canary_detected",
+                        event_data=_ed,
+                        step_id=step_id,
+                        run_id=run_id,
+                    )
+                except Exception as _e:
+                    self.logger.warning(f"Failed to write audit log (canary_detected): {_e}")
                 return ToolExecutionResult(
                     status="error",
                     func_return="Tool call blocked: potential prompt exfiltration detected.",
@@ -1939,9 +2001,17 @@ class LettaAgentV3(LettaAgentV2):
             _event_data = {"tool_call_id": spec["id"], "tool_name": spec["name"]}
             if _tool_category:
                 _event_data["tool_category"] = _tool_category
-            await audit_log(self.audit_logger, self.agent_id, self.actor,
-                            "tool_executed", _event_data,
-                            step_id, run_id, "tool_executed")
+            try:
+                await self.audit_logger.log(
+                    agent_id=self.agent_id,
+                    organization_id=self.actor.organization_id if self.actor else None,
+                    event_type="tool_executed",
+                    event_data=_event_data,
+                    step_id=step_id,
+                    run_id=run_id,
+                )
+            except Exception as _e:
+                self.logger.warning(f"Failed to write audit log (tool_executed): {_e}")
             # Record tool call for observability
             try:
                 await self.tool_call_recorder.record_tool_call(
