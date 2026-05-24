@@ -48,7 +48,7 @@ class ToolCall(SqlalchemyBase):
         String, nullable=True, doc="Request ID for correlation."
     )
     created_at: Mapped[Optional[object]] = mapped_column(
-        DateTime, server_default=func.now(), doc="Timestamp when the record was created."
+        DateTime(timezone=True), server_default=func.now(), doc="Timestamp when the record was created."
     )
 
     step = relationship("Step", back_populates="tool_calls")

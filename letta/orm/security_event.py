@@ -45,5 +45,5 @@ class SecurityEvent(SqlalchemyBase):
         String, nullable=True, doc="ID of the user or agent that triggered the event."
     )
     created_at: Mapped[Optional[object]] = mapped_column(
-        DateTime, server_default=func.now(), index=True, doc="Timestamp when the event was recorded."
+        DateTime(timezone=True), server_default=func.now(), index=True, doc="Timestamp when the event was recorded."
     )

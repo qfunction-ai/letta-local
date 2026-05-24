@@ -155,8 +155,8 @@ class LettaAgent(BaseAgent):
     async def _load_tool_call_policy(self) -> None:
         """Load the per-agent tool call policy from the DB.
 
-        Called at the start of each step. Falls back to allow-all
-        if the policy doesn't exist or the load fails.
+        Called at the start of each step. Fails closed (deny all)
+        if the load fails.
         """
         from letta.security.policy import ToolCallPolicy
         from letta.orm.tool_call_policy import ToolCallPolicyModel
@@ -165,7 +165,10 @@ class LettaAgent(BaseAgent):
 
         try:
             async with db_registry.async_session() as session:
-                stmt = select(ToolCallPolicyModel).where(ToolCallPolicyModel.agent_id == self.agent_id)
+                stmt = select(ToolCallPolicyModel).where(
+                    ToolCallPolicyModel.agent_id == self.agent_id,
+                    ToolCallPolicyModel.organization_id == self.actor.organization_id,
+                )
                 result = await session.execute(stmt)
                 policy_model = result.scalar_one_or_none()
                 if policy_model and policy_model.policy:
@@ -173,16 +176,16 @@ class LettaAgent(BaseAgent):
                 else:
                     self.policy_checker.update_policy(ToolCallPolicy())
         except Exception as e:
-            self.logger.warning(f"Failed to load tool call policy, defaulting to allow all: {e}")
-            self.policy_checker.update_policy(ToolCallPolicy())
+            self.logger.error(f"Failed to load tool call policy, denying all tools (fail-closed): {e}")
+            self.policy_checker.deny_all = True
 
     async def _load_canary(self, agent_state) -> None:
         """Load the canary value from the __canary__ memory block.
 
         Lazy creation: if the canary block doesn't exist, create it
-        with a random value. The canary is in place before any tool
-        calls happen because step initialization runs before the LLM
-        is called.
+        with a random value AND persist it to the DB. The canary is
+        in place before any tool calls happen because step
+        initialization runs before the LLM is called.
         """
         from letta.security.canary import CanaryChecker
 
@@ -196,22 +199,82 @@ class LettaAgent(BaseAgent):
             if canary_block and canary_block.value:
                 self.canary_checker.update_canary(canary_block.value)
             else:
-                # Lazy creation: create the canary block on first use
+                # Lazy creation: create the canary block in DB and in-memory
                 canary_value = CanaryChecker.generate_canary_value()
-                agent_state.memory.update_block_value(
-                    label=CanaryChecker.CANARY_BLOCK_LABEL,
-                    value=canary_value,
-                )
-                # Mark the block as read_only and set description
-                for block in agent_state.memory.blocks:
-                    if block.label == CanaryChecker.CANARY_BLOCK_LABEL:
-                        block.read_only = True
-                        block.description = CanaryChecker.CANARY_BLOCK_DESCRIPTION
-                        break
+                await self._create_canary_block(agent_state, canary_value)
                 self.canary_checker.update_canary(canary_value)
         except Exception as e:
-            self.logger.warning(f"Failed to load/create canary, canary check disabled: {e}")
-            self.canary_checker.update_canary(None)
+            self.logger.error(f"Failed to load/create canary (fail-closed): {e}")
+            # Keep the last known canary if we have one; otherwise generate
+            # a fresh in-memory canary so the check still works (it just
+            # won't match the system prompt canary, which is the best we
+            # can do without DB access).
+            if not self.canary_checker.canary_value:
+                self.canary_checker.update_canary(CanaryChecker.generate_canary_value())
+
+    async def _create_canary_block(self, agent_state, canary_value: str) -> None:
+        """Create and persist the __canary__ memory block in the DB.
+
+        Also updates the in-memory agent_state so the canary appears
+        in the system prompt on the next refresh.
+        """
+        from letta.security.canary import CanaryChecker
+        from letta.orm.block import Block as BlockModel
+        from letta.orm.agent import Agent as AgentModel
+        from letta.server.db import db_registry
+        from letta.schemas.block import Block
+        from sqlalchemy import select
+
+        async with db_registry.async_session() as session:
+            # Check if the block already exists in DB (race safety)
+            stmt = select(BlockModel).where(
+                BlockModel.label == CanaryChecker.CANARY_BLOCK_LABEL,
+            ).join(
+                BlockModel.agents
+            ).where(
+                BlockModel.agents.any(id=self.agent_id),
+            )
+            result = await session.execute(stmt)
+            existing = result.scalar_one_or_none()
+
+            if existing:
+                # Block exists in DB but wasn't in agent_state — load its value
+                self.canary_checker.update_canary(existing.value)
+                # Add to in-memory state if not already there
+                if not any(b.label == CanaryChecker.CANARY_BLOCK_LABEL for b in agent_state.memory.blocks):
+                    pydantic_block = existing.to_pydantic()
+                    agent_state.memory.blocks.append(pydantic_block)
+                return
+
+            # Create new block in DB
+            org_id = self.actor.organization_id if self.actor else None
+            canary_block = BlockModel(
+                id=f"block-{uuid.uuid4()}",
+                organization_id=org_id,
+                label=CanaryChecker.CANARY_BLOCK_LABEL,
+                value=canary_value,
+                read_only=True,
+                description=CanaryChecker.CANARY_BLOCK_DESCRIPTION,
+                limit=500,
+            )
+            session.add(canary_block)
+
+            # Link block to agent via blocks_agents join table
+            agent_model = await session.get(AgentModel, self.agent_id)
+            if agent_model:
+                agent_model.core_memory.append(canary_block)
+
+            await session.flush()
+
+            # Add to in-memory agent_state
+            pydantic_block = Block(
+                id=canary_block.id,
+                label=CanaryChecker.CANARY_BLOCK_LABEL,
+                value=canary_value,
+                read_only=True,
+                description=CanaryChecker.CANARY_BLOCK_DESCRIPTION,
+            )
+            agent_state.memory.blocks.append(pydantic_block)
 
     async def _check_run_cancellation(self) -> bool:
         """
@@ -263,6 +326,14 @@ class LettaAgent(BaseAgent):
             return result
 
         _, new_in_context_messages, stop_reason, usage = result
+
+        # Security: log message_sent when the agent responds to the user
+        if stop_reason and stop_reason.stop_reason == StopReasonType.end_turn.value:
+            from letta.security.audit import audit_log
+            await audit_log(self.audit_logger, self.agent_id, self.actor,
+                            "message_sent", {"agent_id": self.agent_id},
+                            None, run_id, "message_sent")
+
         return _create_letta_response(
             new_in_context_messages=new_in_context_messages,
             use_assistant_message=use_assistant_message,
@@ -322,7 +393,7 @@ class LettaAgent(BaseAgent):
                     initial_messages=initial_messages,
                     is_final_step=(i == max_steps - 1),
                     step_metrics=step_metrics,
-                    run_id=self.current_run_id,
+                    run_id=run_id or self.current_run_id,
                     is_approval=input_messages[0].approve,
                     is_denial=input_messages[0].approve == False,
                     denial_reason=input_messages[0].reason,
@@ -372,7 +443,7 @@ class LettaAgent(BaseAgent):
                     context_window_limit=agent_state.llm_config.context_window,
                     usage=UsageStatistics(completion_tokens=0, prompt_tokens=0, total_tokens=0),
                     provider_id=None,
-                    run_id=self.current_run_id if self.current_run_id else None,
+                    run_id=run_id,
                     step_id=step_id,
                     project_id=agent_state.project_id,
                     status=StepStatus.PENDING,
@@ -615,6 +686,13 @@ class LettaAgent(BaseAgent):
                 force=False,
                 run_id=run_id,
             )
+
+        # Security: log message_sent when the agent responds to the user
+        if stop_reason and stop_reason.stop_reason == StopReasonType.end_turn.value:
+            from letta.security.audit import audit_log
+            await audit_log(self.audit_logger, self.agent_id, self.actor,
+                            "message_sent", {"agent_id": self.agent_id},
+                            None, run_id, "message_sent")
 
         await self._log_request(request_start_timestamp_ns, request_span, job_update_metadata, is_error=False)
 
@@ -1028,7 +1106,7 @@ class LettaAgent(BaseAgent):
                     initial_messages=new_in_context_messages,
                     is_final_step=(i == max_steps - 1),
                     step_metrics=step_metrics,
-                    run_id=self.current_run_id,
+                    run_id=run_id or self.current_run_id,
                     is_approval=input_messages[0].approve,
                     is_denial=input_messages[0].approve == False,
                     denial_reason=input_messages[0].reason,
@@ -1074,7 +1152,7 @@ class LettaAgent(BaseAgent):
                     context_window_limit=agent_state.llm_config.context_window,
                     usage=UsageStatistics(completion_tokens=0, prompt_tokens=0, total_tokens=0),
                     provider_id=None,
-                    run_id=self.current_run_id if self.current_run_id else None,
+                    run_id=run_id,
                     step_id=step_id,
                     project_id=agent_state.project_id,
                     status=StepStatus.PENDING,
@@ -1427,6 +1505,13 @@ class LettaAgent(BaseAgent):
                 run_id=run_id,
             )
 
+        # Security: log message_sent when the agent responds to the user
+        if stop_reason and stop_reason.stop_reason == StopReasonType.end_turn.value:
+            from letta.security.audit import audit_log
+            await audit_log(self.audit_logger, self.agent_id, self.actor,
+                            "message_sent", {"agent_id": self.agent_id},
+                            None, run_id, "message_sent")
+
         await self._log_request(request_start_timestamp_ns, request_span, job_update_metadata, is_error=False)
 
         for finish_chunk in self.get_finish_chunks_for_stream(usage, stop_reason):
@@ -1517,7 +1602,7 @@ class LettaAgent(BaseAgent):
                         telemetry_manager=self.telemetry_manager,
                         agent_id=self.agent_id,
                         agent_tags=agent_state.tags,
-                        run_id=self.current_run_id,
+                        run_id=run_id or self.current_run_id,
                         step_id=step_metrics.id,
                         call_type=LLMCallType.agent_step,
                     )
@@ -1590,7 +1675,7 @@ class LettaAgent(BaseAgent):
                     telemetry_manager=self.telemetry_manager,
                     agent_id=self.agent_id,
                     agent_tags=agent_state.tags,
-                    run_id=self.current_run_id,
+                    run_id=run_id or self.current_run_id,
                     step_id=step_id,
                     call_type=LLMCallType.agent_step,
                 )
@@ -1839,7 +1924,7 @@ class LettaAgent(BaseAgent):
                 reasoning_content=None,
                 pre_computed_assistant_message_id=None,
                 step_id=step_id,
-                run_id=self.current_run_id,
+                run_id=run_id or self.current_run_id,
                 is_approval_response=True,
             )
             messages_to_persist = (initial_messages or []) + tool_call_messages
@@ -1883,6 +1968,8 @@ class LettaAgent(BaseAgent):
         )
         # Security: check tool call policy FIRST
         from letta.security.policy import PolicyAction
+        from letta.security.audit import audit_log, tool_denied_event, canary_detected_event, classify_tool
+        _audit_run_id = run_id or self.current_run_id
         policy_action = self.policy_checker.check(tool_call_name)
         if policy_action == PolicyAction.DENY:
             tool_execution_result = ToolExecutionResult(
@@ -1890,17 +1977,9 @@ class LettaAgent(BaseAgent):
                 func_return=f"Tool '{tool_call_name}' is denied by the security policy.",
             )
             # Audit log
-            try:
-                await self.audit_logger.log(
-                    agent_id=self.agent_id,
-                    organization_id=self.actor.organization_id if self.actor else None,
-                    event_type="tool_denied",
-                    event_data={"tool_name": tool_call_name, "reason": "policy: denied_tools"},
-                    step_id=step_id,
-                    run_id=self.current_run_id,
-                )
-            except Exception as e:
-                self.logger.warning(f"Failed to write audit log: {e}")
+            await audit_log(self.audit_logger, self.agent_id, self.actor,
+                            "tool_denied", tool_denied_event(tool_call_name, "policy: denied_tools"),
+                            step_id, _audit_run_id, "tool_denied/policy")
         elif self.canary_checker.check(tool_args):
             # Security: canary detected in tool arguments — prompt exfiltration attempt
             tool_execution_result = ToolExecutionResult(
@@ -1908,17 +1987,9 @@ class LettaAgent(BaseAgent):
                 func_return="Tool call blocked: potential prompt exfiltration detected.",
             )
             # Audit log
-            try:
-                await self.audit_logger.log(
-                    agent_id=self.agent_id,
-                    organization_id=self.actor.organization_id if self.actor else None,
-                    event_type="canary_detected",
-                    event_data={"tool_name": tool_call_name},
-                    step_id=step_id,
-                    run_id=self.current_run_id,
-                )
-            except Exception as e:
-                self.logger.warning(f"Failed to write audit log: {e}")
+            await audit_log(self.audit_logger, self.agent_id, self.actor,
+                            "canary_detected", canary_detected_event(tool_call_name),
+                            step_id, _audit_run_id, "canary_detected")
         elif policy_action == PolicyAction.REQUIRE_APPROVAL and not is_approval:
             # Policy requires approval — same code path as RequiresApprovalToolRule
             # SKIP the ToolRulesSolver approval check to prevent double approval
@@ -1937,17 +2008,10 @@ class LettaAgent(BaseAgent):
             continue_stepping = False
             stop_reason = LettaStopReason(stop_reason=StopReasonType.requires_approval.value)
             # Audit log
-            try:
-                await self.audit_logger.log(
-                    agent_id=self.agent_id,
-                    organization_id=self.actor.organization_id if self.actor else None,
-                    event_type="tool_approval_requested",
-                    event_data={"tool_name": tool_call_name, "reason": "policy: approval_required_tools"},
-                    step_id=step_id,
-                    run_id=self.current_run_id,
-                )
-            except Exception as e:
-                self.logger.warning(f"Failed to write audit log: {e}")
+            await audit_log(self.audit_logger, self.agent_id, self.actor,
+                            "tool_approval_requested",
+                            {"tool_name": tool_call_name, "reason": "policy: approval_required_tools"},
+                            step_id, _audit_run_id, "tool_approval_requested/policy")
         elif not is_approval and tool_rules_solver.is_requires_approval_tool(tool_call_name):
             tool_args[REQUEST_HEARTBEAT_PARAM] = request_heartbeat
             approval_messages = create_approval_request_message_from_llm_response(
@@ -1965,17 +2029,10 @@ class LettaAgent(BaseAgent):
             stop_reason = LettaStopReason(stop_reason=StopReasonType.requires_approval.value)
 
             # Security audit: log approval request
-            try:
-                await self.audit_logger.log(
-                    agent_id=self.agent_id,
-                    organization_id=self.actor.organization_id if self.actor else None,
-                    event_type="tool_approval_requested",
-                    event_data={"tool_name": tool_call_name},
-                    step_id=step_id,
-                    run_id=self.current_run_id,
-                )
-            except Exception as e:
-                self.logger.warning(f"Failed to write audit log: {e}")
+            await audit_log(self.audit_logger, self.agent_id, self.actor,
+                            "tool_approval_requested",
+                            {"tool_name": tool_call_name},
+                            step_id, _audit_run_id, "tool_approval_requested/rule")
         else:
             # 2.  Execute the tool (or synthesize an error result if disallowed)
             tool_rule_violated = tool_call_name not in valid_tool_names and not is_approval
@@ -1983,17 +2040,9 @@ class LettaAgent(BaseAgent):
                 tool_execution_result = _build_rule_violation_result(tool_call_name, valid_tool_names, tool_rules_solver)
 
                 # Security audit: log tool denial
-                try:
-                    await self.audit_logger.log(
-                        agent_id=self.agent_id,
-                        organization_id=self.actor.organization_id if self.actor else None,
-                        event_type="tool_denied",
-                        event_data={"tool_name": tool_call_name, "reason": "tool_rule_violation"},
-                        step_id=step_id,
-                        run_id=self.current_run_id,
-                    )
-                except Exception as e:
-                    self.logger.warning(f"Failed to write audit log: {e}")
+                await audit_log(self.audit_logger, self.agent_id, self.actor,
+                                "tool_denied", tool_denied_event(tool_call_name, "tool_rule_violation"),
+                                step_id, _audit_run_id, "tool_denied/violation")
             else:
                 # Track tool execution time
                 tool_start_time = get_utc_timestamp_ns()
@@ -2036,17 +2085,13 @@ class LettaAgent(BaseAgent):
                     self.logger.warning(f"Failed to persist tool call record: {e}")
 
                 # Security audit: log tool execution
-                try:
-                    await self.audit_logger.log(
-                        agent_id=self.agent_id,
-                        organization_id=self.actor.organization_id if self.actor else None,
-                        event_type="tool_executed",
-                        event_data={"tool_call_id": tool_call_id, "tool_name": tool_call_name},
-                        step_id=step_id,
-                        run_id=self.current_run_id,
-                    )
-                except Exception as e:
-                    self.logger.warning(f"Failed to write audit log: {e}")
+                _tool_category = classify_tool(tool_call_name)
+                _event_data = {"tool_call_id": tool_call_id, "tool_name": tool_call_name}
+                if _tool_category:
+                    _event_data["tool_category"] = _tool_category
+                await audit_log(self.audit_logger, self.agent_id, self.actor,
+                                "tool_executed", _event_data,
+                                step_id, _audit_run_id, "tool_executed")
 
             log_telemetry(
                 self.logger,
@@ -2097,7 +2142,7 @@ class LettaAgent(BaseAgent):
                 reasoning_content=reasoning_content,
                 pre_computed_assistant_message_id=pre_computed_assistant_message_id,
                 step_id=step_id,
-                run_id=self.current_run_id,
+                run_id=run_id or self.current_run_id,
                 is_approval_response=is_approval or is_denial,
             )
             messages_to_persist = (initial_messages or []) + tool_call_messages

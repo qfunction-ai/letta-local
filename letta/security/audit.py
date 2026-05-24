@@ -29,27 +29,51 @@ logger = get_logger(__name__)
 class SecurityEventType(str, Enum):
     """Security event types for the audit log.
 
-    v1 scope: only events that happen in the agent loop where we
-    already have call sites. CREDENTIAL_ACCESSED, AGENT_CREATED,
-    and AGENT_DELETED require call sites in shared code outside
-    the loop. Add them later when that code is instrumented.
+    Only events that are actually emitted by the agent loop are listed
+    here. Dead values have been removed — if you need a new event type,
+    add it here AND wire it into the agent loop before shipping.
     """
 
     # Tool execution events
     TOOL_EXECUTED = "tool_executed"
     TOOL_DENIED = "tool_denied"
     TOOL_APPROVAL_REQUESTED = "tool_approval_requested"
-    TOOL_APPROVAL_GRANTED = "tool_approval_granted"
-    TOOL_APPROVAL_DENIED = "tool_approval_denied"
 
-    # Policy events (future: tool call policies)
-    POLICY_VIOLATION = "policy_violation"
-
-    # Canary events (future: output canary checks)
+    # Canary events
     CANARY_DETECTED = "canary_detected"
 
-    # Memory mutation events
-    MEMORY_BLOCK_MODIFIED = "memory_block_modified"
+    # Agent output events
+    MESSAGE_SENT = "message_sent"
+
+
+# Tool classification: maps tool names to categories for audit event_data.
+# Used by classify_tool() to add a tool_category field to tool_executed events.
+MEMORY_WRITE_TOOLS = frozenset({
+    "core_memory_append", "core_memory_replace", "memory_replace",
+    "memory_insert", "memory_rethink", "memory_apply_patch",
+})
+MEMORY_READ_TOOLS = frozenset({
+    "archival_memory_search", "conversation_search",
+})
+ARCHIVAL_WRITE_TOOLS = frozenset({
+    "archival_memory_insert",
+})
+NETWORK_TOOLS = frozenset({
+    "web_search", "fetch_webpage",
+})
+
+
+def classify_tool(tool_name: str) -> str | None:
+    """Return tool_category string for audit event_data, or None for unclassified tools."""
+    if tool_name in MEMORY_WRITE_TOOLS:
+        return "memory_write"
+    if tool_name in MEMORY_READ_TOOLS:
+        return "memory_read"
+    if tool_name in ARCHIVAL_WRITE_TOOLS:
+        return "archival_write"
+    if tool_name in NETWORK_TOOLS:
+        return "network"
+    return None
 
 
 class AuditLogger:
@@ -98,3 +122,60 @@ class AuditLogger:
         async with db_registry.async_session() as session:
             session.add(event)
             await session.flush()
+
+
+# ---------------------------------------------------------------------------
+# Audit helper functions — use these instead of calling audit_logger.log()
+# directly. They handle try/except and event_data construction so callers
+# don't have to repeat the same boilerplate.
+# ---------------------------------------------------------------------------
+
+
+async def audit_log(
+    audit_logger: AuditLogger,
+    agent_id: str,
+    actor,
+    event_type: str,
+    event_data: dict,
+    step_id: str,
+    run_id: str | None,
+    label: str = "",
+    actor_id: str | None = None,
+) -> None:
+    """Write an audit log entry. Never raises — errors are logged and swallowed.
+
+    This is the canonical way to write audit events. Prefer this over
+    calling ``audit_logger.log()`` directly, which requires the caller
+    to wrap the call in its own try/except.
+    """
+    try:
+        await audit_logger.log(
+            agent_id=agent_id,
+            organization_id=actor.organization_id if actor else None,
+            event_type=event_type,
+            event_data=event_data,
+            step_id=step_id,
+            run_id=run_id,
+            actor_id=actor_id or (actor.id if actor else None),
+        )
+    except Exception as e:
+        suffix = f" ({label})" if label else ""
+        logger.warning(f"Failed to write audit log{suffix}: {e}")
+
+
+def tool_denied_event(tool_name: str, reason: str) -> dict:
+    """Build event_data for a tool_denied event with tool_category."""
+    data = {"tool_name": tool_name, "reason": reason}
+    cat = classify_tool(tool_name)
+    if cat:
+        data["tool_category"] = cat
+    return data
+
+
+def canary_detected_event(tool_name: str) -> dict:
+    """Build event_data for a canary_detected event with tool_category."""
+    data = {"tool_name": tool_name}
+    cat = classify_tool(tool_name)
+    if cat:
+        data["tool_category"] = cat
+    return data

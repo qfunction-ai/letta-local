@@ -28,7 +28,7 @@ def upgrade() -> None:
         sa.Column('event_type', sa.String(), nullable=False),
         sa.Column('event_data', sa.JSON(), nullable=True),
         sa.Column('actor_id', sa.String(), nullable=True),
-        sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=True),
+        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
         sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
         sa.Column('is_deleted', sa.Boolean(), server_default=sa.text('FALSE'), nullable=False),
         sa.Column('_created_by_id', sa.String(), nullable=True),

@@ -54,8 +54,13 @@ async def get_tool_call_policy(
     except Exception:
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
 
+    _org_id = actor.organization_id
+
     async with db_registry.async_session() as session:
-        stmt = select(ToolCallPolicyModel).where(ToolCallPolicyModel.agent_id == agent_id)
+        stmt = select(ToolCallPolicyModel).where(
+            ToolCallPolicyModel.agent_id == agent_id,
+            ToolCallPolicyModel.organization_id == _org_id,
+        )
         result = await session.execute(stmt)
         policy_model = result.scalar_one_or_none()
 
@@ -95,13 +100,17 @@ async def update_tool_call_policy(
     except Exception:
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
 
+    _org_id = actor.organization_id
     policy = ToolCallPolicy(
         denied_tools=request.denied_tools,
         approval_required_tools=request.approval_required_tools,
     )
 
     async with db_registry.async_session() as session:
-        stmt = select(ToolCallPolicyModel).where(ToolCallPolicyModel.agent_id == agent_id)
+        stmt = select(ToolCallPolicyModel).where(
+            ToolCallPolicyModel.agent_id == agent_id,
+            ToolCallPolicyModel.organization_id == _org_id,
+        )
         result = await session.execute(stmt)
         policy_model = result.scalar_one_or_none()
 
@@ -110,6 +119,7 @@ async def update_tool_call_policy(
         else:
             policy_model = ToolCallPolicyModel(
                 agent_id=agent_id,
+                organization_id=_org_id,
                 policy=policy.model_dump(),
             )
             session.add(policy_model)
@@ -146,8 +156,13 @@ async def delete_tool_call_policy(
     except Exception:
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
 
+    _org_id = actor.organization_id
+
     async with db_registry.async_session() as session:
-        stmt = select(ToolCallPolicyModel).where(ToolCallPolicyModel.agent_id == agent_id)
+        stmt = select(ToolCallPolicyModel).where(
+            ToolCallPolicyModel.agent_id == agent_id,
+            ToolCallPolicyModel.organization_id == _org_id,
+        )
         result = await session.execute(stmt)
         policy_model = result.scalar_one_or_none()
 

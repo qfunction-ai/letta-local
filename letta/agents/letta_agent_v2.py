@@ -285,6 +285,20 @@ class LettaAgentV2(BaseAgentV2):
         if self.stop_reason is None:
             self.stop_reason = LettaStopReason(stop_reason=StopReasonType.end_turn.value)
 
+        # Security: log message_sent when the agent responds to the user
+        if self.stop_reason.stop_reason == StopReasonType.end_turn.value:
+            try:
+                await self.audit_logger.log(
+                    agent_id=self.agent_id,
+                    organization_id=self.actor.organization_id if self.actor else None,
+                    event_type="message_sent",
+                    event_data={"agent_id": self.agent_id},
+                    step_id=None,
+                    run_id=run_id,
+                )
+            except Exception as _e:
+                self.logger.warning(f"Failed to write audit log (message_sent): {_e}")
+
         result = LettaResponse(messages=response_letta_messages, stop_reason=self.stop_reason, usage=self.usage)
         if run_id:
             if self.job_update_metadata is None:
@@ -435,6 +449,21 @@ class LettaAgentV2(BaseAgentV2):
                 self.job_update_metadata = {}
             self.job_update_metadata["result"] = result.model_dump(mode="json")
 
+        # Security: log message_sent when the agent responds to the user
+        # Fire unconditionally — not gated on run_id (audit_logger handles run_id=None)
+        if self.stop_reason and self.stop_reason.stop_reason == StopReasonType.end_turn.value:
+            try:
+                await self.audit_logger.log(
+                    agent_id=self.agent_id,
+                    organization_id=self.actor.organization_id if self.actor else None,
+                    event_type="message_sent",
+                    event_data={"agent_id": self.agent_id},
+                    step_id=None,
+                    run_id=run_id,
+                )
+            except Exception as _e:
+                self.logger.warning(f"Failed to write audit log (message_sent): {_e}")
+
         await self._request_checkpoint_finish(
             request_span=request_span, request_start_timestamp_ns=request_start_timestamp_ns, run_id=run_id
         )
@@ -494,6 +523,9 @@ class LettaAgentV2(BaseAgentV2):
         )
         try:
             self.last_function_response = _load_last_function_response(messages)
+            # Security: load policy and canary before any tool execution
+            await self._load_tool_call_policy()
+            await self._load_canary()
             valid_tools = await self._get_valid_tools()
             approval_request, approval_response = _maybe_get_approval_messages(messages)
             if approval_request and approval_response:
@@ -726,6 +758,7 @@ class LettaAgentV2(BaseAgentV2):
                 self.logger.error(f"Error during post-completion step tracking: {e}")
 
     def _initialize_state(self):
+        self._initialize_security()
         self.should_continue = True
         self.stop_reason = None
         self.usage = LettaUsageStatistics()
@@ -1135,7 +1168,84 @@ class LettaAgentV2(BaseAgentV2):
             request_heartbeat=request_heartbeat,
         )
 
-        if not is_approval and tool_rules_solver.is_requires_approval_tool(tool_call_name):
+        # Security: check tool call policy FIRST
+        from letta.security.policy import PolicyAction
+        from letta.security.audit import classify_tool
+        policy_action = self.policy_checker.check(tool_call_name)
+        if policy_action == PolicyAction.DENY:
+            tool_execution_result = ToolExecutionResult(
+                status="error",
+                func_return=f"Tool '{tool_call_name}' is denied by the security policy.",
+            )
+            # Audit log: tool denied by policy
+            _tc = classify_tool(tool_call_name)
+            _ed = {"tool_name": tool_call_name, "reason": "policy: denied_tools"}
+            if _tc:
+                _ed["tool_category"] = _tc
+            try:
+                await self.audit_logger.log(
+                    agent_id=self.agent_id,
+                    organization_id=self.actor.organization_id if self.actor else None,
+                    event_type="tool_denied",
+                    event_data=_ed,
+                    step_id=step_id,
+                    run_id=run_id,
+                )
+            except Exception as _e:
+                self.logger.warning(f"Failed to write audit log (tool_denied/policy): {_e}")
+        elif self.canary_checker.check(tool_args):
+            # Security: canary detected in tool arguments — prompt exfiltration attempt
+            tool_execution_result = ToolExecutionResult(
+                status="error",
+                func_return="Tool call blocked: potential prompt exfiltration detected.",
+            )
+            # Audit log: canary detected
+            _tc = classify_tool(tool_call_name)
+            _ed = {"tool_name": tool_call_name}
+            if _tc:
+                _ed["tool_category"] = _tc
+            try:
+                await self.audit_logger.log(
+                    agent_id=self.agent_id,
+                    organization_id=self.actor.organization_id if self.actor else None,
+                    event_type="canary_detected",
+                    event_data=_ed,
+                    step_id=step_id,
+                    run_id=run_id,
+                )
+            except Exception as _e:
+                self.logger.warning(f"Failed to write audit log (canary_detected): {_e}")
+        elif policy_action == PolicyAction.REQUIRE_APPROVAL and not is_approval:
+            # Policy requires approval — same code path as RequiresApprovalToolRule
+            # SKIP the ToolRulesSolver approval check to prevent double approval
+            tool_args[REQUEST_HEARTBEAT_PARAM] = request_heartbeat
+            approval_messages = create_approval_request_message_from_llm_response(
+                agent_id=agent_state.id,
+                model=agent_state.llm_config.model,
+                requested_tool_calls=[
+                    ToolCall(id=tool_call_id, function=FunctionCall(name=tool_call_name, arguments=json.dumps(tool_args)))
+                ],
+                reasoning_content=reasoning_content,
+                pre_computed_assistant_message_id=pre_computed_assistant_message_id,
+                step_id=step_id,
+                run_id=run_id,
+            )
+            messages_to_persist = (initial_messages or []) + approval_messages
+            continue_stepping = False
+            stop_reason = LettaStopReason(stop_reason=StopReasonType.requires_approval.value)
+            # Audit log: approval requested by policy
+            try:
+                await self.audit_logger.log(
+                    agent_id=self.agent_id,
+                    organization_id=self.actor.organization_id if self.actor else None,
+                    event_type="tool_approval_requested",
+                    event_data={"tool_name": tool_call_name, "reason": "policy: approval_required_tools"},
+                    step_id=step_id,
+                    run_id=run_id,
+                )
+            except Exception as _e:
+                self.logger.warning(f"Failed to write audit log (tool_approval_requested/policy): {_e}")
+        elif not is_approval and tool_rules_solver.is_requires_approval_tool(tool_call_name):
             tool_args[REQUEST_HEARTBEAT_PARAM] = request_heartbeat
             approval_messages = create_approval_request_message_from_llm_response(
                 agent_id=agent_state.id,
@@ -1156,6 +1266,22 @@ class LettaAgentV2(BaseAgentV2):
             tool_rule_violated = tool_call_name not in valid_tool_names and not is_approval
             if tool_rule_violated:
                 tool_execution_result = _build_rule_violation_result(tool_call_name, valid_tool_names, tool_rules_solver)
+                # Audit log: tool denied by rule
+                _tc = classify_tool(tool_call_name)
+                _ed = {"tool_name": tool_call_name, "reason": "tool_rule_violation"}
+                if _tc:
+                    _ed["tool_category"] = _tc
+                try:
+                    await self.audit_logger.log(
+                        agent_id=self.agent_id,
+                        organization_id=self.actor.organization_id if self.actor else None,
+                        event_type="tool_denied",
+                        event_data=_ed,
+                        step_id=step_id,
+                        run_id=run_id,
+                    )
+                except Exception as _e:
+                    self.logger.warning(f"Failed to write audit log (tool_denied/violation): {_e}")
             else:
                 # Track tool execution time
                 tool_start_time = get_utc_timestamp_ns()
@@ -1172,6 +1298,38 @@ class LettaAgentV2(BaseAgentV2):
 
                 # Store tool execution time in metrics
                 step_metrics.tool_execution_ns = tool_end_time - tool_start_time
+
+                # Audit log: tool executed (with category classification)
+                _tool_category = classify_tool(tool_call_name)
+                _event_data = {"tool_call_id": tool_call_id, "tool_name": tool_call_name}
+                if _tool_category:
+                    _event_data["tool_category"] = _tool_category
+                try:
+                    await self.audit_logger.log(
+                        agent_id=self.agent_id,
+                        organization_id=self.actor.organization_id if self.actor else None,
+                        event_type="tool_executed",
+                        event_data=_event_data,
+                        step_id=step_id,
+                        run_id=run_id,
+                    )
+                except Exception as _e:
+                    self.logger.warning(f"Failed to write audit log (tool_executed): {_e}")
+
+                # Record tool call for observability
+                try:
+                    await self.tool_call_recorder.record_tool_call(
+                        step_id=step_id,
+                        agent_id=self.agent_id,
+                        organization_id=self.actor.organization_id if self.actor else None,
+                        tool_name=tool_call_name,
+                        tool_args=tool_args,
+                        tool_result=str(tool_execution_result.func_return) if tool_execution_result.func_return else None,
+                        duration_ns=tool_end_time - tool_start_time,
+                        success=tool_execution_result.success_flag,
+                    )
+                except Exception as _rec_err:
+                    self.logger.warning(f"Failed to record tool call: {_rec_err}")
 
             log_telemetry(
                 self.logger,

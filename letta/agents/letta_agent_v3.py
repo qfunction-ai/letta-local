@@ -121,6 +121,7 @@ class LettaAgentV3(LettaAgentV2):
 
     def _initialize_state(self):
         super()._initialize_state()
+        self._initialize_security()
         self._require_tool_call = False
         # Approximate token count for the *current* in-context buffer, used
         # only for proactive summarization / eviction logic. This is derived
@@ -412,6 +413,14 @@ class LettaAgentV3(LettaAgentV2):
         if self.stop_reason is None:
             self.stop_reason = LettaStopReason(stop_reason=StopReasonType.end_turn.value)
 
+        # Security: log message_sent when the agent responds to the user
+        # (end_turn means the agent produced text output instead of a tool call)
+        if self.stop_reason.stop_reason == StopReasonType.end_turn.value:
+            from letta.security.audit import audit_log
+            await audit_log(self.audit_logger, self.agent_id, self.actor,
+                            "message_sent", {"agent_id": self.agent_id},
+                            None, run_id, "message_sent")
+
         # construct the response
         response_letta_messages = Message.to_letta_messages_from_list(
             self.response_messages,
@@ -645,6 +654,14 @@ class LettaAgentV3(LettaAgentV2):
 
             if self.stop_reason is None:
                 self.stop_reason = LettaStopReason(stop_reason=StopReasonType.end_turn.value)
+
+            # Security: log message_sent when the agent responds to the user
+            # (end_turn means the agent produced text output instead of a tool call)
+            if self.stop_reason.stop_reason == StopReasonType.end_turn.value:
+                from letta.security.audit import audit_log
+                await audit_log(self.audit_logger, self.agent_id, self.actor,
+                                "message_sent", {"agent_id": self.agent_id},
+                                None, run_id, "message_sent")
 
         except Exception as e:
             # Use repr() if str() is empty (happens with Exception() with no args)
@@ -952,6 +969,9 @@ class LettaAgentV3(LettaAgentV2):
         )
         try:
             self.last_function_response = _load_last_function_response(messages)
+            # Security: load policy and canary before any tool execution
+            await self._load_tool_call_policy()
+            await self._load_canary()
             valid_tools = await self._get_valid_tools()
             require_tool_call = self.tool_rules_solver.should_force_tool_call()
 
@@ -1379,6 +1399,7 @@ class LettaAgentV3(LettaAgentV2):
                 tool_call_denials=tool_call_denials,
                 tool_returns=tool_returns,
                 finish_reason=llm_adapter.finish_reason,
+                active_llm_config=active_llm_config,
             )
 
             # extend trackers with new messages
@@ -1626,6 +1647,7 @@ class LettaAgentV3(LettaAgentV2):
         tool_call_denials: list[ToolCallDenial] = [],
         tool_returns: list[ToolReturn] = [],
         finish_reason: str | None = None,
+        active_llm_config: object = None,
     ) -> tuple[list[Message], bool, LettaStopReason | None]:
         """
         Handle the final AI response once streaming completes, execute / validate tool calls,
@@ -1867,11 +1889,41 @@ class LettaAgentV3(LettaAgentV2):
 
         # 5c. Execute tools (sequentially for single, parallel for multiple)
         async def _run_one(spec: Dict[str, Any]):
+            from letta.security.audit import audit_log, tool_denied_event, canary_detected_event, classify_tool
+
             if spec.get("error"):
+                # Audit log: malformed tool call
+                await audit_log(self.audit_logger, self.agent_id, self.actor,
+                                "tool_denied", tool_denied_event(spec["name"], "malformed_arguments"),
+                                step_id, run_id, "tool_denied/malformed")
                 return ToolExecutionResult(status="error", func_return=spec["error"]), 0
             if spec["violated"]:
                 result = _build_rule_violation_result(spec["name"], valid_tool_names, tool_rules_solver)
+                # Audit log: tool rule violation
+                await audit_log(self.audit_logger, self.agent_id, self.actor,
+                                "tool_denied", tool_denied_event(spec["name"], "tool_rule_violation"),
+                                step_id, run_id, "tool_denied/violation")
                 return result, 0
+            # Security: check tool call policy FIRST
+            from letta.security.policy import PolicyAction
+            policy_action = self.policy_checker.check(spec["name"])
+            if policy_action == PolicyAction.DENY:
+                await audit_log(self.audit_logger, self.agent_id, self.actor,
+                                "tool_denied", tool_denied_event(spec["name"], "policy: denied_tools"),
+                                step_id, run_id, "tool_denied/policy")
+                return ToolExecutionResult(
+                    status="error",
+                    func_return=f"Tool '{spec['name']}' is denied by the security policy.",
+                ), 0
+            # Security: canary check on tool arguments
+            if self.canary_checker.check(spec["args"]):
+                await audit_log(self.audit_logger, self.agent_id, self.actor,
+                                "canary_detected", canary_detected_event(spec["name"]),
+                                step_id, run_id, "canary_detected")
+                return ToolExecutionResult(
+                    status="error",
+                    func_return="Tool call blocked: potential prompt exfiltration detected.",
+                ), 0
             t0 = get_utc_timestamp_ns()
             target_tool = next((x for x in self.agent_state.tools if x.name == spec["name"]), None)
             res = await self._execute_tool(
@@ -1882,6 +1934,28 @@ class LettaAgentV3(LettaAgentV2):
                 step_id=step_id,
             )
             dt = get_utc_timestamp_ns() - t0
+            # Audit log: tool executed (with category classification)
+            _tool_category = classify_tool(spec["name"])
+            _event_data = {"tool_call_id": spec["id"], "tool_name": spec["name"]}
+            if _tool_category:
+                _event_data["tool_category"] = _tool_category
+            await audit_log(self.audit_logger, self.agent_id, self.actor,
+                            "tool_executed", _event_data,
+                            step_id, run_id, "tool_executed")
+            # Record tool call for observability
+            try:
+                await self.tool_call_recorder.record_tool_call(
+                    step_id=step_id,
+                    agent_id=self.agent_id,
+                    organization_id=self.actor.organization_id if self.actor else None,
+                    tool_name=spec["name"],
+                    tool_args=spec["args"],
+                    tool_result=str(res.func_return) if res.func_return else None,
+                    duration_ns=dt,
+                    success=res.success_flag,
+                )
+            except Exception as _rec_err:
+                self.logger.warning(f"Failed to record tool call: {_rec_err}")
             return res, dt
 
         if len(exec_specs) == 1:

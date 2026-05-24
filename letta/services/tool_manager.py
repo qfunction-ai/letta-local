@@ -1196,7 +1196,7 @@ class ToolManager:
             )
 
             # auto-generate description if not provided
-            if pydantic_tool.description is None:
+            if pydantic_tool.description is None and pydantic_tool.json_schema is not None:
                 pydantic_tool.description = pydantic_tool.json_schema.get("description", None)
 
             tool_data_list.append(pydantic_tool)

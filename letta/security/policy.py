@@ -76,6 +76,7 @@ class PolicyChecker:
 
     def __init__(self, policy: Optional[ToolCallPolicy] = None):
         self.policy = policy or ToolCallPolicy()
+        self.deny_all = False  # Set to True when policy load fails (fail-closed)
 
     def check(self, tool_name: str) -> PolicyAction:
         """Check a tool call against the security policy.
@@ -86,6 +87,8 @@ class PolicyChecker:
         Returns:
             PolicyAction: ALLOW, DENY, or REQUIRE_APPROVAL.
         """
+        if self.deny_all:
+            return PolicyAction.DENY
         if tool_name in self.policy.denied_tools:
             return PolicyAction.DENY
         if tool_name in self.policy.approval_required_tools:
@@ -95,3 +98,4 @@ class PolicyChecker:
     def update_policy(self, policy: ToolCallPolicy) -> None:
         """Update the policy (e.g., after loading from DB)."""
         self.policy = policy
+        self.deny_all = False  # Successful update clears the fail-closed flag

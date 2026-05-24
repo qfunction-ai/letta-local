@@ -10,9 +10,15 @@ a buffer and flush mechanism.
 
 Truncation happens here, not in the schema. The column is TEXT (unbounded).
 The recorder logs when truncation occurs.
+
+tool_args sanitization: the observability table is NOT a forensic data
+dump. Sensitive keys (content, message, query) are redacted to [REDACTED]
+before storage. The audit log (security_events) stores only tool_call_id
+and tool_name — it doesn't duplicate args. The recorder follows the same
+discipline: record what happened, not everything that was said.
 """
 
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 from letta.log import get_logger
@@ -20,6 +26,39 @@ from letta.log import get_logger
 logger = get_logger(__name__)
 
 _TRUNCATION_LIMIT = 10000
+
+# Keys in tool_args dicts that are known to contain sensitive content
+# (PII, credentials, full message text, etc.). Values are replaced with
+# [REDACTED] before storage. The key names are preserved so the schema
+# is still queryable — you can see that a tool received a "content" arg,
+# you just can't read what was in it.
+_SENSITIVE_ARG_KEYS = frozenset({
+    "content", "old_content", "new_content",
+    "message", "query",
+})
+
+
+def _sanitize_tool_args(tool_args: Optional[dict]) -> Optional[dict]:
+    """Redact known-sensitive keys from tool_args before DB storage.
+
+    Returns a shallow copy with sensitive values replaced by [REDACTED].
+    Non-sensitive keys are preserved as-is. Nested dicts are not recursed
+    — tool args from the LLM are flat key-value pairs in practice.
+    """
+    if not tool_args:
+        return tool_args
+    sanitized = {}
+    for k, v in tool_args.items():
+        if k in _SENSITIVE_ARG_KEYS:
+            sanitized[k] = "[REDACTED]"
+        elif isinstance(v, str) and len(v) > 500:
+            # Truncate long string values that aren't in the explicit
+            # sensitive set. 500 chars is enough to see the structure
+            # without storing entire API responses.
+            sanitized[k] = v[:500] + "...[truncated]"
+        else:
+            sanitized[k] = v
+    return sanitized
 
 
 class ToolCallRecorder:
@@ -51,6 +90,9 @@ class ToolCallRecorder:
         """Persist a ToolCall record to the DB."""
         from letta.orm.tool_call import ToolCall
         from letta.server.db import db_registry
+
+        # Sanitize tool_args before storage
+        tool_args = _sanitize_tool_args(tool_args)
 
         if tool_result and len(tool_result) > _TRUNCATION_LIMIT:
             logger.debug(
