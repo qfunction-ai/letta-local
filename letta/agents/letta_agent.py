@@ -312,6 +312,8 @@ class LettaAgent(BaseAgent):
             include_relationships=["tools", "memory", "tool_exec_environment_variables", "sources"],
             actor=self.actor,
         )
+        # Initialize token budget from agent metadata for this run
+        self.token_budget = self._create_token_budget(agent_state)
         result = await self._step(
             agent_state=agent_state,
             input_messages=input_messages,
@@ -494,9 +496,22 @@ class LettaAgent(BaseAgent):
                     usage.completion_tokens += response.usage.completion_tokens
                     usage.prompt_tokens += response.usage.prompt_tokens
                     usage.total_tokens += response.usage.total_tokens
+                    # Track server-reported context tokens for budget enforcement
+                    if hasattr(response, 'usage') and response.usage and response.usage.prompt_tokens is not None and response.usage.prompt_tokens > 0:
+                        usage.context_tokens = response.usage.prompt_tokens
                     MetricRegistry().message_output_tokens.record(
                         response.usage.completion_tokens, dict(get_ctx_attributes(), **{"model.name": agent_state.llm_config.model})
                     )
+
+                    # Token budget enforcement: check after each LLM call
+                    budget_decision = self.token_budget.check(
+                        step_tokens=response.usage.prompt_tokens + response.usage.completion_tokens,
+                        total_run_tokens=usage.total_tokens,
+                    )
+                    if budget_decision.exceeded:
+                        self.stop_reason = LettaStopReason(stop_reason=StopReasonType.max_tokens_exceeded.value)
+                        self.logger.warning(f"Token budget exceeded: {budget_decision.reason}")
+                        break
 
                     if not response.choices[0].message.tool_calls:
                         stop_reason = LettaStopReason(stop_reason=StopReasonType.no_tool_call.value)
@@ -613,6 +628,8 @@ class LettaAgent(BaseAgent):
                 # Update step if it needs to be updated
                 finally:
                     if step_progression == StepProgression.FINISHED and should_continue:
+                        # Step succeeded — reset circuit breaker counters
+                        self.circuit_breaker.record_success()
                         continue
 
                     self.logger.debug("Running cleanup for agent loop run: %s", self.current_run_id)
@@ -858,9 +875,22 @@ class LettaAgent(BaseAgent):
                     usage.prompt_tokens += response.usage.prompt_tokens
                     usage.total_tokens += response.usage.total_tokens
                     usage.run_ids = [run_id] if run_id else None
+                    # Track server-reported context tokens for budget enforcement
+                    if response.usage and response.usage.prompt_tokens is not None and response.usage.prompt_tokens > 0:
+                        usage.context_tokens = response.usage.prompt_tokens
                     MetricRegistry().message_output_tokens.record(
                         response.usage.completion_tokens, dict(get_ctx_attributes(), **{"model.name": agent_state.llm_config.model})
                     )
+
+                    # Token budget enforcement: check after each LLM call
+                    budget_decision = self.token_budget.check(
+                        step_tokens=response.usage.prompt_tokens + response.usage.completion_tokens,
+                        total_run_tokens=usage.total_tokens,
+                    )
+                    if budget_decision.exceeded:
+                        self.stop_reason = LettaStopReason(stop_reason=StopReasonType.max_tokens_exceeded.value)
+                        self.logger.warning(f"Token budget exceeded: {budget_decision.reason}")
+                        break
 
                     if not response.choices[0].message.tool_calls:
                         stop_reason = LettaStopReason(stop_reason=StopReasonType.no_tool_call.value)
@@ -1256,6 +1286,18 @@ class LettaAgent(BaseAgent):
                     usage.completion_tokens += interface.output_tokens
                     usage.prompt_tokens += interface.input_tokens
                     usage.total_tokens += interface.input_tokens + interface.output_tokens
+                    # Track server-reported context tokens for budget enforcement
+                    if interface.input_tokens is not None and interface.input_tokens > 0:
+                        usage.context_tokens = interface.input_tokens
+                    # Token budget enforcement: check after each LLM call
+                    budget_decision = self.token_budget.check(
+                        step_tokens=(interface.input_tokens or 0) + (interface.output_tokens or 0),
+                        total_run_tokens=usage.total_tokens,
+                    )
+                    if budget_decision.exceeded:
+                        self.stop_reason = LettaStopReason(stop_reason=StopReasonType.max_tokens_exceeded.value)
+                        self.logger.warning(f"Token budget exceeded: {budget_decision.reason}")
+                        break
                     # Aggregate cache and reasoning tokens if available from streaming interface (handle None defaults)
                     if hasattr(interface, "cached_tokens") and interface.cached_tokens is not None:
                         usage.cached_input_tokens = (usage.cached_input_tokens or 0) + interface.cached_tokens
@@ -1741,6 +1783,21 @@ class LettaAgent(BaseAgent):
         step_id: str | None = None,
     ) -> list[Message]:
         if isinstance(e, ContextWindowExceededError):
+            # Circuit breaker: track consecutive context overflow errors
+            action = self._handle_circuit_breaker_error("context_window_overflow")
+            if action == "auto_compact":
+                self.logger.warning(
+                    "Circuit breaker triggered for context_window_overflow (%d consecutive), force-clearing context",
+                    self.circuit_breaker.get_counts().get("context_window_overflow", 0),
+                )
+                return await self._rebuild_context_window(
+                    in_context_messages=in_context_messages,
+                    new_letta_messages=new_letta_messages,
+                    llm_config=llm_config,
+                    force=True,  # force-clear on circuit breaker trigger
+                    run_id=run_id,
+                    step_id=step_id,
+                )
             return await self._rebuild_context_window(
                 in_context_messages=in_context_messages,
                 new_letta_messages=new_letta_messages,
@@ -1750,6 +1807,21 @@ class LettaAgent(BaseAgent):
                 step_id=step_id,
             )
         elif isinstance(e, LLMError):
+            # Circuit breaker: track consecutive LLM errors
+            action = self._handle_circuit_breaker_error("llm_api_error")
+            if action == "auto_compact":
+                self.logger.warning(
+                    "Circuit breaker triggered for llm_api_error (%d consecutive), force-clearing context",
+                    self.circuit_breaker.get_counts().get("llm_api_error", 0),
+                )
+                return await self._rebuild_context_window(
+                    in_context_messages=in_context_messages,
+                    new_letta_messages=new_letta_messages,
+                    llm_config=llm_config,
+                    force=True,
+                    run_id=run_id,
+                    step_id=step_id,
+                )
             raise
         else:
             raise llm_client.handle_llm_error(e, llm_config=llm_config)

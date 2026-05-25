@@ -10,8 +10,12 @@ def get_vllm_completion(endpoint, auth_type, auth_key, model, prompt, context_wi
     """https://github.com/vllm-project/vllm/blob/main/examples/api_client.py"""
     from letta.utils import printd
 
-    # Approximate token count: bytes / 4
-    prompt_tokens = len(prompt.encode("utf-8")) // 4
+    # Approximate token count: bytes / 4 (pre-call estimate)
+    # Corrected by model-family factor for local models
+    from letta.local_llm.token_correction import get_token_correction
+
+    raw_bytes4_estimate = len(prompt.encode("utf-8")) // 4
+    prompt_tokens = int(raw_bytes4_estimate * get_token_correction(model))
     if prompt_tokens > context_window:
         raise Exception(f"Request exceeds maximum context length ({prompt_tokens} > {context_window} tokens)")
 
@@ -57,9 +61,13 @@ def get_vllm_completion(endpoint, auth_type, auth_key, model, prompt, context_wi
     # Pass usage statistics back to main thread
     # These are used to compute memory warning messages
     completion_tokens = usage.get("completion_tokens", None) if usage is not None else None
+    # Prefer server-reported prompt_tokens over the pre-call estimate
+    server_prompt_tokens = usage.get("prompt_tokens", None) if usage is not None else None
+    if server_prompt_tokens is not None and server_prompt_tokens > 0:
+        prompt_tokens = server_prompt_tokens
     total_tokens = prompt_tokens + completion_tokens if completion_tokens is not None else None
     usage = {
-        "prompt_tokens": prompt_tokens,  # can grab from usage dict, but it's usually wrong (set to 0)
+        "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
     }

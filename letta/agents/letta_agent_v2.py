@@ -222,6 +222,10 @@ class LettaAgentV2(BaseAgentV2):
         self.conversation_id = None
         self.client_skills = client_skills or []
         self.override_system = override_system
+        # Initialize token budget from agent metadata for this run
+        self.token_budget = self._create_token_budget(self.agent_state)
+        # Reset circuit breaker for new run
+        self.circuit_breaker.reset()
         request_span = self._request_checkpoint_start(request_start_timestamp_ns=request_start_timestamp_ns)
 
         in_context_messages, input_messages_to_persist = await _prepare_in_context_messages_no_persist_async(
@@ -266,6 +270,9 @@ class LettaAgentV2(BaseAgentV2):
 
             if not self.should_continue:
                 break
+
+            # Step succeeded — reset circuit breaker counters
+            self.circuit_breaker.record_success()
 
             # Fire credit check to run in parallel with loop overhead / next step setup
             credit_task = safe_create_task_with_return(self._check_credits())
@@ -590,9 +597,31 @@ class LettaAgentV2(BaseAgentV2):
                         raise e
                     except LLMError as e:
                         self.stop_reason = LettaStopReason(stop_reason=StopReasonType.llm_api_error.value)
+                        # Circuit breaker: track consecutive LLM errors
+                        action = self._handle_circuit_breaker_error("llm_api_error")
+                        if action == "auto_compact":
+                            self.logger.warning(
+                                "Circuit breaker triggered for llm_api_error (%d consecutive), force-clearing context",
+                                self.circuit_breaker.get_counts().get("llm_api_error", 0),
+                            )
+                            messages = await self.summarize_conversation_history(
+                                in_context_messages=messages,
+                                new_letta_messages=self.response_messages,
+                                force=True,
+                                run_id=run_id,
+                                step_id=step_id,
+                            )
+                            continue  # retry with compacted context
                         raise e
                     except Exception as e:
                         if isinstance(e, ContextWindowExceededError) and llm_request_attempt < summarizer_settings.max_summarizer_retries:
+                            # Circuit breaker: track consecutive context overflow errors
+                            action = self._handle_circuit_breaker_error("context_window_overflow")
+                            if action == "auto_compact":
+                                self.logger.warning(
+                                    "Circuit breaker triggered for context_window_overflow (%d consecutive), force-clearing context",
+                                    self.circuit_breaker.get_counts().get("context_window_overflow", 0),
+                                )
                             # Retry case
                             messages = await self.summarize_conversation_history(
                                 in_context_messages=messages,
@@ -1083,6 +1112,19 @@ class LettaAgentV2(BaseAgentV2):
         self.usage.completion_tokens += step_usage_stats.completion_tokens
         self.usage.prompt_tokens += step_usage_stats.prompt_tokens
         self.usage.total_tokens += step_usage_stats.total_tokens
+        # Track server-reported context tokens for budget enforcement
+        if step_usage_stats.prompt_tokens is not None and step_usage_stats.prompt_tokens > 0:
+            self.usage.context_tokens = step_usage_stats.prompt_tokens
+        # Token budget enforcement: check after each LLM call
+        budget_decision = self.token_budget.check(
+            step_tokens=step_usage_stats.prompt_tokens + step_usage_stats.completion_tokens,
+            total_run_tokens=self.usage.total_tokens,
+        )
+        if budget_decision.exceeded:
+            from letta.schemas.letta_stop_reason import LettaStopReason, StopReasonType
+            self.stop_reason = LettaStopReason(stop_reason=StopReasonType.max_tokens_exceeded.value)
+            self.should_continue = False
+            self.logger.warning(f"Token budget exceeded: {budget_decision.reason}")
         # Aggregate cache and reasoning token fields (handle None values)
         if step_usage_stats.cached_input_tokens is not None:
             self.usage.cached_input_tokens = (self.usage.cached_input_tokens or 0) + step_usage_stats.cached_input_tokens

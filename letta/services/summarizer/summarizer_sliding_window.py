@@ -19,8 +19,11 @@ logger = get_logger(__name__)
 
 
 # Safety margin for approximate token counting.
-# The bytes/4 heuristic underestimates by ~25-35% for JSON-serialized messages
-# due to structural overhead (brackets, quotes, colons) each becoming tokens.
+# The bytes/4 heuristic underestimates for most subword tokenizers.
+# The default of 1.3x is now only used for OpenAI/Anthropic models that
+# have their own dedicated token counters. For local models (which use
+# ApproxTokenCounter), the per-model correction factor from
+# token_correction.py is applied instead.
 APPROX_TOKEN_SAFETY_MARGIN = 1.3
 
 
@@ -35,10 +38,12 @@ async def count_tokens(actor: User, llm_config: LLMConfig, messages: List[Messag
     tokens = await token_counter.count_message_tokens(converted_messages)
 
     # Apply safety margin for approximate counting to avoid underestimating
+    from letta.local_llm.token_correction import get_token_correction
     from letta.services.context_window_calculator.token_counter import ApproxTokenCounter
 
     if isinstance(token_counter, ApproxTokenCounter):
-        return int(tokens * APPROX_TOKEN_SAFETY_MARGIN)
+        correction = get_token_correction(llm_config.model)
+        return int(tokens * correction)
     return tokens
 
 
@@ -89,8 +94,11 @@ async def count_tokens_with_tools(
     tool_tokens = await token_counter.count_tool_tokens(tool_definitions) if tool_definitions else 0
 
     # Apply safety margin for approximate counting (message_tokens already has margin applied)
+    from letta.local_llm.token_correction import get_token_correction as _get_correction
+
     if isinstance(token_counter, ApproxTokenCounter):
-        tool_tokens = int(tool_tokens * APPROX_TOKEN_SAFETY_MARGIN)
+        correction = _get_correction(llm_config.model)
+        tool_tokens = int(tool_tokens * correction)
 
     return message_tokens + tool_tokens
 

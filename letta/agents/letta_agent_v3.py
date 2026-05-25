@@ -259,6 +259,10 @@ class LettaAgentV3(LettaAgentV2):
         self.client_tools = client_tools or []
         self.client_skills = client_skills or []
         self.override_system = override_system
+        # Initialize token budget from agent metadata for this run
+        self.token_budget = self._create_token_budget(self.agent_state)
+        # Reset circuit breaker for new run
+        self.circuit_breaker.reset()
 
         # Apply conversation-specific block overrides if conversation_id is provided
         if conversation_id:
@@ -386,6 +390,9 @@ class LettaAgentV3(LettaAgentV2):
 
             if not self.should_continue:
                 break
+
+            # Step succeeded — reset circuit breaker counters
+            self.circuit_breaker.record_success()
 
             # Fire credit check to run in parallel with loop overhead / next step setup
             credit_task = safe_create_task_with_return(self._check_credits())
@@ -1263,6 +1270,31 @@ class LettaAgentV3(LettaAgentV2):
                         raise e
                     except LLMError as e:
                         self.stop_reason = LettaStopReason(stop_reason=StopReasonType.llm_api_error.value)
+                        # Circuit breaker: track consecutive LLM errors
+                        action = self._handle_circuit_breaker_error("llm_api_error")
+                        if action == "auto_compact":
+                            self.logger.warning(
+                                "Circuit breaker triggered for llm_api_error (%d consecutive), force-clearing context",
+                                self.circuit_breaker.get_counts().get("llm_api_error", 0),
+                            )
+                            # Force compact and retry instead of raising
+                            try:
+                                summary_message, messages, summary_text = await self.compact(
+                                    messages,
+                                    trigger_threshold=compaction_trigger_threshold,
+                                    agent_step_span=agent_step_span,
+                                    step_id=step_id,
+                                    run_id=run_id,
+                                    use_summary_role=use_summary_role,
+                                    trigger="circuit_breaker_llm_error",
+                                    context_tokens_before=self.context_token_estimate,
+                                    messages_count_before=len(messages),
+                                    billing_context=billing_context,
+                                )
+                            except Exception:
+                                self.logger.error("Circuit breaker auto-compact failed, raising original error")
+                                raise e
+                            continue  # retry with compacted context
                         raise e
                     except Exception as e:
                         if isinstance(e, ContextWindowExceededError) and llm_request_attempt < summarizer_settings.max_summarizer_retries:
@@ -1353,7 +1385,12 @@ class LettaAgentV3(LettaAgentV2):
                 )
                 # update metrics
                 self._update_global_usage_stats(llm_adapter.usage)
-                self.context_token_estimate = llm_adapter.usage.total_tokens
+                # Use prompt_tokens for context estimate (not total_tokens) —
+                # prompt_tokens is the context window size, completion_tokens are already done.
+                if llm_adapter.usage and llm_adapter.usage.prompt_tokens is not None and llm_adapter.usage.prompt_tokens > 0:
+                    self.context_token_estimate = llm_adapter.usage.prompt_tokens
+                else:
+                    self.context_token_estimate = llm_adapter.usage.total_tokens
                 self.logger.info(f"Context token estimate after LLM request: {self.context_token_estimate}")
 
                 # Extract logprobs if present (for RL training)

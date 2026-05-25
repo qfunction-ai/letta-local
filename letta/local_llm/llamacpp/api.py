@@ -10,8 +10,12 @@ def get_llamacpp_completion(endpoint, auth_type, auth_key, prompt, context_windo
     """See https://github.com/ggerganov/llama.cpp/blob/master/examples/server/README.md for instructions on how to run the LLM web server"""
     from letta.utils import printd
 
-    # Approximate token count: bytes / 4
-    prompt_tokens = len(prompt.encode("utf-8")) // 4
+    # Approximate token count: bytes / 4 (pre-call estimate)
+    # Corrected by model-family factor for local models
+    from letta.local_llm.token_correction import get_token_correction
+
+    raw_bytes4_estimate = len(prompt.encode("utf-8")) // 4
+    prompt_tokens = int(raw_bytes4_estimate * get_token_correction(None))  # no model param in llama.cpp API
     if prompt_tokens > context_window:
         raise Exception(f"Request exceeds maximum context length ({prompt_tokens} > {context_window} tokens)")
 
@@ -49,9 +53,15 @@ def get_llamacpp_completion(endpoint, auth_type, auth_key, prompt, context_windo
     # Pass usage statistics back to main thread
     # These are used to compute memory warning messages
     completion_tokens = result_full.get("tokens_predicted", None)
+    # Prefer server-reported tokens_evaluated over the pre-call estimate
+    # Note: llama.cpp sometimes reports 0 for tokens_evaluated, which is
+    # unreliable. Only use it when it's a positive number.
+    server_prompt_tokens = result_full.get("tokens_evaluated", None)
+    if server_prompt_tokens is not None and server_prompt_tokens > 0:
+        prompt_tokens = server_prompt_tokens
     total_tokens = prompt_tokens + completion_tokens if completion_tokens is not None else None
     usage = {
-        "prompt_tokens": prompt_tokens,  # can grab from "tokens_evaluated", but it's usually wrong (set to 0)
+        "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
     }

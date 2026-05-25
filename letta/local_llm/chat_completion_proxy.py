@@ -207,8 +207,11 @@ def get_chat_completion(
 
     if usage["prompt_tokens"] is None:
         printd("usage dict was missing prompt_tokens, computing on-the-fly...")
-        # Approximate token count: bytes / 4
-        usage["prompt_tokens"] = len(prompt.encode("utf-8")) // 4
+        # Approximate token count: bytes / 4, corrected for local models
+        from letta.local_llm.token_correction import get_token_correction
+
+        raw_estimate = len(prompt.encode("utf-8")) // 4
+        usage["prompt_tokens"] = int(raw_estimate * get_token_correction(model))
 
     # NOTE: we should compute on-the-fly anyways since we might have to correct for errors during JSON parsing
     # Approximate token count: bytes / 4
