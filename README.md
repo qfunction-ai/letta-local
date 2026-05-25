@@ -16,7 +16,7 @@ Upstream assumes models support native OpenAI-style tool calling. Most local mod
 - **Token accuracy for local models.** Model-family correction factors (default 2.5x) replace the naive `bytes/4` token estimate. Live calibration caches server-reported `prompt_tokens` after the first call for accurate subsequent estimates.
 - **Token budget enforcement.** Per-step, per-run, and context-window ratio (default 0.7) budget checks break the agent out of VRAM OOM death spirals on local hardware.
 - **Circuit breaker for error loops.** Tracks consecutive LLM errors (3) and context overflows (2). When threshold is exceeded, force-clears the context window instead of retrying with an even larger prompt.
-- **Docker sandbox.** Containerized tool execution with security defaults: network isolation, resource limits, non-root execution, read-only rootfs. No cloud API key required.
+- **Landlock + seccomp-BPF sandbox.** Kernel-level filesystem and network isolation for tool execution subprocesses. Works inside Docker Desktop containers with zero extra flags, on bare Linux, no external dependencies. Replaces the Docker sandbox backend (which required root-equivalent Docker socket access).
 - **Agent OS-compatible policy engine.** Argument-level rules, rate limiting, regex matching, YAML loading. Schema matches Microsoft's Agent Governance Toolkit so policy files are interchangeable. No AGT dependency.
 
 ## Supported providers
@@ -190,31 +190,47 @@ The `AgentCircuitBreaker` breaks consecutive error death spirals:
 
 Without the circuit breaker, a context overflow causes another overflow on retry (larger context), causing another overflow, forever. The breaker detects the spiral and force-clears the context window (memory blocks persist across compactions).
 
-## Docker sandbox
+## Landlock sandbox
 
-Containerized tool execution for local model users who need isolation between the agent and the host:
+Kernel-level isolation for tool execution subprocesses. No Docker socket, no external dependencies, no C compilation. Works inside Docker Desktop containers (kernel 6.12.76-linuxkit, Landlock ABI v6) and on bare Linux 5.13+.
 
-```bash
-# Build the sandbox image
-docker build -t letta-sandbox:latest -f Dockerfile.letta-sandbox .
+**How it works:** A wrapper script (`letta/bin/letta_landlock_wrapper.py`) is launched as a separate process via `asyncio.create_subprocess_exec(close_fds=True)`. The wrapper applies Landlock filesystem/network restrictions and a seccomp-BPF syscall filter, then execs the tool script. Restrictions are irreversible once applied.
+
+**Security properties:**
+- Filesystem: read/write/execute only on explicitly allowed paths
+- Network: TCP connect/bind opt-in via `allow_tcp_connect`/`allow_tcp_bind` (Landlock ABI v4+)
+- IPC: abstract Unix socket and signal scoping (Landlock ABI v6)
+- Syscalls: seccomp blocks fork/clone/clone3/vfork/ptrace/mount/chroot/etc.
+- `/proc` access: denied except `/proc/self/`
+- FD isolation: `close_fds=True` prevents access to parent's DB connections and HTTP sockets
+
+**Sandbox type selection hierarchy:** E2B → Modal → Landlock → Local. Landlock is auto-detected at runtime via `tool_settings.landlock_available` (queries the kernel ABI version). If Landlock is not available, falls back to LOCAL with a loud warning.
+
+**Network access for tools:**
+```python
+# Tools that need network access can declare it via metadata:
+tool.metadata_["requires_network"] = True
+# The executor auto-promotes this to allow_tcp_connect=True on the Landlock config
 ```
 
-Security defaults:
-- `network_mode="none"` — no network access (opt-in via `bridge`)
-- `user="1001:1001"` — non-root execution
-- `read_only=True` — read-only rootfs with tmpfs `/tmp`
-- `cap_drop=["ALL"]` + `no-new-privileges`
-- `mem_limit="512m"`, `pids_limit=100`, `cpu_count=1.0`
+DNS over TCP is forced via `options use-vc` in `/etc/resolv.conf` (added in the Dockerfile) because Landlock blocks UDP.
 
-Container lifecycle: one container per agent run, lazy-created on first tool call, reused across calls, cleaned up on exit. Orphan reaper kills stale containers on startup.
+**Configuration:**
+```python
+from letta.schemas.sandbox_config import LandlockSandboxConfig
 
-Enable Docker sandbox:
-```bash
-# Docker is auto-detected. If Docker is available, it's used as the default
-# sandbox backend (after E2B if an E2B API key is set).
-# To disable:
-LETTA_DOCKER_SANDBOX_ENABLED_FIELD=false letta-server
+config = LandlockSandboxConfig(
+    allowed_read_paths=["/usr", "/lib", "/lib64", "/etc"],
+    allowed_write_paths=["/path/to/tool_exec_dir"],
+    allowed_execute_paths=["/usr/bin", "/usr/local/bin"],
+    allow_tcp_connect=False,  # opt-in
+    allow_tcp_bind=False,     # opt-in
+    block_fork=True,          # prevent fork bombs
+    timeout=180,
+)
 ```
+
+**Docker sandbox removed.** The Docker sandbox backend (which required Docker socket access — a root-equivalent privilege) has been removed from this fork. Landlock replaces it with kernel-level isolation that doesn't require any special host access. Existing agents with `sandbox_type='docker'` are migrated to `sandbox_type='local'` via Alembic; runtime auto-detection routes to Landlock when the kernel supports it.
 
 ## Policy engine
 
@@ -300,8 +316,8 @@ pytest tests/test_tool_capability_probe.py tests/test_model_constraints.py \
 # Local model hardening tests (43 tests, no servers needed)
 pytest tests/test_local_model_hardening.py
 
-# Docker sandbox tests (25 tests, no Docker needed)
-pytest tests/test_docker_sandbox.py
+# Landlock sandbox tests (28 tests, Linux with Landlock ABI >= 1 required)
+pytest tests/test_landlock_sandbox.py tests/test_landlock_ctypes.py
 
 # Policy engine tests (73 tests, no servers needed)
 pytest tests/test_policy_engine.py
@@ -333,7 +349,7 @@ pytest tests/integration_test_local_model_agent.py -v
 | Token estimation | bytes/4 (inaccurate for subword tokenizers) | Model-family correction + live calibration |
 | Token budget | No enforcement | Per-step, per-run, context-window ratio |
 | Error loops | Retry until max steps | Circuit breaker with force-compact |
-| Sandbox | LOCAL (host subprocess), E2B, Modal | + DOCKER (containerized, no API key needed) |
+| Sandbox | LOCAL (host subprocess), E2B, Modal | + LANDLOCK (kernel-level isolation, no Docker socket) |
 | Policy engine | Two-list (denied_tools, approval_required_tools) | Agent OS-compatible rules + rate limiting + YAML |
 
 ## Upstream sync
@@ -347,7 +363,7 @@ git merge upstream/main
 # Resolve conflicts, run tests
 pytest tests/test_tool_capability_probe.py tests/test_model_constraints.py \
        tests/test_tool_call_repair.py tests/test_prompt_tool_calling.py \
-       tests/test_local_model_hardening.py tests/test_docker_sandbox.py tests/test_policy_engine.py
+       tests/test_local_model_hardening.py tests/test_landlock_sandbox.py tests/test_policy_engine.py
 ```
 
 ## License

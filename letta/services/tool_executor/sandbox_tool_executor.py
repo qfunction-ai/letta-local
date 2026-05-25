@@ -114,10 +114,10 @@ class SandboxToolExecutor(ToolExecutor):
                         sandbox_config=sandbox_config,
                         sandbox_env_vars=sandbox_env_vars,
                     )
-                elif tool_settings.sandbox_type == SandboxType.DOCKER:
-                    from letta.services.tool_sandbox.docker_sandbox import AsyncToolSandboxDocker
+                elif tool_settings.sandbox_type == SandboxType.LANDLOCK:
+                    from letta.services.tool_sandbox.landlock_sandbox import AsyncToolSandboxLandlock
 
-                    sandbox = AsyncToolSandboxDocker(
+                    sandbox = AsyncToolSandboxLandlock(
                         function_name,
                         function_args,
                         actor,
@@ -128,6 +128,13 @@ class SandboxToolExecutor(ToolExecutor):
                         sandbox_config=sandbox_config,
                         sandbox_env_vars=sandbox_env_vars,
                     )
+                    # Auto-promote: if tool requires network, enable TCP connect
+                    if tool.metadata_ and tool.metadata_.get("requires_network"):
+                        if sandbox_config is None:
+                            sandbox_config = SandboxConfig(type=SandboxType.LANDLOCK, config={})
+                        sandbox_config = sandbox_config.model_copy(update={
+                            "config": {**sandbox_config.config, "allow_tcp_connect": True}
+                        })
                 else:
                     sandbox = AsyncToolSandboxLocal(
                         function_name,

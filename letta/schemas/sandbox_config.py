@@ -90,32 +90,79 @@ class ModalSandboxConfig(BaseModel):
         return SandboxType.MODAL
 
 
-class DockerSandboxConfig(BaseModel):
-    """Configuration for local Docker sandbox.
+class LandlockSandboxConfig(BaseModel):
+    """Configuration for Landlock + seccomp-BPF sandbox.
 
-    Provides containerized tool execution with security defaults:
-    network isolation, resource limits, non-root execution,
-    read-only rootfs. Network access is opt-in via network_mode.
+    Provides kernel-level filesystem and network isolation
+    for tool execution subprocesses. Works inside Docker
+    Desktop containers with zero extra flags.
+
+    CRITICAL: The wrapper handles ALL Landlock access rights for the
+    detected ABI version. Any right NOT included in handled_access_fs
+    is ALLOWED by default. The wrapper ensures no right is silently
+    allowed by omission.
     """
-
-    image: str = Field("letta-sandbox:latest", description="Docker image for the sandbox container.")
-    user: str = Field("1001:1001", description="User and group ID for container execution (non-root).")
-    network_mode: str = Field(
-        "none",
-        description="Docker network mode. 'none' = no network. 'bridge' = default Docker networking.",
+    # Filesystem access
+    allowed_read_paths: List[str] = Field(
+        default_factory=lambda: ["/usr", "/lib", "/lib64", "/etc"],
+        description="Paths allowed for read access (recursively).",
     )
-    read_only: bool = Field(True, description="Read-only root filesystem. /tmp is writable via tmpfs.")
-    mem_limit: str = Field("512m", description="Memory limit per container.")
-    cpu_count: float = Field(1.0, description="CPU count limit per container.")
-    pids_limit: int = Field(100, description="Maximum number of processes per container.")
-    tmpfs_size: str = Field("100m", description="Size of /tmp tmpfs mount.")
-    timeout: int = Field(180, description="Per-command timeout in seconds.")
-    orphan_ttl: int = Field(3600, description="Time after which orphaned containers are cleaned up (seconds).")
-    pip_requirements: Optional[List[str]] = Field(None, description="A list of pip packages to install in the Docker sandbox")
+    allowed_write_paths: List[str] = Field(
+        default_factory=lambda: [],  # Set dynamically from tool_exec_dir
+        description="Paths allowed for write access (recursively).",
+    )
+    allowed_execute_paths: List[str] = Field(
+        default_factory=lambda: ["/usr/bin", "/usr/local/bin"],
+        description="Paths allowed for execution (recursively).",
+    )
+
+    # Network access (ABI v4+, kernel 6.7+)
+    allow_tcp_connect: bool = Field(
+        False,
+        description="Allow outbound TCP connections. Default: deny. Requires Landlock ABI >= 4.",
+    )
+    allow_tcp_bind: bool = Field(
+        False,
+        description="Allow TCP bind (listen). Default: deny. Requires Landlock ABI >= 4.",
+    )
+
+    # Syscall filtering (via libseccomp)
+    blocked_syscalls: List[str] = Field(
+        default_factory=lambda: [
+            "ptrace", "mount", "umount2", "chroot",
+            "pivot_root", "reboot", "swapon", "swapoff",
+            "init_module", "finit_module", "delete_module",
+            "kexec_load", "kexec_file_load",
+        ],
+        description="Additional syscalls to block via seccomp-BPF.",
+    )
+    block_fork: bool = Field(
+        True,
+        description="Block fork/clone/clone3/vfork after sandbox setup to prevent resource exhaustion.",
+    )
+
+    # Subprocess settings (inherited from LocalSandboxConfig)
+    sandbox_dir: Optional[str] = Field(None, description="Directory for the sandbox environment. NOT /tmp (64MB size limit in Delta).")
+    use_venv: bool = Field(False)
+    venv_name: str = Field("venv")
+    pip_requirements: List[PipRequirement] = Field(default_factory=list)
+    timeout: int = Field(180, description="Per-tool execution timeout in seconds.")
 
     @property
     def type(self) -> "SandboxType":
-        return SandboxType.DOCKER
+        return SandboxType.LANDLOCK
+
+    @model_validator(mode="before")
+    @classmethod
+    def set_default_sandbox_dir(cls, data):
+        if not isinstance(data, dict):
+            return data
+        if data.get("sandbox_dir") is None:
+            if tool_settings.tool_exec_dir:
+                data["sandbox_dir"] = tool_settings.tool_exec_dir
+            else:
+                data["sandbox_dir"] = LETTA_TOOL_EXECUTION_DIR
+        return data
 
 
 class SandboxConfigBase(OrmMetadataBase):
@@ -139,8 +186,8 @@ class SandboxConfig(SandboxConfigBase):
     def get_modal_config(self) -> ModalSandboxConfig:
         return ModalSandboxConfig(**self.config)
 
-    def get_docker_config(self) -> DockerSandboxConfig:
-        return DockerSandboxConfig(**self.config)
+    def get_landlock_config(self) -> LandlockSandboxConfig:
+        return LandlockSandboxConfig(**self.config)
 
     def fingerprint(self) -> str:
         # Only take into account type, org_id, and the config items
@@ -163,12 +210,12 @@ class SandboxConfig(SandboxConfigBase):
 
 
 class SandboxConfigCreate(LettaBase):
-    config: Union[LocalSandboxConfig, E2BSandboxConfig, ModalSandboxConfig, DockerSandboxConfig] = Field(..., description="The configuration for the sandbox.")
+    config: Union[LocalSandboxConfig, E2BSandboxConfig, ModalSandboxConfig, LandlockSandboxConfig] = Field(..., description="The configuration for the sandbox.")
 
 
 class SandboxConfigUpdate(LettaBase):
     """Pydantic model for updating SandboxConfig fields."""
 
-    config: Union[LocalSandboxConfig, E2BSandboxConfig, ModalSandboxConfig, DockerSandboxConfig] = Field(
+    config: Union[LocalSandboxConfig, E2BSandboxConfig, ModalSandboxConfig, LandlockSandboxConfig] = Field(
         None, description="The JSON configuration data for the sandbox."
     )

@@ -13,7 +13,7 @@ from letta.schemas.environment_variables import (
 )
 from letta.schemas.sandbox_config import (
     E2BSandboxConfig,
-    DockerSandboxConfig,
+    LandlockSandboxConfig,
     LocalSandboxConfig,
     ModalSandboxConfig,
     SandboxConfig as PydanticSandboxConfig,
@@ -44,8 +44,8 @@ class SandboxConfigManager:
                 default_config = E2BSandboxConfig()
             elif sandbox_type == SandboxType.MODAL:
                 default_config = ModalSandboxConfig()
-            elif sandbox_type == SandboxType.DOCKER:
-                default_config = DockerSandboxConfig()
+            elif sandbox_type == SandboxType.LANDLOCK:
+                default_config = LandlockSandboxConfig()
             else:
                 # LOCAL sandbox type
                 default_local_sandbox_path = LETTA_TOOL_EXECUTION_DIR
@@ -67,6 +67,8 @@ class SandboxConfigManager:
                 default_config = E2BSandboxConfig()
             elif sandbox_type == SandboxType.MODAL:
                 default_config = ModalSandboxConfig()
+            elif sandbox_type == SandboxType.LANDLOCK:
+                default_config = LandlockSandboxConfig()
             else:
                 # LOCAL sandbox type
                 default_local_sandbox_path = LETTA_TOOL_EXECUTION_DIR

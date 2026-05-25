@@ -37,10 +37,6 @@ class ToolSettings(BaseSettings):
     tool_exec_venv_name: Optional[str] = None
     tool_exec_autoreload_venv: bool = True
 
-    # Docker Sandbox configurations
-    docker_sandbox_enabled_field: bool = Field(default=True, description="Enable Docker sandbox backend when Docker is available")
-    docker_sandbox_available_cache: bool | None = None  # cached check result
-
     # MCP settings
     mcp_connect_to_server_timeout: float = 30.0
     mcp_list_tools_timeout: float = 30.0
@@ -63,41 +59,38 @@ class ToolSettings(BaseSettings):
         return bool(self.modal_token_id and self.modal_token_secret)
 
     @property
-    def docker_sandbox_enabled(self) -> bool:
-        """Check if Docker is available and docker_sandbox_enabled_field is True.
-
-        The Docker daemon ping is cached after the first check.
-        If Docker goes down mid-session, exec_run will fail
-        with a clear connection error — handled in the normal
-        error path.
-        """
-        if not self.docker_sandbox_enabled_field:
-            return False
-        if self.docker_sandbox_available_cache is not None:
-            return self.docker_sandbox_available_cache
-        try:
-            import docker
-            client = docker.from_env()
-            client.ping()
-            self.docker_sandbox_available_cache = True
-            return True
-        except Exception:
-            self.docker_sandbox_available_cache = False
-            return False
-
-    @property
     def sandbox_type(self) -> SandboxType:
-        """Default sandbox type based on available credentials.
+        """Default sandbox type based on available credentials and kernel features.
 
-        Note: Modal is checked separately via modal_sandbox_enabled property.
-        This property determines the fallback behavior (E2B, DOCKER, or LOCAL).
+        Selection hierarchy: E2B -> Modal -> Landlock -> Local.
+        Docker sandbox is removed (requires socket exposure).
         """
         if self.e2b_api_key:
             return SandboxType.E2B
-        elif self.docker_sandbox_enabled:
-            return SandboxType.DOCKER
+        elif self.modal_sandbox_enabled:
+            return SandboxType.MODAL
+        elif self.landlock_available:
+            return SandboxType.LANDLOCK
         else:
             return SandboxType.LOCAL
+
+    @property
+    def landlock_available(self) -> bool:
+        """Check if Landlock LSM is available on this kernel.
+
+        Cached after first check. Returns True if Landlock ABI >= 1.
+        """
+        if self._landlock_available_cache is not None:
+            return self._landlock_available_cache
+        try:
+            from letta.services.tool_sandbox._landlock_detect import detect_landlock_abi
+            abi = detect_landlock_abi()
+            self._landlock_available_cache = abi >= 1
+        except Exception:
+            self._landlock_available_cache = False
+        return self._landlock_available_cache
+
+    _landlock_available_cache: bool | None = None
 
 
 class SummarizerSettings(BaseSettings):

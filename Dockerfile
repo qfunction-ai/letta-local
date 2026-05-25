@@ -92,6 +92,9 @@ WORKDIR /app
 # Copy virtual environment and app from builder
 COPY --from=builder /app .
 
+# Force DNS over TCP (Landlock sandbox blocks UDP; glibc resolver needs TCP)
+RUN echo "options use-vc" >> /etc/resolv.conf
+
 # Copy initialization SQL if it exists
 COPY init.sql /docker-entrypoint-initdb.d/
 
