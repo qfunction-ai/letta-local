@@ -271,6 +271,7 @@ class SandboxType(str, Enum):
     E2B = "e2b"
     MODAL = "modal"
     LOCAL = "local"
+    DOCKER = "docker"
 
 
 class StepStatus(str, Enum):

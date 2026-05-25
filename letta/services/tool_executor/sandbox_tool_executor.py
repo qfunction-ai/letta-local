@@ -98,12 +98,26 @@ class SandboxToolExecutor(ToolExecutor):
                     logger.warning(f"Modal execution failed for tool {tool.name}: {e}. Falling back to {tool_settings.sandbox_type.value}")
                     tool_execution_result = None
 
-            # Fallback to E2B or LOCAL if Modal wasn't tried or failed
+            # Fallback to E2B, DOCKER, or LOCAL if Modal wasn't tried or failed
             if tool_execution_result is None:
                 if tool_settings.sandbox_type == SandboxType.E2B:
                     from letta.services.tool_sandbox.e2b_sandbox import AsyncToolSandboxE2B
 
                     sandbox = AsyncToolSandboxE2B(
+                        function_name,
+                        function_args,
+                        actor,
+                        tool_id=tool.id,
+                        agent_id=agent_state.id if agent_state else None,
+                        project_id=agent_state.project_id if agent_state else None,
+                        tool_object=tool,
+                        sandbox_config=sandbox_config,
+                        sandbox_env_vars=sandbox_env_vars,
+                    )
+                elif tool_settings.sandbox_type == SandboxType.DOCKER:
+                    from letta.services.tool_sandbox.docker_sandbox import AsyncToolSandboxDocker
+
+                    sandbox = AsyncToolSandboxDocker(
                         function_name,
                         function_args,
                         actor,

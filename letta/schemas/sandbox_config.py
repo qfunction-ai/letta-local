@@ -90,6 +90,34 @@ class ModalSandboxConfig(BaseModel):
         return SandboxType.MODAL
 
 
+class DockerSandboxConfig(BaseModel):
+    """Configuration for local Docker sandbox.
+
+    Provides containerized tool execution with security defaults:
+    network isolation, resource limits, non-root execution,
+    read-only rootfs. Network access is opt-in via network_mode.
+    """
+
+    image: str = Field("letta-sandbox:latest", description="Docker image for the sandbox container.")
+    user: str = Field("1001:1001", description="User and group ID for container execution (non-root).")
+    network_mode: str = Field(
+        "none",
+        description="Docker network mode. 'none' = no network. 'bridge' = default Docker networking.",
+    )
+    read_only: bool = Field(True, description="Read-only root filesystem. /tmp is writable via tmpfs.")
+    mem_limit: str = Field("512m", description="Memory limit per container.")
+    cpu_count: float = Field(1.0, description="CPU count limit per container.")
+    pids_limit: int = Field(100, description="Maximum number of processes per container.")
+    tmpfs_size: str = Field("100m", description="Size of /tmp tmpfs mount.")
+    timeout: int = Field(180, description="Per-command timeout in seconds.")
+    orphan_ttl: int = Field(3600, description="Time after which orphaned containers are cleaned up (seconds).")
+    pip_requirements: Optional[List[str]] = Field(None, description="A list of pip packages to install in the Docker sandbox")
+
+    @property
+    def type(self) -> "SandboxType":
+        return SandboxType.DOCKER
+
+
 class SandboxConfigBase(OrmMetadataBase):
     __id_prefix__ = PrimitiveType.SANDBOX_CONFIG.value
 
@@ -110,6 +138,9 @@ class SandboxConfig(SandboxConfigBase):
 
     def get_modal_config(self) -> ModalSandboxConfig:
         return ModalSandboxConfig(**self.config)
+
+    def get_docker_config(self) -> DockerSandboxConfig:
+        return DockerSandboxConfig(**self.config)
 
     def fingerprint(self) -> str:
         # Only take into account type, org_id, and the config items
@@ -132,12 +163,12 @@ class SandboxConfig(SandboxConfigBase):
 
 
 class SandboxConfigCreate(LettaBase):
-    config: Union[LocalSandboxConfig, E2BSandboxConfig, ModalSandboxConfig] = Field(..., description="The configuration for the sandbox.")
+    config: Union[LocalSandboxConfig, E2BSandboxConfig, ModalSandboxConfig, DockerSandboxConfig] = Field(..., description="The configuration for the sandbox.")
 
 
 class SandboxConfigUpdate(LettaBase):
     """Pydantic model for updating SandboxConfig fields."""
 
-    config: Union[LocalSandboxConfig, E2BSandboxConfig, ModalSandboxConfig] = Field(
+    config: Union[LocalSandboxConfig, E2BSandboxConfig, ModalSandboxConfig, DockerSandboxConfig] = Field(
         None, description="The JSON configuration data for the sandbox."
     )

@@ -13,6 +13,10 @@ Upstream assumes models support native OpenAI-style tool calling. Most local mod
 - **Tool call repair pipeline.** Local models produce malformed JSON — code fences, extra text, missing brackets. The repair pipeline handles it.
 - **ModelConstraints schema.** Declarative capability degradation: `tool_calling_mode`, `json_repair_level`, `tool_call_retry_count`, `disable_structured_output`. Auto-applied for local providers.
 - **6 new provider types.** Ollama, vLLM, SGLang, LocalAI, llama.cpp, and BitNet — with model discovery via each server's API.
+- **Token accuracy for local models.** Model-family correction factors (default 2.5x) replace the naive `bytes/4` token estimate. Live calibration caches server-reported `prompt_tokens` after the first call for accurate subsequent estimates.
+- **Token budget enforcement.** Per-step, per-run, and context-window ratio (default 0.7) budget checks break the agent out of VRAM OOM death spirals on local hardware.
+- **Circuit breaker for error loops.** Tracks consecutive LLM errors (3) and context overflows (2). When threshold is exceeded, force-clears the context window instead of retrying with an even larger prompt.
+- **Docker sandbox.** Containerized tool execution with security defaults: network isolation, resource limits, non-root execution, read-only rootfs. No cloud API key required.
 
 ## Supported providers
 
@@ -150,6 +154,67 @@ model_settings = {
 }
 ```
 
+## Token accuracy
+
+Local models don't all use the same tokenizer. The fork's default `bytes/4` estimate underestimates for most subword tokenizers (GPT-4, BPE, SentencePiece). The `token_correction` module fixes this:
+
+- **Static correction table.** `TOKEN_ESTIMATE_CORRECTION` maps model family prefixes (e.g., `"qwen"`, `"llama"`) to measured ratios. Unmeasured models fall back to `DEFAULT_TOKEN_CORRECTION = 2.5`.
+- **Live calibration.** `LiveTokenCalibration` caches server-reported `prompt_tokens` from the first API response. Subsequent estimates use the measured ratio instead of the static table. Cold start uses the static table; warm path uses live data.
+
+The correction factors are wired into:
+- Pre-call token estimates in Ollama, vLLM, llama.cpp, and chat_completion_proxy adapters
+- Context window estimation in the summarizer
+- `LettaUsageStatistics.context_tokens` population from server-reported values
+
+## Token budget enforcement
+
+The `TokenBudget` class enforces three budget layers after each LLM call:
+
+| Budget type | Default | Config key |
+|---|---|---|
+| Per-step | No limit | `agent.metadata.max_step_tokens` |
+| Per-run | No limit | `agent.metadata.max_run_tokens` |
+| Context window | 70% of `context_window` | `agent.metadata.context_window_ratio` |
+
+The 0.7 default matches vLLM's `--gpu-memory-utilization 0.7`. When the budget is exceeded, the agent stops with `max_tokens_exceeded` instead of OOMing the GPU.
+
+## Circuit breaker
+
+The `AgentCircuitBreaker` breaks consecutive error death spirals:
+
+| Error type | Threshold | Recovery action |
+|---|---|---|
+| `llm_api_error` | 3 consecutive | Force-clear context window |
+| `context_window_overflow` | 2 consecutive | Force-clear context window |
+
+Without the circuit breaker, a context overflow causes another overflow on retry (larger context), causing another overflow, forever. The breaker detects the spiral and force-clears the context window (memory blocks persist across compactions).
+
+## Docker sandbox
+
+Containerized tool execution for local model users who need isolation between the agent and the host:
+
+```bash
+# Build the sandbox image
+docker build -t letta-sandbox:latest -f Dockerfile.letta-sandbox .
+```
+
+Security defaults:
+- `network_mode="none"` — no network access (opt-in via `bridge`)
+- `user="1001:1001"` — non-root execution
+- `read_only=True` — read-only rootfs with tmpfs `/tmp`
+- `cap_drop=["ALL"]` + `no-new-privileges`
+- `mem_limit="512m"`, `pids_limit=100`, `cpu_count=1.0`
+
+Container lifecycle: one container per agent run, lazy-created on first tool call, reused across calls, cleaned up on exit. Orphan reaper kills stale containers on startup.
+
+Enable Docker sandbox:
+```bash
+# Docker is auto-detected. If Docker is available, it's used as the default
+# sandbox backend (after E2B if an E2B API key is set).
+# To disable:
+LETTA_DOCKER_SANDBOX_ENABLED_FIELD=false letta-server
+```
+
 ## Running tests
 
 ```bash
@@ -157,6 +222,12 @@ model_settings = {
 pytest tests/test_tool_capability_probe.py tests/test_model_constraints.py \
        tests/test_tool_call_repair.py tests/test_prompt_tool_calling.py \
        tests/test_ollama_capability_filter.py tests/test_local_model_providers.py
+
+# Local model hardening tests (43 tests, no servers needed)
+pytest tests/test_local_model_hardening.py
+
+# Docker sandbox tests (25 tests, no Docker needed)
+pytest tests/test_docker_sandbox.py
 
 # Integration tests (requires live servers)
 RUN_LOCAL_INTEGRATION_TESTS=1 \
@@ -167,9 +238,10 @@ pytest tests/integration_test_local_model_agent.py -v
 
 ## Known issues
 
-- **vLLM on macOS Metal GPU**: OOMs under sustained load. Use `--gpu-memory-utilization 0.7` to reduce KV cache allocation.
+- **vLLM on macOS Metal GPU**: OOMs under sustained load. Use `--gpu-memory-utilization 0.7` to reduce KV cache allocation. The token budget enforcer (default `context_window_ratio=0.7`) helps prevent this by stopping the agent before it exceeds the GPU's real capacity.
 - **Non-deterministic tool calling**: Some models (Gemma 4 on vLLM) produce native tool calls sometimes and text other times. The probe tries twice; the agent loop's retry mechanism handles occasional failures.
 - **vLLM requires flags**: Native tool calling on vLLM needs `--enable-auto-tool-choice --tool-call-parser hermes`. Without these, all models fall back to prompt mode (which still works).
+- **Correction factor placeholders**: `TOKEN_ESTIMATE_CORRECTION` values for specific model families (qwen, llama, etc.) are placeholders (`None`). They fall back to `DEFAULT_TOKEN_CORRECTION = 2.5` until a benchmark script measures real ratios. Live calibration makes this less critical — the first API response provides the real ratio.
 
 ## Differences from upstream
 
@@ -181,6 +253,10 @@ pytest tests/integration_test_local_model_agent.py -v
 | Model constraints | Not implemented | Full schema with auto-apply |
 | Repair pipeline | None | Handles malformed JSON from local models |
 | Model settings | OpenAI-centric | OllamaModelSettings, VLLMModelSettings |
+| Token estimation | bytes/4 (inaccurate for subword tokenizers) | Model-family correction + live calibration |
+| Token budget | No enforcement | Per-step, per-run, context-window ratio |
+| Error loops | Retry until max steps | Circuit breaker with force-compact |
+| Sandbox | LOCAL (host subprocess), E2B, Modal | + DOCKER (containerized, no API key needed) |
 
 ## Upstream sync
 
@@ -192,7 +268,8 @@ git fetch upstream
 git merge upstream/main
 # Resolve conflicts, run tests
 pytest tests/test_tool_capability_probe.py tests/test_model_constraints.py \
-       tests/test_tool_call_repair.py tests/test_prompt_tool_calling.py
+       tests/test_tool_call_repair.py tests/test_prompt_tool_calling.py \
+       tests/test_local_model_hardening.py tests/test_docker_sandbox.py
 ```
 
 ## License
