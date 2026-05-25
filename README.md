@@ -17,6 +17,7 @@ Upstream assumes models support native OpenAI-style tool calling. Most local mod
 - **Token budget enforcement.** Per-step, per-run, and context-window ratio (default 0.7) budget checks break the agent out of VRAM OOM death spirals on local hardware.
 - **Circuit breaker for error loops.** Tracks consecutive LLM errors (3) and context overflows (2). When threshold is exceeded, force-clears the context window instead of retrying with an even larger prompt.
 - **Docker sandbox.** Containerized tool execution with security defaults: network isolation, resource limits, non-root execution, read-only rootfs. No cloud API key required.
+- **Agent OS-compatible policy engine.** Argument-level rules, rate limiting, regex matching, YAML loading. Schema matches Microsoft's Agent Governance Toolkit so policy files are interchangeable. No AGT dependency.
 
 ## Supported providers
 
@@ -215,6 +216,79 @@ Enable Docker sandbox:
 LETTA_DOCKER_SANDBOX_ENABLED_FIELD=false letta-server
 ```
 
+## Policy engine
+
+Agent OS-compatible policy engine for fine-grained tool call control. Schema matches Microsoft's Agent Governance Toolkit — policy files are interchangeable. No AGT dependency.
+
+**Features:**
+- Argument-level rules: deny `web_search` if `query` contains "internal"
+- Rate limiting: per-tool and global call limits
+- Regex matching on tool arguments
+- YAML policy loading
+- Backwards compatible with legacy `denied_tools` / `approval_required_tools` lists
+
+**Example policy (YAML):**
+
+```yaml
+version: "1.0"
+name: local-model-safety
+rules:
+  - name: block-destructive-sql
+    condition:
+      field: tool_name
+      operator: eq
+      value: database_query
+    pattern: "DROP|TRUNCATE"
+    action: deny
+    priority: 100
+    message: "Destructive SQL operations are blocked"
+
+  - name: block-internal-queries
+    condition:
+      field: tool_args.query
+      operator: matches
+      value: "internal|confidential|secret"
+    action: deny
+    priority: 80
+    message: "Queries containing internal/confidential/secret are blocked"
+
+  - name: audit-archival
+    condition:
+      field: tool_name
+      operator: eq
+      value: archival_memory_insert
+    action: audit
+    priority: 10
+    message: "Archival memory insert logged for audit"
+
+defaults:
+  action: allow
+  max_tool_calls: 100
+```
+
+**Rate limiting:**
+
+```python
+from letta.security.policy import ToolCallPolicy, PolicyDefaults
+
+policy = ToolCallPolicy(
+    max_calls_per_tool={"web_search": 10, "archival_memory_insert": 5},
+    defaults=PolicyDefaults(max_tool_calls=100),  # global limit
+)
+```
+
+**Dot-path resolution** (Agent OS can't do this):
+
+```yaml
+rules:
+  - name: block-sensitive-paths
+    condition:
+      field: tool_args.file_path
+      operator: matches
+      value: "/etc/|/var/log/|~/.ssh/"
+    action: deny
+```
+
 ## Running tests
 
 ```bash
@@ -228,6 +302,9 @@ pytest tests/test_local_model_hardening.py
 
 # Docker sandbox tests (25 tests, no Docker needed)
 pytest tests/test_docker_sandbox.py
+
+# Policy engine tests (73 tests, no servers needed)
+pytest tests/test_policy_engine.py
 
 # Integration tests (requires live servers)
 RUN_LOCAL_INTEGRATION_TESTS=1 \
@@ -257,6 +334,7 @@ pytest tests/integration_test_local_model_agent.py -v
 | Token budget | No enforcement | Per-step, per-run, context-window ratio |
 | Error loops | Retry until max steps | Circuit breaker with force-compact |
 | Sandbox | LOCAL (host subprocess), E2B, Modal | + DOCKER (containerized, no API key needed) |
+| Policy engine | Two-list (denied_tools, approval_required_tools) | Agent OS-compatible rules + rate limiting + YAML |
 
 ## Upstream sync
 
@@ -269,7 +347,7 @@ git merge upstream/main
 # Resolve conflicts, run tests
 pytest tests/test_tool_capability_probe.py tests/test_model_constraints.py \
        tests/test_tool_call_repair.py tests/test_prompt_tool_calling.py \
-       tests/test_local_model_hardening.py tests/test_docker_sandbox.py
+       tests/test_local_model_hardening.py tests/test_docker_sandbox.py tests/test_policy_engine.py
 ```
 
 ## License
