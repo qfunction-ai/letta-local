@@ -1980,11 +1980,13 @@ class LettaAgentV3(LettaAgentV2):
                     self.logger.warning(f"Failed to write audit log (tool_denied/violation): {_e}")
                 return result, 0
             # Security: check tool call policy FIRST
-            from letta.security.policy import PolicyAction
-            policy_action = self.policy_checker.check(spec["name"])
-            if policy_action == PolicyAction.DENY:
+            policy_decision = self._check_policy(spec["name"], spec.get("args"), step_id, run_id)
+            if not policy_decision.allowed:
+                # V3 treats REQUIRE_APPROVAL as DENY (fail-closed — no approval wiring in V3)
                 _tc = classify_tool(spec["name"])
-                _ed = {"tool_name": spec["name"], "reason": "policy: denied_tools"}
+                _ed = {"tool_name": spec["name"], "reason": policy_decision.reason}
+                if policy_decision.matched_rule:
+                    _ed["matched_rule"] = policy_decision.matched_rule
                 if _tc:
                     _ed["tool_category"] = _tc
                 try:
@@ -2000,7 +2002,7 @@ class LettaAgentV3(LettaAgentV2):
                     self.logger.warning(f"Failed to write audit log (tool_denied/policy): {_e}")
                 return ToolExecutionResult(
                     status="error",
-                    func_return=f"Tool '{spec['name']}' is denied by the security policy.",
+                    func_return=f"Tool '{spec['name']}' is denied by the security policy. {policy_decision.reason}",
                 ), 0
             # Security: canary check on tool arguments
             if self.canary_checker.check(spec["args"]):

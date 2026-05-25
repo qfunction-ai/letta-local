@@ -1211,17 +1211,19 @@ class LettaAgentV2(BaseAgentV2):
         )
 
         # Security: check tool call policy FIRST
-        from letta.security.policy import PolicyAction
+        from letta.security.policy import PolicyDecision
         from letta.security.audit import classify_tool
-        policy_action = self.policy_checker.check(tool_call_name)
-        if policy_action == PolicyAction.DENY:
+        policy_decision = self._check_policy(tool_call_name, tool_args, step_id, run_id)
+        if not policy_decision.allowed:
             tool_execution_result = ToolExecutionResult(
                 status="error",
-                func_return=f"Tool '{tool_call_name}' is denied by the security policy.",
+                func_return=f"Tool '{tool_call_name}' is denied by the security policy. {policy_decision.reason}",
             )
             # Audit log: tool denied by policy
             _tc = classify_tool(tool_call_name)
-            _ed = {"tool_name": tool_call_name, "reason": "policy: denied_tools"}
+            _ed = {"tool_name": tool_call_name, "reason": policy_decision.reason}
+            if policy_decision.matched_rule:
+                _ed["matched_rule"] = policy_decision.matched_rule
             if _tc:
                 _ed["tool_category"] = _tc
             try:
@@ -1257,7 +1259,7 @@ class LettaAgentV2(BaseAgentV2):
                 )
             except Exception as _e:
                 self.logger.warning(f"Failed to write audit log (canary_detected): {_e}")
-        elif policy_action == PolicyAction.REQUIRE_APPROVAL and not is_approval:
+        elif policy_decision.action == "require_approval" and not is_approval:
             # Policy requires approval — same code path as RequiresApprovalToolRule
             # SKIP the ToolRulesSolver approval check to prevent double approval
             tool_args[REQUEST_HEARTBEAT_PARAM] = request_heartbeat

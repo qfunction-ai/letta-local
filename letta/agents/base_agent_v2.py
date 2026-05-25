@@ -68,6 +68,28 @@ class BaseAgentV2(ABC):
             self.logger.error(f"Failed to load tool call policy, denying all tools (fail-closed): {e}")
             self.policy_checker.deny_all = True
 
+    def _check_policy(self, tool_name: str, tool_args: dict | None = None, step_id: str | None = None, run_id: str | None = None) -> "PolicyDecision":
+        """Check a tool call against the security policy with full context.
+
+        Wraps ``self.policy_checker.check()`` with the evaluation context
+        so that agent subclasses call this one-liner instead of building
+        the context dict themselves. Keeps the HIGH-activity agent file
+        diffs minimal.
+        """
+        from letta.security.policy import PolicyDecision
+        eval_context = {
+            "tool_name": tool_name,
+            "tool_args": tool_args or {},
+            "tool_call_count": self.policy_checker.get_call_count(tool_name),
+            "actor_id": self.actor.id if self.actor else None,
+            "agent_id": self.agent_id,
+        }
+        decision = self.policy_checker.check(tool_name, eval_context=eval_context)
+        # Record the call for rate limiting if allowed
+        if decision.allowed:
+            self.policy_checker.record_call(tool_name)
+        return decision
+
     async def _load_canary(self) -> None:
         """Load the canary value from the __canary__ memory block.
 

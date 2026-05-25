@@ -1,8 +1,12 @@
 """Tool call policies — the security boundary between LLM tool decisions
 and server-side execution.
 
+Agent OS-compatible schema. Field names, types, and YAML format match
+Microsoft's Agent Governance Toolkit so policy files are interchangeable.
+We own the evaluator — no Agent OS dependency.
+
 The PolicyChecker sits between the model's tool decision and the server's
-execution. It returns one of three actions for each tool call:
+execution. It returns a PolicyDecision for each tool call:
 
 - ALLOW: the tool call is permitted. Fall through to the existing
   ToolRulesSolver for workflow checks.
@@ -10,6 +14,9 @@ execution. It returns one of three actions for each tool call:
   error to the agent.
 - REQUIRE_APPROVAL: the tool call requires human approval. Route to the
   existing approval system (same code path as RequiresApprovalToolRule).
+  In V3 (no approval wiring), this is treated as DENY (fail-closed).
+- AUDIT: the tool call is permitted but logged. Policy metadata attaches
+  to the tool_executed event.
 
 The PolicyChecker is separate from ToolRulesSolver. They answer different
 questions:
@@ -24,10 +31,19 @@ ToolRulesSolver check is never reached. This prevents double approval
 when both the policy and the workflow require approval for the same tool.
 """
 
-from enum import Enum
-from typing import Optional
+from __future__ import annotations
 
-from pydantic import BaseModel, Field
+import re
+from enum import Enum
+from typing import Any, Dict, List, Optional
+
+import yaml
+from pydantic import BaseModel, Field, model_validator
+
+
+# ---------------------------------------------------------------------------
+# Schema — Agent OS-compatible field names and types
+# ---------------------------------------------------------------------------
 
 
 class PolicyAction(str, Enum):
@@ -35,15 +51,95 @@ class PolicyAction(str, Enum):
 
     ALLOW = "allow"
     DENY = "deny"
-    REQUIRE_APPROVAL = "require_approval"
+    REQUIRE_APPROVAL = "require_approval"  # fork-specific
+    AUDIT = "audit"  # log but allow (matches Agent OS)
+
+
+class PolicyOperator(str, Enum):
+    """Comparison operators for policy conditions.
+
+    Matches Agent OS PolicyOperator exactly.
+    """
+
+    EQ = "eq"
+    NE = "ne"
+    GT = "gt"
+    LT = "lt"
+    GTE = "gte"
+    LTE = "lte"
+    IN = "in"
+    NOT_IN = "not_in"
+    MATCHES = "matches"  # regex
+    CONTAINS = "contains"  # substring
+
+
+class PolicyCondition(BaseModel):
+    """A condition that must match for a policy rule to fire.
+
+    The ``field`` supports dot-path resolution (e.g., ``tool_args.query``)
+    which Agent OS does not support. Flat field names (``tool_name``,
+    ``tool_call_count``) are Agent OS-compatible.
+    """
+
+    field: str = Field(description="Dot-path: 'tool_name', 'tool_args.query', 'tool_call_count'")
+    operator: PolicyOperator = Field(description="Comparison operator")
+    value: Any = Field(description="Value to compare against")
+
+
+class PolicyRule(BaseModel):
+    """A single policy rule with a condition, action, and priority.
+
+    Matches Agent OS PolicyRule schema. The ``pattern`` field is an
+    Agent OS feature — regex matched against the action's string
+    representation (e.g., SQL query text).
+    """
+
+    name: str = Field(description="Human-readable rule name")
+    condition: PolicyCondition = Field(description="When this rule fires")
+    action: PolicyAction = Field(description="What to do when the rule fires")
+    priority: int = Field(default=0, description="Higher priority rules override lower ones")
+    message: Optional[str] = Field(default=None, description="Human-readable explanation")
+    pattern: Optional[str] = Field(
+        default=None,
+        description="Regex pattern for action params (Agent OS compatible)",
+    )
+
+    # Cached compiled regex — populated by model_post_init
+    _compiled_pattern: Optional[re.Pattern] = None
+    _compiled_condition_pattern: Optional[re.Pattern] = None
+
+    def model_post_init(self, __context: Any) -> None:
+        """Compile regex patterns after model initialization."""
+        if self.pattern is not None:
+            try:
+                self._compiled_pattern = re.compile(self.pattern)
+            except re.error:
+                pass  # invalid pattern — condition will never match
+        if self.condition.operator == PolicyOperator.MATCHES and isinstance(self.condition.value, str):
+            try:
+                self._compiled_condition_pattern = re.compile(self.condition.value)
+            except re.error:
+                pass
+
+
+class PolicyDefaults(BaseModel):
+    """Default policy settings when no rule matches.
+
+    Matches Agent OS PolicyDefaults schema.
+    """
+
+    action: PolicyAction = Field(default=PolicyAction.ALLOW, description="Default action when no rule matches")
+    max_tool_calls: Optional[int] = Field(default=None, description="Global per-run tool call limit")
+    max_tokens: Optional[int] = Field(default=None, description="Token limit (future)")
+    timeout_seconds: Optional[int] = Field(default=None, description="Timeout limit (future)")
 
 
 class ToolCallPolicy(BaseModel):
     """Per-agent security policy for tool calls.
 
-    Two lists: denied_tools (always deny) and approval_required_tools
-    (always require human approval). Tools not in either list are
-    allowed by default.
+    Backwards-compatible with the existing two-list model (denied_tools,
+    approval_required_tools). New fields add argument-level rules,
+    rate limiting, and Agent OS-compatible defaults.
 
     The default is permissive (empty policy = allow all). This is
     backward-compatible — existing agents continue to work without
@@ -51,51 +147,454 @@ class ToolCallPolicy(BaseModel):
     default posture should set policies on all agents.
     """
 
-    denied_tools: list[str] = Field(
+    # Legacy fields (backwards compatible with existing DB blob)
+    denied_tools: List[str] = Field(
         default_factory=list,
         description="Tools that are always denied by the security policy.",
     )
-    approval_required_tools: list[str] = Field(
+    approval_required_tools: List[str] = Field(
         default_factory=list,
         description="Tools that always require human approval before execution.",
     )
+    # New fields
+    rules: List[PolicyRule] = Field(
+        default_factory=list,
+        description="Ordered list of policy rules (Agent OS compatible).",
+    )
+    max_calls_per_tool: Dict[str, int] = Field(
+        default_factory=dict,
+        description="Per-tool per-run call limit. Overrides defaults.max_tool_calls for specific tools.",
+    )
+    defaults: Optional[PolicyDefaults] = Field(
+        default=None,
+        description="Default policy settings when no rule matches.",
+    )
+
+
+class PolicyDecision(BaseModel):
+    """The result of a policy check — replaces the old PolicyAction return.
+
+    Includes the matched rule, action, reason, and audit metadata.
+    This is richer than Agent OS's boolean allow/deny — it carries
+    enough context for audit logging without a second lookup.
+    """
+
+    allowed: bool = Field(default=True, description="Whether the tool call is allowed")
+    matched_rule: Optional[str] = Field(default=None, description="Name of the matched rule, if any")
+    action: str = Field(default="allow", description="The action taken")
+    reason: str = Field(default="No rules matched; default action applied", description="Why this decision was made")
+    audit_entry: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Audit metadata: {tool_name, matched_rule, action, reason, tool_category}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Evaluator
+# ---------------------------------------------------------------------------
+
+
+def _resolve_field(context: Dict[str, Any], field: str) -> Any:
+    """Resolve a dot-path field from the evaluation context.
+
+    Examples:
+        _resolve_field(ctx, "tool_name") -> ctx["tool_name"]
+        _resolve_field(ctx, "tool_args.query") -> ctx["tool_args"]["query"]
+        _resolve_field(ctx, "tool_args.nested.key") -> ctx["tool_args"]["nested"]["key"]
+
+    Returns None if the path doesn't exist.
+    """
+    parts = field.split(".")
+    current = context
+    for part in parts:
+        if isinstance(current, dict) and part in current:
+            current = current[part]
+        else:
+            return None
+    return current
+
+
+def _coerce_type(value: Any, target: Any) -> Any:
+    """Coerce a condition value to match the target's type.
+
+    YAML loads "10" as a string. If the context field is an int,
+    we need to compare int to int. This handles the common cases
+    without trying to be too clever.
+    """
+    if target is None:
+        return value
+    if isinstance(value, type(target)):
+        return value
+    try:
+        if isinstance(target, int):
+            return int(value)
+        if isinstance(target, float):
+            return float(value)
+        if isinstance(target, bool):
+            return bool(value)
+    except (ValueError, TypeError):
+        return value
+    return value
+
+
+def _evaluate_condition(condition: PolicyCondition, context: Dict[str, Any], rule: PolicyRule) -> bool:
+    """Evaluate a single policy condition against the evaluation context.
+
+    Returns True if the condition matches, False otherwise.
+    """
+    field_value = _resolve_field(context, condition.field)
+
+    # If the field doesn't exist in context, the condition doesn't match
+    if field_value is None:
+        return False
+
+    # Coerce condition value to match field type
+    compare_value = _coerce_type(condition.value, field_value)
+
+    op = condition.operator
+
+    if op == PolicyOperator.EQ:
+        return field_value == compare_value
+    elif op == PolicyOperator.NE:
+        return field_value != compare_value
+    elif op == PolicyOperator.GT:
+        try:
+            return field_value > compare_value
+        except TypeError:
+            return False
+    elif op == PolicyOperator.LT:
+        try:
+            return field_value < compare_value
+        except TypeError:
+            return False
+    elif op == PolicyOperator.GTE:
+        try:
+            return field_value >= compare_value
+        except TypeError:
+            return False
+    elif op == PolicyOperator.LTE:
+        try:
+            return field_value <= compare_value
+        except TypeError:
+            return False
+    elif op == PolicyOperator.IN:
+        if isinstance(compare_value, (list, tuple, set)):
+            return field_value in compare_value
+        return False
+    elif op == PolicyOperator.NOT_IN:
+        if isinstance(compare_value, (list, tuple, set)):
+            return field_value not in compare_value
+        return False
+    elif op == PolicyOperator.MATCHES:
+        # Use cached compiled regex from model_post_init
+        pattern = rule._compiled_condition_pattern
+        if pattern is None:
+            try:
+                pattern = re.compile(str(compare_value))
+            except re.error:
+                return False
+        if isinstance(field_value, str):
+            return bool(pattern.search(field_value))
+        return bool(pattern.search(str(field_value)))
+    elif op == PolicyOperator.CONTAINS:
+        if isinstance(field_value, str) and isinstance(compare_value, str):
+            return compare_value in field_value
+        if isinstance(field_value, (list, tuple)):
+            return compare_value in field_value
+        return False
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# PolicyChecker
+# ---------------------------------------------------------------------------
 
 
 class PolicyChecker:
     """Checks tool calls against the per-agent security policy.
 
+    Supports both the legacy two-list model (denied_tools,
+    approval_required_tools) and the new Agent OS-compatible rule
+    engine with argument-level conditions, rate limiting, and
+    regex matching.
+
     Usage:
         checker = PolicyChecker(ToolCallPolicy(
             denied_tools=["web_search"],
-            approval_required_tools=["archival_memory_insert"],
+            rules=[
+                PolicyRule(
+                    name="block-internal-queries",
+                    condition=PolicyCondition(field="tool_args.query", operator="matches", value="internal|secret"),
+                    action=PolicyAction.DENY,
+                    priority=80,
+                ),
+            ],
         ))
-        action = checker.check("web_search")       # DENY
-        action = checker.check("archival_memory_insert")  # REQUIRE_APPROVAL
-        action = checker.check("core_memory_append")      # ALLOW
+        decision = checker.check("web_search", eval_context={"tool_name": "web_search"})
+        # decision.allowed == False, decision.matched_rule == "denied_tools"
     """
 
     def __init__(self, policy: Optional[ToolCallPolicy] = None):
         self.policy = policy or ToolCallPolicy()
         self.deny_all = False  # Set to True when policy load fails (fail-closed)
+        self._call_counts: Dict[str, int] = {}  # tool_name -> count (per-run)
+        self._total_calls: int = 0  # total tool calls this run
 
-    def check(self, tool_name: str) -> PolicyAction:
+    def check(self, tool_name: str, eval_context: Optional[Dict[str, Any]] = None) -> PolicyDecision:
         """Check a tool call against the security policy.
 
         Args:
             tool_name: The name of the tool being called.
+            eval_context: Optional evaluation context with tool_args,
+                tool_call_count, actor_id, agent_id, etc. If not
+                provided, only the legacy two-list check is used.
 
         Returns:
-            PolicyAction: ALLOW, DENY, or REQUIRE_APPROVAL.
+            PolicyDecision with allowed, matched_rule, action, reason,
+            and audit_entry.
         """
         if self.deny_all:
-            return PolicyAction.DENY
+            return PolicyDecision(
+                allowed=False,
+                action="deny",
+                matched_rule="fail_closed",
+                reason="Policy load failed — fail-closed mode",
+                audit_entry={"tool_name": tool_name, "matched_rule": "fail_closed", "action": "deny", "reason": "Policy load failed"},
+            )
+
+        # --- Legacy two-list check (highest priority) ---
         if tool_name in self.policy.denied_tools:
-            return PolicyAction.DENY
+            return PolicyDecision(
+                allowed=False,
+                action="deny",
+                matched_rule="denied_tools",
+                reason=f"Tool '{tool_name}' is in denied_tools list",
+                audit_entry={"tool_name": tool_name, "matched_rule": "denied_tools", "action": "deny", "reason": "denied_tools list"},
+            )
+
         if tool_name in self.policy.approval_required_tools:
-            return PolicyAction.REQUIRE_APPROVAL
-        return PolicyAction.ALLOW
+            return PolicyDecision(
+                allowed=False,  # not auto-allowed — needs approval
+                action="require_approval",
+                matched_rule="approval_required_tools",
+                reason=f"Tool '{tool_name}' requires human approval",
+                audit_entry={"tool_name": tool_name, "matched_rule": "approval_required_tools", "action": "require_approval", "reason": "approval_required_tools list"},
+            )
+
+        # --- Rate limiting (before rule evaluation) ---
+        if eval_context is not None:
+            rate_limit_decision = self._check_rate_limits(tool_name)
+            if rate_limit_decision is not None:
+                return rate_limit_decision
+
+        # --- Rule evaluation (Agent OS-compatible) ---
+        if eval_context is not None and self.policy.rules:
+            # Ensure tool_name is in the context
+            eval_context.setdefault("tool_name", tool_name)
+
+            # Sort rules by priority (highest first) for first-match semantics
+            sorted_rules = sorted(self.policy.rules, key=lambda r: r.priority, reverse=True)
+
+            for rule in sorted_rules:
+                if _evaluate_condition(rule.condition, eval_context, rule):
+                    # Condition matched — check pattern if present
+                    if rule.pattern is not None and rule._compiled_pattern is not None:
+                        # Pattern matches against the tool's string representation
+                        # For tool calls, this is typically the tool args serialized
+                        action_str = str(eval_context.get("tool_args", ""))
+                        if not rule._compiled_pattern.search(action_str):
+                            continue  # condition matched but pattern didn't — skip
+
+                    action = rule.action
+                    allowed = action in (PolicyAction.ALLOW, PolicyAction.AUDIT)
+
+                    return PolicyDecision(
+                        allowed=allowed,
+                        action=action.value,
+                        matched_rule=rule.name,
+                        reason=rule.message or f"Matched rule '{rule.name}'",
+                        audit_entry={
+                            "tool_name": tool_name,
+                            "matched_rule": rule.name,
+                            "action": action.value,
+                            "reason": rule.message or f"Matched rule '{rule.name}'",
+                        },
+                    )
+
+        # --- Default action (no rule matched) ---
+        defaults = self.policy.defaults
+        if defaults is not None:
+            default_action = defaults.action
+            allowed = default_action in (PolicyAction.ALLOW, PolicyAction.AUDIT)
+            return PolicyDecision(
+                allowed=allowed,
+                action=default_action.value,
+                matched_rule=None,
+                reason=f"No rules matched; default action is {default_action.value}",
+                audit_entry={"tool_name": tool_name, "matched_rule": None, "action": default_action.value, "reason": "default action"},
+            )
+
+        # No rules, no defaults — allow (backwards compatible)
+        return PolicyDecision(
+            allowed=True,
+            action="allow",
+            matched_rule=None,
+            reason="No rules matched; default action applied",
+            audit_entry={"tool_name": tool_name, "matched_rule": None, "action": "allow", "reason": "default"},
+        )
+
+    def _check_rate_limits(self, tool_name: str) -> Optional[PolicyDecision]:
+        """Check per-tool and global rate limits. Returns a DENY decision if exceeded."""
+        # Per-tool rate limit (takes precedence)
+        per_tool_limit = self.policy.max_calls_per_tool.get(tool_name)
+        if per_tool_limit is not None:
+            current = self._call_counts.get(tool_name, 0)
+            if current >= per_tool_limit:
+                return PolicyDecision(
+                    allowed=False,
+                    action="deny",
+                    matched_rule=f"max_calls_per_tool/{tool_name}",
+                    reason=f"Tool '{tool_name}' exceeded per-run limit of {per_tool_limit} calls",
+                    audit_entry={
+                        "tool_name": tool_name,
+                        "matched_rule": f"max_calls_per_tool/{tool_name}",
+                        "action": "deny",
+                        "reason": f"Rate limit: {current}/{per_tool_limit}",
+                    },
+                )
+
+        # Global rate limit
+        defaults = self.policy.defaults
+        if defaults is not None and defaults.max_tool_calls is not None:
+            if self._total_calls >= defaults.max_tool_calls:
+                return PolicyDecision(
+                    allowed=False,
+                    action="deny",
+                    matched_rule="defaults/max_tool_calls",
+                    reason=f"Global tool call limit of {defaults.max_tool_calls} exceeded",
+                    audit_entry={
+                        "tool_name": tool_name,
+                        "matched_rule": "defaults/max_tool_calls",
+                        "action": "deny",
+                        "reason": f"Global rate limit: {self._total_calls}/{defaults.max_tool_calls}",
+                    },
+                )
+
+        return None
+
+    def record_call(self, tool_name: str) -> None:
+        """Record a tool call for rate limiting. Called after a successful policy check."""
+        self._call_counts[tool_name] = self._call_counts.get(tool_name, 0) + 1
+        self._total_calls += 1
+
+    def get_call_count(self, tool_name: str) -> int:
+        """Get the number of calls made to a specific tool this run."""
+        return self._call_counts.get(tool_name, 0)
+
+    def reset_call_counts(self) -> None:
+        """Reset per-run call counts. Called at the start of each agent run."""
+        self._call_counts.clear()
+        self._total_calls = 0
 
     def update_policy(self, policy: ToolCallPolicy) -> None:
         """Update the policy (e.g., after loading from DB)."""
         self.policy = policy
         self.deny_all = False  # Successful update clears the fail-closed flag
+
+
+# ---------------------------------------------------------------------------
+# YAML policy loader
+# ---------------------------------------------------------------------------
+
+
+def load_policies_from_yaml(yaml_text: str) -> ToolCallPolicy:
+    """Load a ToolCallPolicy from a YAML string in Agent OS format.
+
+    The YAML format matches Agent OS exactly:
+
+        version: "1.0"
+        name: my-policy
+        rules:
+          - name: block-destructive-sql
+            condition:
+              field: tool_name
+              operator: eq
+              value: database_query
+            pattern: "DROP|TRUNCATE"
+            action: deny
+            priority: 100
+            message: "Destructive SQL blocked"
+        defaults:
+          action: allow
+          max_tool_calls: 100
+
+    Raises:
+        ValueError: If the YAML is invalid or missing required fields.
+        pydantic.ValidationError: If rule schema validation fails.
+    """
+    try:
+        data = yaml.safe_load(yaml_text)
+    except yaml.YAMLError as e:
+        raise ValueError(f"Invalid YAML: {e}") from e
+
+    if not isinstance(data, dict):
+        raise ValueError("YAML must be a mapping (dict), got {type(data).__name__}")
+
+    # Parse rules
+    rules = []
+    for rule_data in data.get("rules", []):
+        if not isinstance(rule_data, dict):
+            raise ValueError(f"Each rule must be a mapping, got {type(rule_data).__name__}")
+
+        condition_data = rule_data.get("condition")
+        if not isinstance(condition_data, dict):
+            raise ValueError(f"Rule '{rule_data.get('name', '?')}' must have a 'condition' mapping")
+
+        condition = PolicyCondition(
+            field=condition_data["field"],
+            operator=PolicyOperator(condition_data["operator"]),
+            value=condition_data["value"],
+        )
+
+        action_str = rule_data.get("action", "allow")
+        action = PolicyAction(action_str)
+
+        rule = PolicyRule(
+            name=rule_data["name"],
+            condition=condition,
+            action=action,
+            priority=rule_data.get("priority", 0),
+            message=rule_data.get("message"),
+            pattern=rule_data.get("pattern"),
+        )
+        rules.append(rule)
+
+    # Parse defaults
+    defaults_data = data.get("defaults")
+    defaults = None
+    if defaults_data is not None:
+        if not isinstance(defaults_data, dict):
+            raise ValueError(f"'defaults' must be a mapping, got {type(defaults_data).__name__}")
+
+        defaults = PolicyDefaults(
+            action=PolicyAction(defaults_data.get("action", "allow")),
+            max_tool_calls=defaults_data.get("max_tool_calls"),
+            max_tokens=defaults_data.get("max_tokens"),
+            timeout_seconds=defaults_data.get("timeout_seconds"),
+        )
+
+    # Parse max_calls_per_tool (not in Agent OS schema — our extension)
+    max_calls_per_tool = data.get("max_calls_per_tool", {})
+
+    return ToolCallPolicy(
+        rules=rules,
+        defaults=defaults,
+        max_calls_per_tool=max_calls_per_tool,
+    )
+
+
+def load_policies_from_yaml_file(path: str) -> ToolCallPolicy:
+    """Load a ToolCallPolicy from a YAML file."""
+    with open(path, "r") as f:
+        return load_policies_from_yaml(f.read())

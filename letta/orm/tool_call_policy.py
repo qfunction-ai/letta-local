@@ -20,8 +20,23 @@ class ToolCallPolicyModel(SqlalchemyBase, OrganizationMixin):
     The policy JSON blob has the shape:
     {
         "denied_tools": ["web_search", ...],
-        "approval_required_tools": ["archival_memory_insert", ...]
+        "approval_required_tools": ["archival_memory_insert", ...],
+        "rules": [
+            {
+                "name": "block-internal-queries",
+                "condition": {"field": "tool_args.query", "operator": "matches", "value": "internal|secret"},
+                "action": "deny",
+                "priority": 80,
+                "message": "Queries containing internal/confidential/secret are blocked"
+            }
+        ],
+        "max_calls_per_tool": {"web_search": 10},
+        "defaults": {"action": "allow", "max_tool_calls": 100}
     }
+
+    The legacy fields (denied_tools, approval_required_tools) are
+    backwards compatible. The new fields (rules, max_calls_per_tool,
+    defaults) follow the Agent OS schema format.
     """
 
     __tablename__ = "tool_call_policies"
@@ -36,7 +51,7 @@ class ToolCallPolicyModel(SqlalchemyBase, OrganizationMixin):
     )
     policy: Mapped[Optional[dict]] = mapped_column(
         JSON, nullable=True,
-        doc="ToolCallPolicy as JSON: {denied_tools: [...], approval_required_tools: [...]}",
+        doc="ToolCallPolicy as JSON: {denied_tools: [...], approval_required_tools: [...], rules: [...], max_calls_per_tool: {...}, defaults: {...}}",
     )
     created_at: Mapped[Optional[object]] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), doc="Timestamp when the policy was created.",
