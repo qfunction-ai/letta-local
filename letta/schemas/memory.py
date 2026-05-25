@@ -775,6 +775,9 @@ class Memory(BaseModel, validate_assignment=True):
 
         for block in self.blocks:
             if block.label == label:
+                if block.read_only:
+                    from letta.constants import READ_ONLY_BLOCK_EDIT_ERROR
+                    raise ValueError(READ_ONLY_BLOCK_EDIT_ERROR)
                 block.value = value
                 return
         raise ValueError(f"Block with label {label} does not exist")

@@ -437,7 +437,11 @@ class LettaAgentBatch(BaseAgent):
                 raise ValueError(f"Missing either `new_memory` or `target_block_label` in the tool args: {param.tool_args}")
 
             # Find the block id/update
-            block_id = param.agent_state.memory.get_block(label=param.tool_args.get("target_block_label")).id
+            target_block = param.agent_state.memory.get_block(label=param.tool_args.get("target_block_label"))
+            if target_block.read_only:
+                from letta.constants import READ_ONLY_BLOCK_EDIT_ERROR
+                raise ValueError(READ_ONLY_BLOCK_EDIT_ERROR)
+            block_id = target_block.id
             new_value = param.tool_args.get("new_memory")
 
             # This is sensitive to multiple agents overwriting the same memory block

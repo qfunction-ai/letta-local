@@ -9,6 +9,7 @@ from letta.constants import (
     RETRIEVAL_QUERY_DEFAULT_PAGE_SIZE,
 )
 from letta.log import get_logger
+from letta.security.block_guard import check_read_only_update
 from letta.orm.errors import NoResultFound
 from letta.schemas.agent import AgentState
 from letta.schemas.block import BlockUpdate
@@ -786,6 +787,9 @@ class LettaCoreToolExecutor(ToolExecutor):
             if memory_block is None:
                 raise ValueError(f"Error: Memory block '{label}' does not exist")
 
+            if memory_block.read_only:
+                raise ValueError(f"{READ_ONLY_BLOCK_EDIT_ERROR}")
+
             # Detach the block from the agent
             updated_agent_state = await self.agent_manager.detach_block_async(
                 agent_id=agent_state.id, block_id=memory_block.id, actor=actor
@@ -815,8 +819,13 @@ class LettaCoreToolExecutor(ToolExecutor):
             if memory_block is None:
                 raise ValueError(f"Error: Memory block '{label}' does not exist")
 
+            if memory_block.read_only:
+                raise ValueError(f"{READ_ONLY_BLOCK_EDIT_ERROR}")
+
+            block_update = BlockUpdate(description=description)
+            check_read_only_update(memory_block, block_update)
             await self.block_manager.update_block_async(
-                block_id=memory_block.id, block_update=BlockUpdate(description=description), actor=actor
+                block_id=memory_block.id, block_update=block_update, actor=actor
             )
             await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_state.id, actor=actor, force=True)
 
@@ -843,7 +852,12 @@ class LettaCoreToolExecutor(ToolExecutor):
             if memory_block is None:
                 raise ValueError(f"Error: Memory block '{old_label}' does not exist")
 
-            await self.block_manager.update_block_async(block_id=memory_block.id, block_update=BlockUpdate(label=new_label), actor=actor)
+            if memory_block.read_only:
+                raise ValueError(f"{READ_ONLY_BLOCK_EDIT_ERROR}")
+
+            block_update = BlockUpdate(label=new_label)
+            check_read_only_update(memory_block, block_update)
+            await self.block_manager.update_block_async(block_id=memory_block.id, block_update=block_update, actor=actor)
             await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_state.id, actor=actor, force=True)
 
             return (
