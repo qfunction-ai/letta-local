@@ -41,8 +41,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
-
+from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
 # Regex safety — reject patterns that cause catastrophic backtracking
@@ -63,10 +62,7 @@ def validate_regex_pattern(pattern: str) -> None:
     if not pattern:
         return
     if _NESTED_QUANTIFIER.search(pattern):
-        raise ValueError(
-            f"Regex pattern rejected: nested quantifiers cause "
-            f"catastrophic backtracking. Pattern: {pattern!r}"
-        )
+        raise ValueError(f"Regex pattern rejected: nested quantifiers cause catastrophic backtracking. Pattern: {pattern!r}")
     try:
         re.compile(pattern)
     except re.error as e:
@@ -417,7 +413,12 @@ class PolicyChecker:
                 action="require_approval",
                 matched_rule="approval_required_tools",
                 reason=f"Tool '{tool_name}' requires human approval",
-                audit_entry={"tool_name": tool_name, "matched_rule": "approval_required_tools", "action": "require_approval", "reason": "approval_required_tools list"},
+                audit_entry={
+                    "tool_name": tool_name,
+                    "matched_rule": "approval_required_tools",
+                    "action": "require_approval",
+                    "reason": "approval_required_tools list",
+                },
             )
 
         # --- Rate limiting (before rule evaluation) ---

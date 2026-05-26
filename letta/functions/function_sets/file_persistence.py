@@ -29,6 +29,7 @@ def _get_limits():
     """Read size limits from file_persistence_settings, falling back to defaults."""
     try:
         from letta.settings import file_persistence_settings
+
         max_file = file_persistence_settings.max_file_size_bytes
         max_total = file_persistence_settings.max_total_size_bytes
     except Exception:
@@ -41,6 +42,7 @@ def _agent_file_dir(agent_state) -> Path:
     """Return the per-agent file directory, creating it if needed."""
     try:
         from letta.settings import file_persistence_settings, settings
+
         base = Path(file_persistence_settings.agent_files_dir or os.path.join(str(settings.letta_dir), "agent_files"))
     except Exception:
         base = Path(os.path.expanduser("~/.letta/agent_files"))
@@ -184,10 +186,12 @@ def file_list(agent_state, prefix: Optional[str] = None) -> str:
     for f in files:
         rel = str(f.relative_to(base_dir))
         stat = f.stat()
-        result.append({
-            "name": rel,
-            "size": stat.st_size,
-            "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-        })
+        result.append(
+            {
+                "name": rel,
+                "size": stat.st_size,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            }
+        )
 
     return json.dumps(result)

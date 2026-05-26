@@ -5,12 +5,10 @@ The files live in per-agent directories on the server filesystem.
 """
 
 import mimetypes
-import os
-from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from letta.functions.function_sets.file_persistence import _agent_file_dir, _validate_path
@@ -77,11 +75,14 @@ async def list_agent_files(
         rel = str(f.relative_to(base_dir))
         stat = f.stat()
         from datetime import datetime, timezone
-        files.append(AgentFileInfo(
-            name=rel,
-            size=stat.st_size,
-            modified_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-        ))
+
+        files.append(
+            AgentFileInfo(
+                name=rel,
+                size=stat.st_size,
+                modified_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            )
+        )
         total_size += stat.st_size
 
     return AgentFileListResponse(agent_id=agent_id, files=files, total_size=total_size)

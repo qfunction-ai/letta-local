@@ -14,7 +14,7 @@ policy. The PATCH endpoint merges partial updates. The evaluate
 endpoint dry-runs a tool call against the current policy.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -39,6 +39,7 @@ router = APIRouter(prefix="/agents", tags=["agent-policies"])
 
 class PolicyConditionRequest(BaseModel):
     """API schema for a policy condition."""
+
     field: str = Field(description="Dot-path: 'tool_name', 'tool_args.query', 'tool_call_count'")
     operator: str = Field(description="Comparison operator: eq, ne, gt, lt, gte, lte, in, not_in, matches, contains")
     value: Any = Field(description="Value to compare against")
@@ -50,6 +51,7 @@ class PolicyRuleRequest(BaseModel):
     Excludes the cached _compiled_pattern and _compiled_condition_pattern
     fields from the internal PolicyRule model.
     """
+
     name: str = Field(description="Human-readable rule name")
     condition: PolicyConditionRequest = Field(description="When this rule fires")
     action: str = Field(description="Action: allow, deny, require_approval, audit")
@@ -60,6 +62,7 @@ class PolicyRuleRequest(BaseModel):
 
 class PolicyDefaultsRequest(BaseModel):
     """API schema for default policy settings."""
+
     action: str = Field(default="allow", description="Default action when no rule matches")
     max_tool_calls: Optional[int] = Field(default=None, description="Global per-run tool call limit")
     max_tokens: Optional[int] = Field(default=None, description="Token limit (future)")
@@ -68,6 +71,7 @@ class PolicyDefaultsRequest(BaseModel):
 
 class ToolCallPolicyRequest(BaseModel):
     """Request body for creating or replacing a tool call policy."""
+
     denied_tools: list[str] = Field(default_factory=list, description="Tools that are always denied.")
     approval_required_tools: list[str] = Field(default_factory=list, description="Tools that require human approval.")
     rules: list[PolicyRuleRequest] = Field(default_factory=list, description="Ordered list of policy rules.")
@@ -82,6 +86,7 @@ class ToolCallPolicyPatchRequest(BaseModel):
     will be merged into the existing policy. To clear a field, use PUT
     with the full policy instead of PATCH.
     """
+
     denied_tools: Optional[list[str]] = Field(default=None, description="Tools that are always denied. None = no change.")
     approval_required_tools: Optional[list[str]] = Field(default=None, description="Tools that require human approval. None = no change.")
     rules: Optional[list[PolicyRuleRequest]] = Field(default=None, description="Policy rules. None = no change.")
@@ -91,12 +96,14 @@ class ToolCallPolicyPatchRequest(BaseModel):
 
 class EvaluateRequest(BaseModel):
     """Request body for the policy evaluate endpoint."""
+
     tool_name: str = Field(..., description="Name of the tool to evaluate")
     tool_args: Optional[dict] = Field(default=None, description="Tool arguments (as JSON dict)")
 
 
 class PolicyConditionResponse(BaseModel):
     """API response schema for a policy condition."""
+
     field: str
     operator: str
     value: Any
@@ -108,6 +115,7 @@ class PolicyRuleResponse(BaseModel):
     Excludes the cached _compiled_pattern and _compiled_condition_pattern
     fields from the internal PolicyRule model.
     """
+
     name: str
     condition: PolicyConditionResponse
     action: str
@@ -118,6 +126,7 @@ class PolicyRuleResponse(BaseModel):
 
 class PolicyDefaultsResponse(BaseModel):
     """API response schema for default policy settings."""
+
     action: str = "allow"
     max_tool_calls: Optional[int] = None
     max_tokens: Optional[int] = None
@@ -126,6 +135,7 @@ class PolicyDefaultsResponse(BaseModel):
 
 class ToolCallPolicyResponse(BaseModel):
     """Response body for tool call policy endpoints."""
+
     agent_id: str = Field(..., description="Agent ID")
     denied_tools: list[str] = Field(default_factory=list, description="Denied tools")
     approval_required_tools: list[str] = Field(default_factory=list, description="Tools requiring approval")
@@ -136,6 +146,7 @@ class ToolCallPolicyResponse(BaseModel):
 
 class PolicyDecisionResponse(BaseModel):
     """Response body for the policy evaluate endpoint."""
+
     allowed: bool = Field(..., description="Whether the tool call would be allowed")
     action: str = Field(..., description="The action that would be taken")
     matched_rule: Optional[str] = Field(default=None, description="Name of the matched rule, if any")
@@ -237,9 +248,10 @@ def _to_response(agent_id: str, policy: ToolCallPolicy) -> ToolCallPolicyRespons
 
 async def _load_policy(agent_id: str, actor) -> ToolCallPolicy:
     """Load the policy for an agent from the DB. Returns default if none exists."""
+    from sqlalchemy import select
+
     from letta.orm.tool_call_policy import ToolCallPolicyModel
     from letta.server.db import db_registry
-    from sqlalchemy import select
 
     _org_id = actor.organization_id
 
@@ -258,9 +270,10 @@ async def _load_policy(agent_id: str, actor) -> ToolCallPolicy:
 
 async def _save_policy(agent_id: str, actor, policy: ToolCallPolicy) -> None:
     """Save a policy to the DB. Creates or updates."""
+    from sqlalchemy import select
+
     from letta.orm.tool_call_policy import ToolCallPolicyModel
     from letta.server.db import db_registry
-    from sqlalchemy import select
 
     _org_id = actor.organization_id
     policy_dict = policy.model_dump()
@@ -356,7 +369,6 @@ async def patch_tool_call_policy(
     that are explicitly set (not None) are applied. To clear a field,
     use PUT with the full policy instead.
     """
-    from letta.security.policy import PolicyChecker
 
     actor = await server.user_manager.get_actor_or_default_async(actor_id=headers.actor_id)
     await _verify_agent_access(agent_id, server, actor)
@@ -434,9 +446,10 @@ async def delete_tool_call_policy(
     headers: HeaderParams = Depends(get_headers),
 ):
     """Delete the tool call policy for an agent (resets to allow all)."""
+    from sqlalchemy import select
+
     from letta.orm.tool_call_policy import ToolCallPolicyModel
     from letta.server.db import db_registry
-    from sqlalchemy import select
 
     actor = await server.user_manager.get_actor_or_default_async(actor_id=headers.actor_id)
     await _verify_agent_access(agent_id, server, actor)
