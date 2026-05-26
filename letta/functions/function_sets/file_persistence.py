@@ -171,8 +171,7 @@ def file_list(agent_state, prefix: Optional[str] = None) -> str:
     base_dir = _agent_file_dir(agent_state)
 
     if prefix:
-        _validate_path(base_dir, prefix)
-        search_dir = base_dir / prefix
+        search_dir = _validate_path(base_dir, prefix)
     else:
         search_dir = base_dir
 

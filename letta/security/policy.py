@@ -33,12 +33,44 @@ when both the policy and the workflow require approval for the same tool.
 
 from __future__ import annotations
 
-import re
+try:
+    import regex as re
+except ImportError:
+    import re  # fallback — Layer 2 validation still rejects pathological patterns
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
+
+
+# ---------------------------------------------------------------------------
+# Regex safety — reject patterns that cause catastrophic backtracking
+# ---------------------------------------------------------------------------
+
+# Nested quantifiers: (a+)+, (a*)*, (a+)*, etc. These are the classic
+# ReDoS patterns. The regex module (Layer 1) handles them in linear time,
+# but there's no reason to accept them — they're almost always a mistake.
+_NESTED_QUANTIFIER = re.compile(r"\([^)]*[+*?][^)]*\)[+*?]")
+
+
+def validate_regex_pattern(pattern: str) -> None:
+    """Reject regex patterns likely to cause catastrophic backtracking.
+
+    Called at the API boundary and in PolicyRule.model_post_init.
+    Raises ValueError if the pattern is rejected.
+    """
+    if not pattern:
+        return
+    if _NESTED_QUANTIFIER.search(pattern):
+        raise ValueError(
+            f"Regex pattern rejected: nested quantifiers cause "
+            f"catastrophic backtracking. Pattern: {pattern!r}"
+        )
+    try:
+        re.compile(pattern)
+    except re.error as e:
+        raise ValueError(f"Invalid regex pattern: {e}") from e
 
 
 # ---------------------------------------------------------------------------
@@ -109,13 +141,19 @@ class PolicyRule(BaseModel):
     _compiled_condition_pattern: Optional[re.Pattern] = None
 
     def model_post_init(self, __context: Any) -> None:
-        """Compile regex patterns after model initialization."""
+        """Compile regex patterns after model initialization.
+
+        Rejects patterns with nested quantifiers (ReDoS prevention).
+        Invalid patterns are silently ignored (condition will never match).
+        """
         if self.pattern is not None:
+            validate_regex_pattern(self.pattern)
             try:
                 self._compiled_pattern = re.compile(self.pattern)
             except re.error:
                 pass  # invalid pattern — condition will never match
         if self.condition.operator == PolicyOperator.MATCHES and isinstance(self.condition.value, str):
+            validate_regex_pattern(self.condition.value)
             try:
                 self._compiled_condition_pattern = re.compile(self.condition.value)
             except re.error:

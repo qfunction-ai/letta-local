@@ -6,6 +6,11 @@ integration with PolicyChecker.
 """
 
 import re
+try:
+    import regex
+    _PATTERN_TYPES = (re.Pattern, regex.Pattern)
+except ImportError:
+    _PATTERN_TYPES = (re.Pattern,)
 import pytest
 
 from letta.security.policy import (
@@ -82,16 +87,35 @@ class TestPolicyRule:
             action=PolicyAction.DENY,
         )
         assert rule._compiled_condition_pattern is not None
-        assert isinstance(rule._compiled_condition_pattern, re.Pattern)
+        assert isinstance(rule._compiled_condition_pattern, _PATTERN_TYPES)
 
-    def test_invalid_regex_does_not_crash(self):
-        rule = PolicyRule(
-            name="bad-regex",
-            condition=PolicyCondition(field="tool_args.q", operator=PolicyOperator.MATCHES, value="[invalid"),
-            action=PolicyAction.DENY,
-        )
-        # Should not crash — invalid regex means condition never matches
-        assert rule._compiled_condition_pattern is None
+    def test_invalid_regex_rejected(self):
+        """Invalid regex patterns are rejected by validate_regex_pattern."""
+        with pytest.raises(ValueError, match="Invalid regex pattern"):
+            PolicyRule(
+                name="bad-regex",
+                condition=PolicyCondition(field="tool_args.q", operator=PolicyOperator.MATCHES, value="[invalid"),
+                action=PolicyAction.DENY,
+            )
+
+    def test_redos_pattern_rejected(self):
+        """Nested quantifiers (ReDoS patterns) are rejected."""
+        with pytest.raises(ValueError, match="nested quantifiers"):
+            PolicyRule(
+                name="redos",
+                condition=PolicyCondition(field="tool_args.q", operator=PolicyOperator.MATCHES, value="(a+)+b"),
+                action=PolicyAction.DENY,
+            )
+
+    def test_redos_pattern_field_rejected(self):
+        """Nested quantifiers in the pattern field are also rejected."""
+        with pytest.raises(ValueError, match="nested quantifiers"):
+            PolicyRule(
+                name="redos-pattern",
+                condition=PolicyCondition(field="tool_name", operator=PolicyOperator.EQ, value="test"),
+                action=PolicyAction.DENY,
+                pattern="(a+)+b",
+            )
 
     def test_pattern_field_compiled(self):
         rule = PolicyRule(
@@ -101,16 +125,17 @@ class TestPolicyRule:
             pattern="DROP|TRUNCATE",
         )
         assert rule._compiled_pattern is not None
-        assert isinstance(rule._compiled_pattern, re.Pattern)
+        assert isinstance(rule._compiled_pattern, _PATTERN_TYPES)
 
-    def test_invalid_pattern_does_not_crash(self):
-        rule = PolicyRule(
-            name="bad-pattern",
-            condition=PolicyCondition(field="tool_name", operator=PolicyOperator.EQ, value="db"),
-            action=PolicyAction.DENY,
-            pattern="[invalid",
-        )
-        assert rule._compiled_pattern is None
+    def test_invalid_pattern_rejected(self):
+        """Invalid regex in the pattern field is rejected by validate_regex_pattern."""
+        with pytest.raises(ValueError, match="Invalid regex pattern"):
+            PolicyRule(
+                name="bad-pattern",
+                condition=PolicyCondition(field="tool_name", operator=PolicyOperator.EQ, value="db"),
+                action=PolicyAction.DENY,
+                pattern="[invalid",
+            )
 
 
 class TestPolicyDefaults:

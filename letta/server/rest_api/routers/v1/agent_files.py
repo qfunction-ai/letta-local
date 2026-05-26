@@ -60,10 +60,9 @@ async def list_agent_files(
 
     if prefix:
         try:
-            _validate_path(base_dir, prefix)
+            search_dir = _validate_path(base_dir, prefix)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        search_dir = base_dir / prefix
     else:
         search_dir = base_dir
 

@@ -157,7 +157,18 @@ def _to_policy_condition(req: PolicyConditionRequest) -> PolicyCondition:
 
 
 def _to_policy_rule(req: PolicyRuleRequest) -> PolicyRule:
-    """Convert API rule to internal PolicyRule."""
+    """Convert API rule to internal PolicyRule.
+
+    Validates regex patterns before construction to give clear API errors.
+    """
+    from letta.security.policy import validate_regex_pattern
+
+    # Validate regex patterns at the API boundary
+    if req.pattern is not None:
+        validate_regex_pattern(req.pattern)
+    if req.condition.operator == "matches" and isinstance(req.condition.value, str):
+        validate_regex_pattern(req.condition.value)
+
     return PolicyRule(
         name=req.name,
         condition=_to_policy_condition(req.condition),
