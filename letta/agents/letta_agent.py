@@ -331,17 +331,7 @@ class LettaAgent(BaseAgent):
 
         # Security: log message_sent when the agent responds to the user
         if stop_reason and stop_reason.stop_reason == StopReasonType.end_turn.value:
-            try:
-                await self.audit_logger.log(
-                    agent_id=self.agent_id,
-                    organization_id=self.actor.organization_id if self.actor else None,
-                    event_type="message_sent",
-                    event_data={"agent_id": self.agent_id},
-                    step_id=None,
-                    run_id=run_id,
-                )
-            except Exception as _e:
-                self.logger.warning(f"Failed to write audit log (message_sent): {_e}")
+            await self._log_message_sent(step_id=None, run_id=run_id)
 
         return _create_letta_response(
             new_in_context_messages=new_in_context_messages,
@@ -402,7 +392,7 @@ class LettaAgent(BaseAgent):
                     initial_messages=initial_messages,
                     is_final_step=(i == max_steps - 1),
                     step_metrics=step_metrics,
-                    run_id=run_id or self.current_run_id,
+                    run_id=run_id,
                     is_approval=input_messages[0].approve,
                     is_denial=input_messages[0].approve == False,
                     denial_reason=input_messages[0].reason,
@@ -713,17 +703,7 @@ class LettaAgent(BaseAgent):
 
         # Security: log message_sent when the agent responds to the user
         if stop_reason and stop_reason.stop_reason == StopReasonType.end_turn.value:
-            try:
-                await self.audit_logger.log(
-                    agent_id=self.agent_id,
-                    organization_id=self.actor.organization_id if self.actor else None,
-                    event_type="message_sent",
-                    event_data={"agent_id": self.agent_id},
-                    step_id=step_id,
-                    run_id=run_id,
-                )
-            except Exception as _e:
-                self.logger.warning(f"Failed to write audit log (message_sent): {_e}")
+            await self._log_message_sent(step_id=step_id, run_id=run_id)
 
         await self._log_request(request_start_timestamp_ns, request_span, job_update_metadata, is_error=False)
 
@@ -783,7 +763,7 @@ class LettaAgent(BaseAgent):
                     initial_messages=initial_messages,
                     is_final_step=(i == max_steps - 1),
                     step_metrics=step_metrics,
-                    run_id=run_id or self.current_run_id,
+                    run_id=run_id,
                     is_approval=input_messages[0].approve,
                     is_denial=input_messages[0].approve == False,
                     denial_reason=input_messages[0].reason,
@@ -831,7 +811,7 @@ class LettaAgent(BaseAgent):
                     context_window_limit=agent_state.llm_config.context_window,
                     usage=UsageStatistics(completion_tokens=0, prompt_tokens=0, total_tokens=0),
                     provider_id=None,
-                    run_id=run_id if run_id else self.current_run_id,
+                    run_id=run_id,
                     step_id=step_id,
                     project_id=agent_state.project_id,
                     status=StepStatus.PENDING,
@@ -969,7 +949,7 @@ class LettaAgent(BaseAgent):
                             step_id=step_id,
                             agent_state=agent_state,
                             step_metrics=step_metrics,
-                            run_id=run_id if run_id else self.current_run_id,
+                            run_id=run_id,
                         )
 
                 except Exception as e:
@@ -1150,7 +1130,7 @@ class LettaAgent(BaseAgent):
                     initial_messages=new_in_context_messages,
                     is_final_step=(i == max_steps - 1),
                     step_metrics=step_metrics,
-                    run_id=run_id or self.current_run_id,
+                    run_id=run_id,
                     is_approval=input_messages[0].approve,
                     is_denial=input_messages[0].approve == False,
                     denial_reason=input_messages[0].reason,
@@ -1563,22 +1543,27 @@ class LettaAgent(BaseAgent):
 
         # Security: log message_sent when the agent responds to the user
         if stop_reason and stop_reason.stop_reason == StopReasonType.end_turn.value:
-            try:
-                await self.audit_logger.log(
-                    agent_id=self.agent_id,
-                    organization_id=self.actor.organization_id if self.actor else None,
-                    event_type="message_sent",
-                    event_data={"agent_id": self.agent_id},
-                    step_id=step_id,
-                    run_id=run_id,
-                )
-            except Exception as _e:
-                self.logger.warning(f"Failed to write audit log (message_sent): {_e}")
+            await self._log_message_sent(step_id=step_id, run_id=run_id)
 
         await self._log_request(request_start_timestamp_ns, request_span, job_update_metadata, is_error=False)
 
         for finish_chunk in self.get_finish_chunks_for_stream(usage, stop_reason):
             yield f"data: {finish_chunk}\n\n"
+
+    async def _log_message_sent(self, step_id: str | None, run_id: str | None) -> None:
+        """Log a message_sent audit event. Never raises."""
+        from letta.security.audit import audit_log, SecurityEventType
+
+        await audit_log(
+            self.audit_logger,
+            agent_id=self.agent_id,
+            actor=self.actor,
+            event_type=SecurityEventType.MESSAGE_SENT,
+            event_data={"agent_id": self.agent_id},
+            step_id=step_id,
+            run_id=run_id,
+            label="message_sent",
+        )
 
     async def _log_request(
         self, request_start_timestamp_ns: int, request_span: "Span | None", job_update_metadata: dict | None, is_error: bool
@@ -1665,7 +1650,7 @@ class LettaAgent(BaseAgent):
                         telemetry_manager=self.telemetry_manager,
                         agent_id=self.agent_id,
                         agent_tags=agent_state.tags,
-                        run_id=run_id or self.current_run_id,
+                        run_id=run_id,
                         step_id=step_metrics.id,
                         call_type=LLMCallType.agent_step,
                     )
@@ -1738,7 +1723,7 @@ class LettaAgent(BaseAgent):
                     telemetry_manager=self.telemetry_manager,
                     agent_id=self.agent_id,
                     agent_tags=agent_state.tags,
-                    run_id=run_id or self.current_run_id,
+                    run_id=run_id,
                     step_id=step_id,
                     call_type=LLMCallType.agent_step,
                 )
@@ -2017,7 +2002,7 @@ class LettaAgent(BaseAgent):
                 reasoning_content=None,
                 pre_computed_assistant_message_id=None,
                 step_id=step_id,
-                run_id=run_id or self.current_run_id,
+                run_id=run_id,
                 is_approval_response=True,
             )
             messages_to_persist = (initial_messages or []) + tool_call_messages
@@ -2062,7 +2047,7 @@ class LettaAgent(BaseAgent):
         # Security: check tool call policy FIRST
         from letta.security.policy import PolicyDecision
         from letta.security.audit import audit_log, tool_denied_event, canary_detected_event, classify_tool
-        _audit_run_id = run_id or self.current_run_id
+        _audit_run_id = run_id
         policy_decision = self._check_policy(tool_call_name, tool_args, step_id, _audit_run_id)
         if not policy_decision.allowed:
             tool_execution_result = ToolExecutionResult(
@@ -2238,7 +2223,7 @@ class LettaAgent(BaseAgent):
                 reasoning_content=reasoning_content,
                 pre_computed_assistant_message_id=pre_computed_assistant_message_id,
                 step_id=step_id,
-                run_id=run_id or self.current_run_id,
+                run_id=run_id,
                 is_approval_response=is_approval or is_denial,
             )
             messages_to_persist = (initial_messages or []) + tool_call_messages

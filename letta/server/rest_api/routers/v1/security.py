@@ -43,6 +43,7 @@ async def list_security_events(
     agent_id: Optional[str] = Query(None, description="Filter by agent ID"),
     event_type: Optional[str] = Query(None, description="Filter by event type"),
     since: Optional[datetime] = Query(None, description="Only return events after this timestamp"),
+    until: Optional[datetime] = Query(None, description="Only return events before this timestamp"),
     limit: int = Query(100, description="Maximum number of events to return", ge=1, le=1000),
     server: SyncServer = Depends(get_letta_server),
     headers: HeaderParams = Depends(get_headers),
@@ -50,7 +51,8 @@ async def list_security_events(
     """List security events from the audit log.
 
     Append-only, no write endpoints. Filter by agent_id, event_type,
-    and since (timestamp). Results are ordered by created_at descending.
+    since (timestamp), and until (timestamp). Results are ordered by
+    created_at descending.
     """
     from letta.orm.security_event import SecurityEvent
     from letta.server.db import db_registry
@@ -67,6 +69,8 @@ async def list_security_events(
             stmt = stmt.where(SecurityEvent.event_type == event_type)
         if since:
             stmt = stmt.where(SecurityEvent.created_at >= since)
+        if until:
+            stmt = stmt.where(SecurityEvent.created_at <= until)
 
         # Scope to the actor's organization
         stmt = stmt.where(SecurityEvent.organization_id == actor.organization_id)
