@@ -101,20 +101,32 @@ def apply_landlock(config):
     try:
         # Add path rules for allowed read paths
         for path in config.get("allowed_read_paths", []):
-            landlock_add_path_rule(ruleset_fd, path, FS_READ_FILE | FS_READ_DIR)
+            try:
+                landlock_add_path_rule(ruleset_fd, path, FS_READ_FILE | FS_READ_DIR)
+            except (FileNotFoundError, OSError) as e:
+                print(f"Skipping non-existent path {path}: {e}", file=sys.stderr)
 
         # Add path rules for allowed write paths
         for path in config.get("allowed_write_paths", []):
-            landlock_add_path_rule(ruleset_fd, path,
-                FS_READ_FILE | FS_READ_DIR | FS_WRITE_FILE | FS_MAKE_REG |
-                FS_REMOVE_FILE | FS_REMOVE_DIR | FS_MAKE_DIR)
+            try:
+                landlock_add_path_rule(ruleset_fd, path,
+                    FS_READ_FILE | FS_READ_DIR | FS_WRITE_FILE | FS_MAKE_REG |
+                    FS_REMOVE_FILE | FS_REMOVE_DIR | FS_MAKE_DIR)
+            except (FileNotFoundError, OSError) as e:
+                print(f"Skipping non-existent path {path}: {e}", file=sys.stderr)
 
         # Add path rules for allowed execute paths
         for path in config.get("allowed_execute_paths", []):
-            landlock_add_path_rule(ruleset_fd, path, FS_EXECUTE | FS_READ_FILE)
+            try:
+                landlock_add_path_rule(ruleset_fd, path, FS_EXECUTE | FS_READ_FILE | FS_READ_DIR)
+            except (FileNotFoundError, OSError) as e:
+                print(f"Skipping non-existent path {path}: {e}", file=sys.stderr)
 
         # Add /proc/self (read only, no /proc broadly)
-        landlock_add_path_rule(ruleset_fd, "/proc/self", FS_READ_FILE | FS_READ_DIR)
+        try:
+            landlock_add_path_rule(ruleset_fd, "/proc/self", FS_READ_FILE | FS_READ_DIR)
+        except (FileNotFoundError, OSError):
+            pass  # /proc/self should always exist, but be safe
 
         # Add network rules if ABI >= 4 and network is allowed
         if abi >= 4:

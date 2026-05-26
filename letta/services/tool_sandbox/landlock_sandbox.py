@@ -138,7 +138,7 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                 exec_env["VIRTUAL_ENV"] = venv_path
                 exec_env["PATH"] = os.path.join(venv_path, "bin") + ":" + exec_env["PATH"]
             else:
-                python_executable = sys.executable
+                python_executable = os.path.realpath(sys.executable)
                 if "PYTHONPATH" in os.environ:
                     exec_env["PYTHONPATH"] = os.environ["PYTHONPATH"]
 

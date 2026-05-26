@@ -230,6 +230,15 @@ def apply_seccomp_filter(blocked_syscalls, block_fork=True, allow_network=False)
     libseccomp2 is already present in the Docker image (python:3.11-slim
     -> Debian -> libseccomp2). No new dependency.
 
+    CRITICAL: argtypes/restype must be set on all libseccomp functions.
+    On aarch64, ctypes default argument conversion mangles the arguments
+    (e.g., passing a Python string where an int is expected), making the
+    seccomp filter silently non-functional. We also resolve syscall names
+    to numbers via seccomp_syscall_resolve_name because seccomp_rule_add
+    expects an int syscall number, not a string. On aarch64, some syscalls
+    (e.g., fork) don't exist as discrete syscall numbers — resolve returns
+    a negative value, and we skip those.
+
     Args:
         blocked_syscalls: List of syscall names to block (e.g., ["ptrace", "mount"]).
         block_fork: If True, block fork/clone/clone3/vfork.
@@ -240,6 +249,20 @@ def apply_seccomp_filter(blocked_syscalls, block_fork=True, allow_network=False)
     except OSError:
         libseccomp = ctypes.CDLL(ctypes.util.find_library("seccomp"), use_errno=True)
 
+    # Set argtypes/restype — REQUIRED on aarch64 where default conversion
+    # mangles arguments. Without these, seccomp_rule_add silently fails
+    # and the filter does nothing.
+    libseccomp.seccomp_init.restype = ctypes.c_void_p
+    libseccomp.seccomp_init.argtypes = [ctypes.c_uint32]
+    libseccomp.seccomp_rule_add.restype = ctypes.c_int
+    libseccomp.seccomp_rule_add.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint]
+    libseccomp.seccomp_load.restype = ctypes.c_int
+    libseccomp.seccomp_load.argtypes = [ctypes.c_void_p]
+    libseccomp.seccomp_release.restype = None
+    libseccomp.seccomp_release.argtypes = [ctypes.c_void_p]
+    libseccomp.seccomp_syscall_resolve_name.restype = ctypes.c_int
+    libseccomp.seccomp_syscall_resolve_name.argtypes = [ctypes.c_char_p]
+
     # SCMP_ACT_ALLOW = 0x7fff0000 (default: allow all, then block specific)
     SCMP_ACT_ALLOW = 0x7FFF0000
     SCMP_ACT_ERRNO = 0x00050000  # ERRNO(EPERM=13)
@@ -248,21 +271,35 @@ def apply_seccomp_filter(blocked_syscalls, block_fork=True, allow_network=False)
     if not ctx:
         raise OSError(ctypes.get_errno(), "seccomp_init failed")
 
+    def _block_syscall(ctx, name):
+        """Resolve a syscall name to its number and add a blocking rule.
+
+        On aarch64, some syscalls (e.g., fork) don't exist as discrete
+        entries — seccomp_syscall_resolve_name returns __NR_SCMP_ERROR
+        (a negative number). We skip those rather than failing.
+        """
+        nr = libseccomp.seccomp_syscall_resolve_name(name.encode("ascii"))
+        if nr < 0:
+            return  # Syscall doesn't exist on this arch (e.g., fork on aarch64)
+        ret = libseccomp.seccomp_rule_add(ctx, SCMP_ACT_ERRNO | 13, nr, 0)
+        if ret != 0:
+            raise OSError(ctypes.get_errno(), f"seccomp_rule_add failed for {name} (nr={nr})")
+
     try:
         # Block fork/clone/clone3/vfork
         if block_fork:
             for name in ("fork", "clone", "clone3", "vfork"):
-                libseccomp.seccomp_rule_add(ctx, SCMP_ACT_ERRNO | 13, name, 0)
+                _block_syscall(ctx, name)
 
         # Block additional syscalls
         for name in blocked_syscalls:
-            libseccomp.seccomp_rule_add(ctx, SCMP_ACT_ERRNO | 13, name, 0)
+            _block_syscall(ctx, name)
 
         # If network is NOT allowed, block socket/connect/etc.
         if not allow_network:
             for name in ("socket", "connect", "bind", "listen",
                          "accept", "sendto", "recvfrom"):
-                libseccomp.seccomp_rule_add(ctx, SCMP_ACT_ERRNO | 13, name, 0)
+                _block_syscall(ctx, name)
 
         # Load the filter
         ret = libseccomp.seccomp_load(ctx)

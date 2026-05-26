@@ -112,8 +112,8 @@ class LandlockSandboxConfig(BaseModel):
         description="Paths allowed for write access (recursively).",
     )
     allowed_execute_paths: List[str] = Field(
-        default_factory=lambda: ["/usr/bin", "/usr/local/bin"],
-        description="Paths allowed for execution (recursively).",
+        default_factory=lambda: ["/usr/bin", "/usr/local/bin", "/lib"],
+        description="Paths allowed for execution (recursively). /lib must be included for the ELF dynamic linker (ld-linux-aarch64.so.1 on ARM, ld-linux-x86-64.so.2 on x86_64).",
     )
 
     # Network access (ABI v4+, kernel 6.7+)
