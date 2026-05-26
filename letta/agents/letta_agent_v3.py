@@ -35,6 +35,7 @@ from letta.helpers.datetime_helpers import get_utc_time, get_utc_timestamp_ns
 from letta.helpers.tool_execution_helper import enable_strict_mode
 from letta.llm_api.llm_client import LLMClient
 from letta.local_llm.constants import INNER_THOUGHTS_KWARG
+from letta.agents import agent_hardening as _ah
 from letta.observability import step_recorder_integration as _sri
 from letta.otel.tracing import trace_method
 from letta.schemas.agent import AgentState
@@ -260,10 +261,8 @@ class LettaAgentV3(LettaAgentV2):
         self.client_tools = client_tools or []
         self.client_skills = client_skills or []
         self.override_system = override_system
-        # Initialize token budget from agent metadata for this run
-        self.token_budget = self._create_token_budget(self.agent_state)
-        # Reset circuit breaker for new run
-        self.circuit_breaker.reset()
+        # Initialize token budget and reset circuit breaker for this run
+        _ah.init_run_hardening(self)
 
         # Apply conversation-specific block overrides if conversation_id is provided
         if conversation_id:
@@ -393,7 +392,7 @@ class LettaAgentV3(LettaAgentV2):
                 break
 
             # Step succeeded — reset circuit breaker counters
-            self.circuit_breaker.record_success()
+            _ah.record_circuit_breaker_success(self)
 
             # Fire credit check to run in parallel with loop overhead / next step setup
             credit_task = safe_create_task_with_return(self._check_credits())
@@ -511,10 +510,8 @@ class LettaAgentV3(LettaAgentV2):
         self.client_tools = client_tools or []
         self.client_skills = client_skills or []
         self.override_system = override_system
-        # Initialize token budget from agent metadata for this run
-        self.token_budget = self._create_token_budget(self.agent_state)
-        # Reset circuit breaker for new run
-        self.circuit_breaker.reset()
+        # Initialize token budget and reset circuit breaker for this run
+        _ah.init_run_hardening(self)
         request_span = self._request_checkpoint_start(request_start_timestamp_ns=request_start_timestamp_ns)
         response_letta_messages = []
         first_chunk = True
@@ -1279,11 +1276,11 @@ class LettaAgentV3(LettaAgentV2):
                     except LLMError as e:
                         self.stop_reason = LettaStopReason(stop_reason=StopReasonType.llm_api_error.value)
                         # Circuit breaker: track consecutive LLM errors
-                        action = self._handle_circuit_breaker_error("llm_api_error")
+                        action = _ah.record_circuit_breaker_error(self, "llm_api_error")
                         if action == "auto_compact":
                             self.logger.warning(
                                 "Circuit breaker triggered for llm_api_error (%d consecutive), force-clearing context",
-                                self.circuit_breaker.get_counts().get("llm_api_error", 0),
+                                _ah.get_circuit_breaker_counts(self).get("llm_api_error", 0),
                             )
                             # Force compact and retry instead of raising
                             try:

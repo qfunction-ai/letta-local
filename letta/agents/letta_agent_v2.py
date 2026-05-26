@@ -27,6 +27,7 @@ from letta.helpers.tool_execution_helper import enable_strict_mode
 from letta.llm_api.llm_client import LLMClient
 from letta.local_llm.constants import INNER_THOUGHTS_KWARG
 from letta.log import get_logger
+from letta.agents import agent_hardening as _ah
 from letta.observability import step_recorder_integration as _sri
 from letta.otel.tracing import log_event, trace_method, tracer
 from letta.prompts.prompt_generator import PromptGenerator
@@ -223,10 +224,8 @@ class LettaAgentV2(BaseAgentV2):
         self.conversation_id = None
         self.client_skills = client_skills or []
         self.override_system = override_system
-        # Initialize token budget from agent metadata for this run
-        self.token_budget = self._create_token_budget(self.agent_state)
-        # Reset circuit breaker for new run
-        self.circuit_breaker.reset()
+        # Initialize token budget and reset circuit breaker for this run
+        _ah.init_run_hardening(self)
         request_span = self._request_checkpoint_start(request_start_timestamp_ns=request_start_timestamp_ns)
 
         in_context_messages, input_messages_to_persist = await _prepare_in_context_messages_no_persist_async(
@@ -273,7 +272,7 @@ class LettaAgentV2(BaseAgentV2):
                 break
 
             # Step succeeded — reset circuit breaker counters
-            self.circuit_breaker.record_success()
+            _ah.record_circuit_breaker_success(self)
 
             # Fire credit check to run in parallel with loop overhead / next step setup
             credit_task = safe_create_task_with_return(self._check_credits())
@@ -364,10 +363,8 @@ class LettaAgentV2(BaseAgentV2):
         self.conversation_id = conversation_id
         self.client_skills = client_skills or []
         self.override_system = override_system
-        # Initialize token budget from agent metadata for this run
-        self.token_budget = self._create_token_budget(self.agent_state)
-        # Reset circuit breaker for new run
-        self.circuit_breaker.reset()
+        # Initialize token budget and reset circuit breaker for this run
+        _ah.init_run_hardening(self)
         request_span = self._request_checkpoint_start(request_start_timestamp_ns=request_start_timestamp_ns)
         first_chunk = True
 
@@ -610,11 +607,11 @@ class LettaAgentV2(BaseAgentV2):
                     except LLMError as e:
                         self.stop_reason = LettaStopReason(stop_reason=StopReasonType.llm_api_error.value)
                         # Circuit breaker: track consecutive LLM errors
-                        action = self._handle_circuit_breaker_error("llm_api_error")
+                        action = _ah.record_circuit_breaker_error(self, "llm_api_error")
                         if action == "auto_compact":
                             self.logger.warning(
                                 "Circuit breaker triggered for llm_api_error (%d consecutive), force-clearing context",
-                                self.circuit_breaker.get_counts().get("llm_api_error", 0),
+                                _ah.get_circuit_breaker_counts(self).get("llm_api_error", 0),
                             )
                             messages = await self.summarize_conversation_history(
                                 in_context_messages=messages,
@@ -628,11 +625,11 @@ class LettaAgentV2(BaseAgentV2):
                     except Exception as e:
                         if isinstance(e, ContextWindowExceededError) and llm_request_attempt < summarizer_settings.max_summarizer_retries:
                             # Circuit breaker: track consecutive context overflow errors
-                            action = self._handle_circuit_breaker_error("context_window_overflow")
+                            action = _ah.record_circuit_breaker_error(self, "context_window_overflow")
                             if action == "auto_compact":
                                 self.logger.warning(
                                     "Circuit breaker triggered for context_window_overflow (%d consecutive), force-clearing context",
-                                    self.circuit_breaker.get_counts().get("context_window_overflow", 0),
+                                    _ah.get_circuit_breaker_counts(self).get("context_window_overflow", 0),
                                 )
                             # Retry case
                             messages = await self.summarize_conversation_history(
