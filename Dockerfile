@@ -31,7 +31,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 
 # Copy dependency files first (cached unless pyproject.toml or uv.lock change)
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock README.md ./
 
 # Install dependencies before copying source — source changes don't invalidate the dep cache
 RUN uv sync --frozen --no-dev --all-extras --python 3.11
