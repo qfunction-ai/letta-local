@@ -75,6 +75,26 @@ class ToolCallPolicyRequest(BaseModel):
     defaults: Optional[PolicyDefaultsRequest] = Field(default=None, description="Default policy settings.")
 
 
+class ToolCallPolicyPatchRequest(BaseModel):
+    """Request body for partially updating a tool call policy.
+
+    All fields are Optional. Only fields that are explicitly set (not None)
+    will be merged into the existing policy. To clear a field, use PUT
+    with the full policy instead of PATCH.
+    """
+    denied_tools: Optional[list[str]] = Field(default=None, description="Tools that are always denied. None = no change.")
+    approval_required_tools: Optional[list[str]] = Field(default=None, description="Tools that require human approval. None = no change.")
+    rules: Optional[list[PolicyRuleRequest]] = Field(default=None, description="Policy rules. None = no change.")
+    max_calls_per_tool: Optional[dict[str, int]] = Field(default=None, description="Per-tool per-run call limit. None = no change.")
+    defaults: Optional[PolicyDefaultsRequest] = Field(default=None, description="Default policy settings. None = no change.")
+
+
+class EvaluateRequest(BaseModel):
+    """Request body for the policy evaluate endpoint."""
+    tool_name: str = Field(..., description="Name of the tool to evaluate")
+    tool_args: Optional[dict] = Field(default=None, description="Tool arguments (as JSON dict)")
+
+
 class PolicyConditionResponse(BaseModel):
     """API response schema for a policy condition."""
     field: str
@@ -315,17 +335,15 @@ async def update_tool_call_policy(
 )
 async def patch_tool_call_policy(
     agent_id: str,
-    request: ToolCallPolicyRequest,
+    request: ToolCallPolicyPatchRequest,
     server: SyncServer = Depends(get_letta_server),
     headers: HeaderParams = Depends(get_headers),
 ):
     """Partially update the tool call policy for an agent.
 
-    Merges the request fields into the existing policy. Only non-default
-    fields from the request are applied — empty lists/dicts/None are
-    treated as "no change" (not "clear the field").
-
-    To clear a field, use PUT with the full policy instead.
+    Merges the request fields into the existing policy. Only fields
+    that are explicitly set (not None) are applied. To clear a field,
+    use PUT with the full policy instead.
     """
     from letta.security.policy import PolicyChecker
 
@@ -335,14 +353,14 @@ async def patch_tool_call_policy(
     # Load existing policy
     existing = await _load_policy(agent_id, actor)
 
-    # Merge: only overwrite fields that the request explicitly sets
-    if request.denied_tools:
+    # Merge: only overwrite fields that are explicitly set (not None)
+    if request.denied_tools is not None:
         existing.denied_tools = request.denied_tools
-    if request.approval_required_tools:
+    if request.approval_required_tools is not None:
         existing.approval_required_tools = request.approval_required_tools
-    if request.rules:
+    if request.rules is not None:
         existing.rules = [_to_policy_rule(r) for r in request.rules]
-    if request.max_calls_per_tool:
+    if request.max_calls_per_tool is not None:
         existing.max_calls_per_tool = request.max_calls_per_tool
     if request.defaults is not None:
         existing.defaults = _to_policy_defaults(request.defaults)
@@ -358,14 +376,14 @@ async def patch_tool_call_policy(
 )
 async def evaluate_tool_call_policy(
     agent_id: str,
-    tool_name: str,
-    tool_args: Optional[dict] = None,
+    request: EvaluateRequest,
     server: SyncServer = Depends(get_letta_server),
     headers: HeaderParams = Depends(get_headers),
 ):
     """Dry-run: evaluate a hypothetical tool call against the current policy.
 
-    Returns the decision (allowed, action, matched_rule, reason) without
+    Takes a JSON body with tool_name and optional tool_args. Returns
+    the decision (allowed, action, matched_rule, reason) without
     actually executing the tool call or recording it in the audit log.
     """
     from letta.security.policy import PolicyChecker
@@ -377,14 +395,14 @@ async def evaluate_tool_call_policy(
     checker = PolicyChecker(policy)
 
     eval_context = {
-        "tool_name": tool_name,
-        "tool_args": tool_args or {},
+        "tool_name": request.tool_name,
+        "tool_args": request.tool_args or {},
         "tool_call_count": 0,  # dry-run: no prior calls
         "actor_id": actor.id if actor else None,
         "agent_id": agent_id,
     }
 
-    decision = checker.check(tool_name, eval_context=eval_context)
+    decision = checker.check(request.tool_name, eval_context=eval_context)
 
     return PolicyDecisionResponse(
         allowed=decision.allowed,
