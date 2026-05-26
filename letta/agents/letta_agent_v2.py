@@ -27,6 +27,7 @@ from letta.helpers.tool_execution_helper import enable_strict_mode
 from letta.llm_api.llm_client import LLMClient
 from letta.local_llm.constants import INNER_THOUGHTS_KWARG
 from letta.log import get_logger
+from letta.observability import step_recorder_integration as _sri
 from letta.otel.tracing import log_event, trace_method, tracer
 from letta.prompts.prompt_generator import PromptGenerator
 from letta.schemas.agent import AgentState, UpdateAgent
@@ -281,6 +282,7 @@ class LettaAgentV2(BaseAgentV2):
 
         # Rebuild context window after stepping
         if not self.agent_state.message_buffer_autoclear:
+            _sri.mark_summarization_start(self)
             await self.summarize_conversation_history(
                 in_context_messages=in_context_messages,
                 new_letta_messages=self.response_messages,
@@ -288,6 +290,7 @@ class LettaAgentV2(BaseAgentV2):
                 force=False,
                 run_id=run_id,
             )
+            _sri.record_summarization_completed(self, trigger_reason="post_loop")
 
         if self.stop_reason is None:
             self.stop_reason = LettaStopReason(stop_reason=StopReasonType.end_turn.value)
@@ -361,6 +364,10 @@ class LettaAgentV2(BaseAgentV2):
         self.conversation_id = conversation_id
         self.client_skills = client_skills or []
         self.override_system = override_system
+        # Initialize token budget from agent metadata for this run
+        self.token_budget = self._create_token_budget(self.agent_state)
+        # Reset circuit breaker for new run
+        self.circuit_breaker.reset()
         request_span = self._request_checkpoint_start(request_start_timestamp_ns=request_start_timestamp_ns)
         first_chunk = True
 
@@ -430,6 +437,7 @@ class LettaAgentV2(BaseAgentV2):
                 self.stop_reason = LettaStopReason(stop_reason=StopReasonType.max_steps.value)
 
             if not self.agent_state.message_buffer_autoclear:
+                _sri.mark_summarization_start(self)
                 await self.summarize_conversation_history(
                     in_context_messages=in_context_messages,
                     new_letta_messages=self.response_messages,
@@ -437,6 +445,7 @@ class LettaAgentV2(BaseAgentV2):
                     force=False,
                     run_id=run_id,
                 )
+                _sri.record_summarization_completed(self, trigger_reason="post_loop")
 
         except:
             if self.stop_reason and not first_chunk:
@@ -572,6 +581,9 @@ class LettaAgentV2(BaseAgentV2):
                             yield request_data
                             return
 
+                        # OTel: context composed after request data built
+                        _sri.record_context_composed(self, messages=messages, valid_tools=valid_tools)
+
                         step_progression, step_metrics = self._step_checkpoint_llm_request_start(step_metrics, agent_step_span)
 
                         invocation = llm_adapter.invoke_llm(
@@ -638,6 +650,9 @@ class LettaAgentV2(BaseAgentV2):
                 )
 
                 self._update_global_usage_stats(llm_adapter.usage)
+
+                # OTel: LLM response processed (after usage stats updated for per-step tokens)
+                _sri.record_llm_response(self, reasoning_content=reasoning_content or llm_adapter.reasoning_content, model_name=self.agent_state.llm_config.model)
 
             # Handle the AI response with the extracted data
             if tool_call is None and llm_adapter.tool_call is None:
@@ -949,6 +964,8 @@ class LettaAgentV2(BaseAgentV2):
             new_system_message = await self.message_manager.update_message_by_id_async(
                 curr_system_message.id, message_update=MessageUpdate(content=new_system_message_str), actor=self.actor
             )
+            # OTel: memory rebuilt with actual change flags
+            _sri.record_memory_rebuilt_explicit(self, block_count=len(agent_state.memory.blocks) if agent_state.memory.blocks else 0, system_prompt_changed=system_prompt_changed, memory_changed=memory_changed)
             return [new_system_message, *in_context_messages[1:]]
 
         else:
@@ -1374,6 +1391,9 @@ class LettaAgentV2(BaseAgentV2):
                     )
                 except Exception as _rec_err:
                     self.logger.warning(f"Failed to record tool call: {_rec_err}")
+
+                # OTel: tool executed (skip for denials and client returns — they don't reach here)
+                _sri.record_tool_executed(self, tool_name=tool_call_name, tool_args=tool_args, tool_result=str(tool_execution_result.func_return) if tool_execution_result.func_return else None, duration_ns=tool_end_time - tool_start_time, success=tool_execution_result.success_flag)
 
             log_telemetry(
                 self.logger,

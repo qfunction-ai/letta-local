@@ -35,6 +35,7 @@ from letta.helpers.datetime_helpers import get_utc_time, get_utc_timestamp_ns
 from letta.helpers.tool_execution_helper import enable_strict_mode
 from letta.llm_api.llm_client import LLMClient
 from letta.local_llm.constants import INNER_THOUGHTS_KWARG
+from letta.observability import step_recorder_integration as _sri
 from letta.otel.tracing import trace_method
 from letta.schemas.agent import AgentState
 from letta.schemas.enums import LLMCallType
@@ -510,6 +511,10 @@ class LettaAgentV3(LettaAgentV2):
         self.client_tools = client_tools or []
         self.client_skills = client_skills or []
         self.override_system = override_system
+        # Initialize token budget from agent metadata for this run
+        self.token_budget = self._create_token_budget(self.agent_state)
+        # Reset circuit breaker for new run
+        self.circuit_breaker.reset()
         request_span = self._request_checkpoint_start(request_start_timestamp_ns=request_start_timestamp_ns)
         response_letta_messages = []
         first_chunk = True
@@ -1208,6 +1213,9 @@ class LettaAgentV3(LettaAgentV2):
                             yield request_data
                             return
 
+                        # OTel: context composed after request data built
+                        _sri.record_context_composed(self, messages=messages, valid_tools=valid_tools)
+
                         step_progression, step_metrics = self._step_checkpoint_llm_request_start(step_metrics, agent_step_span)
                         invocation = llm_adapter.invoke_llm(
                             request_data=request_data,
@@ -1279,6 +1287,7 @@ class LettaAgentV3(LettaAgentV2):
                             )
                             # Force compact and retry instead of raising
                             try:
+                                _msgs_before_cb = len(messages)
                                 summary_message, messages, summary_text = await self.compact(
                                     messages,
                                     trigger_threshold=compaction_trigger_threshold,
@@ -1288,9 +1297,11 @@ class LettaAgentV3(LettaAgentV2):
                                     use_summary_role=use_summary_role,
                                     trigger="circuit_breaker_llm_error",
                                     context_tokens_before=self.context_token_estimate,
-                                    messages_count_before=len(messages),
+                                    messages_count_before=_msgs_before_cb,
                                     billing_context=billing_context,
                                 )
+                                # OTel: compaction completed (circuit breaker path)
+                                _sri.record_compaction_completed(self, trigger="circuit_breaker_llm_error", messages_before=_msgs_before_cb, messages_after=len(messages), tokens_before=self.context_token_estimate, tokens_after=self.context_token_estimate)
                             except Exception:
                                 self.logger.error("Circuit breaker auto-compact failed, raising original error")
                                 raise e
@@ -1331,6 +1342,8 @@ class LettaAgentV3(LettaAgentV2):
                                     messages_count_before=messages_count_before,
                                     billing_context=billing_context,
                                 )
+                                # OTel: compaction completed (context window exceeded path)
+                                _sri.record_compaction_completed(self, trigger="context_window_exceeded", messages_before=messages_count_before, messages_after=len(messages), tokens_before=context_tokens_before, tokens_after=self.context_token_estimate)
 
                                 # Recompile the persisted system prompt after compaction so subsequent
                                 # turns load the repaired system+memory state from message_ids[0].
@@ -1385,6 +1398,10 @@ class LettaAgentV3(LettaAgentV2):
                 )
                 # update metrics
                 self._update_global_usage_stats(llm_adapter.usage)
+
+                # OTel: LLM response processed (after usage stats updated for per-step tokens)
+                _sri.record_llm_response(self, reasoning_content=content, model_name=active_llm_config.model)
+
                 # Use prompt_tokens for context estimate (not total_tokens) —
                 # prompt_tokens is the context window size, completion_tokens are already done.
                 if llm_adapter.usage and llm_adapter.usage.prompt_tokens is not None and llm_adapter.usage.prompt_tokens > 0:
@@ -1560,6 +1577,8 @@ class LettaAgentV3(LettaAgentV2):
                         messages_count_before=messages_count_before,
                         billing_context=billing_context,
                     )
+                    # OTel: compaction completed (post-step context check path)
+                    _sri.record_compaction_completed(self, trigger="post_step_context_check", messages_before=messages_count_before, messages_after=len(messages), tokens_before=context_tokens_before, tokens_after=self.context_token_estimate)
 
                     # Recompile the persisted system prompt after compaction so subsequent
                     # turns load the repaired system+memory state from message_ids[0].
@@ -2094,6 +2113,17 @@ class LettaAgentV3(LettaAgentV2):
         # 5d. Update metrics with execution time
         if step_metrics is not None and results:
             step_metrics.tool_execution_ns = max(dt for _, dt in results)
+
+        # OTel: tool batch executed (single or parallel)
+        _sri.record_tool_executed_batch(
+            self,
+            tool_names=[s["name"] for s in exec_specs],
+            tool_results=[
+                {"tool_name": s["name"], "success": results[i][0].success_flag, "duration_ns": results[i][1], "result_count": None}
+                for i, s in enumerate(exec_specs)
+            ],
+            total_duration_ns=max(dt for _, dt in results) if results else None,
+        )
 
         # 5e. Process results and compute function responses
         function_responses: list[Optional[str]] = []
