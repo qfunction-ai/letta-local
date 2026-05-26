@@ -5,6 +5,7 @@ The files live in per-agent directories on the server filesystem.
 """
 
 import mimetypes
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,6 +17,13 @@ from letta.server.rest_api.dependencies import HeaderParams, get_headers, get_le
 from letta.server.server import SyncServer
 
 router = APIRouter(prefix="/agents", tags=["agent-files"])
+
+
+class _AgentStateRef:
+    """Minimal agent_state-like object for _agent_file_dir."""
+
+    def __init__(self, aid):
+        self.id = aid
 
 
 class AgentFileInfo(BaseModel):
@@ -49,11 +57,6 @@ async def list_agent_files(
     except Exception:
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
 
-    # Build a minimal agent_state-like object for _agent_file_dir
-    class _AgentStateRef:
-        def __init__(self, aid):
-            self.id = aid
-
     base_dir = _agent_file_dir(_AgentStateRef(agent_id))
 
     if prefix:
@@ -74,7 +77,6 @@ async def list_agent_files(
             continue
         rel = str(f.relative_to(base_dir))
         stat = f.stat()
-        from datetime import datetime, timezone
 
         files.append(
             AgentFileInfo(
@@ -104,10 +106,6 @@ async def get_agent_file(
         await server.agent_manager.get_agent_by_id_async(agent_id=agent_id, actor=actor)
     except Exception:
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
-
-    class _AgentStateRef:
-        def __init__(self, aid):
-            self.id = aid
 
     base_dir = _agent_file_dir(_AgentStateRef(agent_id))
 

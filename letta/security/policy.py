@@ -140,20 +140,14 @@ class PolicyRule(BaseModel):
         """Compile regex patterns after model initialization.
 
         Rejects patterns with nested quantifiers (ReDoS prevention).
-        Invalid patterns are silently ignored (condition will never match).
+        Invalid regex patterns raise ValueError.
         """
         if self.pattern is not None:
             validate_regex_pattern(self.pattern)
-            try:
-                self._compiled_pattern = re.compile(self.pattern)
-            except re.error:
-                pass  # invalid pattern — condition will never match
+            self._compiled_pattern = re.compile(self.pattern)
         if self.condition.operator == PolicyOperator.MATCHES and isinstance(self.condition.value, str):
             validate_regex_pattern(self.condition.value)
-            try:
-                self._compiled_condition_pattern = re.compile(self.condition.value)
-            except re.error:
-                pass
+            self._compiled_condition_pattern = re.compile(self.condition.value)
 
 
 class PolicyDefaults(BaseModel):
