@@ -7,3 +7,13 @@
 .gitignore
 .env
 *.log
+
+# Non-runtime files — shrink build context and avoid cache invalidation
+tests/
+docs/
+.github/
+.letta/
+*.md
+!README.md
+otel/otel-collector-config-*-dev.yaml
+otel/start-otel-collector.sh

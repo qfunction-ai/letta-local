@@ -1,6 +1,5 @@
 # Start with pgvector base for builder
 FROM pgvector/pgvector:0.8.1-pg15 AS builder
-# comment to trigger ci
 # Install Python and required packages
 RUN apt-get update && apt-get install -y \
     python3 \
@@ -31,12 +30,14 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 
-# Copy dependency files first
+# Copy dependency files first (cached unless pyproject.toml or uv.lock change)
 COPY pyproject.toml uv.lock ./
-# Then copy the rest of the application code
-COPY . .
 
+# Install dependencies before copying source — source changes don't invalidate the dep cache
 RUN uv sync --frozen --no-dev --all-extras --python 3.11
+
+# Copy the rest of the application code
+COPY . .
 
 # Runtime stage
 FROM pgvector/pgvector:0.8.1-pg15 AS runtime
