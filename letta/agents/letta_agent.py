@@ -73,6 +73,8 @@ from letta.settings import model_settings, settings, summarizer_settings
 from letta.system import package_function_response
 from letta.types import JsonDict
 from letta.utils import log_telemetry, validate_function_response
+from letta.security import agent_security as _sec
+from letta.security import audit_helpers as _ah
 
 logger = get_logger(__name__)
 
@@ -152,130 +154,6 @@ class LettaAgent(BaseAgent):
             agent_id=self.agent_id,
         )
 
-    async def _load_tool_call_policy(self) -> None:
-        """Load the per-agent tool call policy from the DB.
-
-        Called at the start of each step. Fails closed (deny all)
-        if the load fails.
-        """
-        from letta.security.policy import ToolCallPolicy
-        from letta.orm.tool_call_policy import ToolCallPolicyModel
-        from letta.server.db import db_registry
-        from sqlalchemy import select
-
-        try:
-            async with db_registry.async_session() as session:
-                stmt = select(ToolCallPolicyModel).where(
-                    ToolCallPolicyModel.agent_id == self.agent_id,
-                    ToolCallPolicyModel.organization_id == self.actor.organization_id,
-                )
-                result = await session.execute(stmt)
-                policy_model = result.scalar_one_or_none()
-                if policy_model and policy_model.policy:
-                    self.policy_checker.update_policy(ToolCallPolicy(**policy_model.policy))
-                else:
-                    self.policy_checker.update_policy(ToolCallPolicy())
-        except Exception as e:
-            self.logger.error(f"Failed to load tool call policy, denying all tools (fail-closed): {e}")
-            self.policy_checker.deny_all = True
-
-    async def _load_canary(self, agent_state) -> None:
-        """Load the canary value from the __canary__ memory block.
-
-        Lazy creation: if the canary block doesn't exist, create it
-        with a random value AND persist it to the DB. The canary is
-        in place before any tool calls happen because step
-        initialization runs before the LLM is called.
-        """
-        from letta.security.canary import CanaryChecker
-
-        try:
-            canary_block = None
-            for block in agent_state.memory.blocks:
-                if block.label == CanaryChecker.CANARY_BLOCK_LABEL:
-                    canary_block = block
-                    break
-
-            if canary_block and canary_block.value:
-                self.canary_checker.update_canary(canary_block.value)
-            else:
-                # Lazy creation: create the canary block in DB and in-memory
-                canary_value = CanaryChecker.generate_canary_value()
-                await self._create_canary_block(agent_state, canary_value)
-                self.canary_checker.update_canary(canary_value)
-        except Exception as e:
-            self.logger.error(f"Failed to load/create canary (fail-closed): {e}")
-            # Keep the last known canary if we have one; otherwise generate
-            # a fresh in-memory canary so the check still works (it just
-            # won't match the system prompt canary, which is the best we
-            # can do without DB access).
-            if not self.canary_checker.canary_value:
-                self.canary_checker.update_canary(CanaryChecker.generate_canary_value())
-
-    async def _create_canary_block(self, agent_state, canary_value: str) -> None:
-        """Create and persist the __canary__ memory block in the DB.
-
-        Also updates the in-memory agent_state so the canary appears
-        in the system prompt on the next refresh.
-        """
-        from letta.security.canary import CanaryChecker
-        from letta.orm.block import Block as BlockModel
-        from letta.orm.agent import Agent as AgentModel
-        from letta.server.db import db_registry
-        from letta.schemas.block import Block
-        from sqlalchemy import select
-
-        async with db_registry.async_session() as session:
-            # Check if the block already exists in DB (race safety)
-            stmt = select(BlockModel).where(
-                BlockModel.label == CanaryChecker.CANARY_BLOCK_LABEL,
-            ).join(
-                BlockModel.agents
-            ).where(
-                BlockModel.agents.any(id=self.agent_id),
-            )
-            result = await session.execute(stmt)
-            existing = result.scalar_one_or_none()
-
-            if existing:
-                # Block exists in DB but wasn't in agent_state — load its value
-                self.canary_checker.update_canary(existing.value)
-                # Add to in-memory state if not already there
-                if not any(b.label == CanaryChecker.CANARY_BLOCK_LABEL for b in agent_state.memory.blocks):
-                    pydantic_block = existing.to_pydantic()
-                    agent_state.memory.blocks.append(pydantic_block)
-                return
-
-            # Create new block in DB
-            org_id = self.actor.organization_id if self.actor else None
-            canary_block = BlockModel(
-                id=f"block-{uuid.uuid4()}",
-                organization_id=org_id,
-                label=CanaryChecker.CANARY_BLOCK_LABEL,
-                value=canary_value,
-                read_only=True,
-                description=CanaryChecker.CANARY_BLOCK_DESCRIPTION,
-                limit=500,
-            )
-            session.add(canary_block)
-
-            # Link block to agent via blocks_agents join table
-            agent_model = await session.get(AgentModel, self.agent_id)
-            if agent_model:
-                agent_model.core_memory.append(canary_block)
-
-            await session.flush()
-
-            # Add to in-memory agent_state
-            pydantic_block = Block(
-                id=canary_block.id,
-                label=CanaryChecker.CANARY_BLOCK_LABEL,
-                value=canary_value,
-                read_only=True,
-                description=CanaryChecker.CANARY_BLOCK_DESCRIPTION,
-            )
-            agent_state.memory.blocks.append(pydantic_block)
-
     async def _check_run_cancellation(self) -> bool:
         """
         Check if the current run associated with this agent execution has been cancelled.
@@ -313,7 +191,7 @@ class LettaAgent(BaseAgent):
             actor=self.actor,
         )
         # Initialize token budget from agent metadata for this run
-        self.token_budget = self._create_token_budget(agent_state)
+        self.token_budget = _sec.create_token_budget(agent_state)
         result = await self._step(
             agent_state=agent_state,
             input_messages=input_messages,
@@ -331,7 +209,7 @@ class LettaAgent(BaseAgent):
 
         # Security: log message_sent when the agent responds to the user
         if stop_reason and stop_reason.stop_reason == StopReasonType.end_turn.value:
-            await self._log_message_sent(step_id=None, run_id=run_id)
+            await _ah.log_message_sent(self.audit_logger, self.agent_id, self.actor, step_id=None, run_id=run_id)
 
         return _create_letta_response(
             new_in_context_messages=new_in_context_messages,
@@ -362,8 +240,9 @@ class LettaAgent(BaseAgent):
         initial_messages = new_in_context_messages
         in_context_messages = current_in_context_messages
         tool_rules_solver = ToolRulesSolver(agent_state.tool_rules)
-        await self._load_tool_call_policy()
-        await self._load_canary(agent_state)
+        await _sec.load_tool_call_policy(self)
+        self.agent_state = agent_state
+        await _sec.load_canary(self)
         llm_client = LLMClient.create(
             provider_type=agent_state.llm_config.model_endpoint_type,
             put_inner_thoughts_first=True,
@@ -703,7 +582,7 @@ class LettaAgent(BaseAgent):
 
         # Security: log message_sent when the agent responds to the user
         if stop_reason and stop_reason.stop_reason == StopReasonType.end_turn.value:
-            await self._log_message_sent(step_id=step_id, run_id=run_id)
+            await _ah.log_message_sent(self.audit_logger, self.agent_id, self.actor, step_id=step_id, run_id=run_id)
 
         await self._log_request(request_start_timestamp_ns, request_span, job_update_metadata, is_error=False)
 
@@ -733,8 +612,9 @@ class LettaAgent(BaseAgent):
         initial_messages = new_in_context_messages
         in_context_messages = current_in_context_messages
         tool_rules_solver = ToolRulesSolver(agent_state.tool_rules)
-        await self._load_tool_call_policy()
-        await self._load_canary(agent_state)
+        await _sec.load_tool_call_policy(self)
+        self.agent_state = agent_state
+        await _sec.load_canary(self)
         llm_client = LLMClient.create(
             provider_type=agent_state.llm_config.model_endpoint_type,
             put_inner_thoughts_first=True,
@@ -1100,8 +980,9 @@ class LettaAgent(BaseAgent):
         in_context_messages = current_in_context_messages
 
         tool_rules_solver = ToolRulesSolver(agent_state.tool_rules)
-        await self._load_tool_call_policy()
-        await self._load_canary(agent_state)
+        await _sec.load_tool_call_policy(self)
+        self.agent_state = agent_state
+        await _sec.load_canary(self)
         llm_client = LLMClient.create(
             provider_type=agent_state.llm_config.model_endpoint_type,
             put_inner_thoughts_first=True,
@@ -1543,27 +1424,12 @@ class LettaAgent(BaseAgent):
 
         # Security: log message_sent when the agent responds to the user
         if stop_reason and stop_reason.stop_reason == StopReasonType.end_turn.value:
-            await self._log_message_sent(step_id=step_id, run_id=run_id)
+            await _ah.log_message_sent(self.audit_logger, self.agent_id, self.actor, step_id=step_id, run_id=run_id)
 
         await self._log_request(request_start_timestamp_ns, request_span, job_update_metadata, is_error=False)
 
         for finish_chunk in self.get_finish_chunks_for_stream(usage, stop_reason):
             yield f"data: {finish_chunk}\n\n"
-
-    async def _log_message_sent(self, step_id: str | None, run_id: str | None) -> None:
-        """Log a message_sent audit event. Never raises."""
-        from letta.security.audit import audit_log, SecurityEventType
-
-        await audit_log(
-            self.audit_logger,
-            agent_id=self.agent_id,
-            actor=self.actor,
-            event_type=SecurityEventType.MESSAGE_SENT,
-            event_data={"agent_id": self.agent_id},
-            step_id=step_id,
-            run_id=run_id,
-            label="message_sent",
-        )
 
     async def _log_request(
         self, request_start_timestamp_ns: int, request_span: "Span | None", job_update_metadata: dict | None, is_error: bool
@@ -1769,7 +1635,7 @@ class LettaAgent(BaseAgent):
     ) -> list[Message]:
         if isinstance(e, ContextWindowExceededError):
             # Circuit breaker: track consecutive context overflow errors
-            action = self._handle_circuit_breaker_error("context_window_overflow")
+            action = _sec.handle_circuit_breaker_error(self, "context_window_overflow")
             if action == "auto_compact":
                 self.logger.warning(
                     "Circuit breaker triggered for context_window_overflow (%d consecutive), force-clearing context",
@@ -1793,7 +1659,7 @@ class LettaAgent(BaseAgent):
             )
         elif isinstance(e, LLMError):
             # Circuit breaker: track consecutive LLM errors
-            action = self._handle_circuit_breaker_error("llm_api_error")
+            action = _sec.handle_circuit_breaker_error(self, "llm_api_error")
             if action == "auto_compact":
                 self.logger.warning(
                     "Circuit breaker triggered for llm_api_error (%d consecutive), force-clearing context",
@@ -2045,22 +1911,17 @@ class LettaAgent(BaseAgent):
             request_heartbeat=request_heartbeat,
         )
         # Security: check tool call policy FIRST
-        from letta.security.policy import PolicyDecision
-        from letta.security.audit import audit_log, tool_denied_event, canary_detected_event, classify_tool
         _audit_run_id = run_id
-        policy_decision = self._check_policy(tool_call_name, tool_args, step_id, _audit_run_id)
+        policy_decision = _sec.check_policy(self, tool_call_name, tool_args, step_id, _audit_run_id)
         if not policy_decision.allowed:
             tool_execution_result = ToolExecutionResult(
                 status="error",
                 func_return=f"Tool '{tool_call_name}' is denied by the security policy. {policy_decision.reason}",
             )
             # Audit log
-            _ed = {"tool_name": tool_call_name, "reason": policy_decision.reason}
-            if policy_decision.matched_rule:
-                _ed["matched_rule"] = policy_decision.matched_rule
-            await audit_log(self.audit_logger, self.agent_id, self.actor,
-                            "tool_denied", _ed,
-                            step_id, _audit_run_id, "tool_denied/policy")
+            await _ah.log_tool_denied(self.audit_logger, self.agent_id, self.actor,
+                            tool_call_name, policy_decision.reason,
+                            step_id, _audit_run_id, matched_rule=policy_decision.matched_rule)
         elif self.canary_checker.check(tool_args):
             # Security: canary detected in tool arguments — prompt exfiltration attempt
             tool_execution_result = ToolExecutionResult(
@@ -2068,9 +1929,8 @@ class LettaAgent(BaseAgent):
                 func_return="Tool call blocked: potential prompt exfiltration detected.",
             )
             # Audit log
-            await audit_log(self.audit_logger, self.agent_id, self.actor,
-                            "canary_detected", canary_detected_event(tool_call_name),
-                            step_id, _audit_run_id, "canary_detected")
+            await _ah.log_canary_detected(self.audit_logger, self.agent_id, self.actor,
+                            tool_call_name, step_id, _audit_run_id)
         elif policy_decision.action == "require_approval" and not is_approval:
             # Policy requires approval — same code path as RequiresApprovalToolRule
             # SKIP the ToolRulesSolver approval check to prevent double approval
@@ -2089,10 +1949,9 @@ class LettaAgent(BaseAgent):
             continue_stepping = False
             stop_reason = LettaStopReason(stop_reason=StopReasonType.requires_approval.value)
             # Audit log
-            await audit_log(self.audit_logger, self.agent_id, self.actor,
-                            "tool_approval_requested",
-                            {"tool_name": tool_call_name, "reason": "policy: approval_required_tools"},
-                            step_id, _audit_run_id, "tool_approval_requested/policy")
+            await _ah.log_tool_approval_requested(self.audit_logger, self.agent_id, self.actor,
+                            tool_call_name, "policy: approval_required_tools",
+                            step_id, _audit_run_id)
         elif not is_approval and tool_rules_solver.is_requires_approval_tool(tool_call_name):
             tool_args[REQUEST_HEARTBEAT_PARAM] = request_heartbeat
             approval_messages = create_approval_request_message_from_llm_response(
@@ -2110,10 +1969,9 @@ class LettaAgent(BaseAgent):
             stop_reason = LettaStopReason(stop_reason=StopReasonType.requires_approval.value)
 
             # Security audit: log approval request
-            await audit_log(self.audit_logger, self.agent_id, self.actor,
-                            "tool_approval_requested",
-                            {"tool_name": tool_call_name},
-                            step_id, _audit_run_id, "tool_approval_requested/rule")
+            await _ah.log_tool_approval_requested(self.audit_logger, self.agent_id, self.actor,
+                            tool_call_name, "tool_rule: requires_approval",
+                            step_id, _audit_run_id)
         else:
             # 2.  Execute the tool (or synthesize an error result if disallowed)
             tool_rule_violated = tool_call_name not in valid_tool_names and not is_approval
@@ -2121,9 +1979,9 @@ class LettaAgent(BaseAgent):
                 tool_execution_result = _build_rule_violation_result(tool_call_name, valid_tool_names, tool_rules_solver)
 
                 # Security audit: log tool denial
-                await audit_log(self.audit_logger, self.agent_id, self.actor,
-                                "tool_denied", tool_denied_event(tool_call_name, "tool_rule_violation"),
-                                step_id, _audit_run_id, "tool_denied/violation")
+                await _ah.log_tool_denied(self.audit_logger, self.agent_id, self.actor,
+                                tool_call_name, "tool_rule_violation",
+                                step_id, _audit_run_id)
             else:
                 # Track tool execution time
                 tool_start_time = get_utc_timestamp_ns()
@@ -2166,13 +2024,9 @@ class LettaAgent(BaseAgent):
                     self.logger.warning(f"Failed to persist tool call record: {e}")
 
                 # Security audit: log tool execution
-                _tool_category = classify_tool(tool_call_name)
-                _event_data = {"tool_call_id": tool_call_id, "tool_name": tool_call_name}
-                if _tool_category:
-                    _event_data["tool_category"] = _tool_category
-                await audit_log(self.audit_logger, self.agent_id, self.actor,
-                                "tool_executed", _event_data,
-                                step_id, _audit_run_id, "tool_executed")
+                await _ah.log_tool_executed(self.audit_logger, self.agent_id, self.actor,
+                                tool_call_id, tool_call_name,
+                                step_id, _audit_run_id)
 
             log_telemetry(
                 self.logger,

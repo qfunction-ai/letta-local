@@ -27,7 +27,9 @@ from letta.helpers.tool_execution_helper import enable_strict_mode
 from letta.llm_api.llm_client import LLMClient
 from letta.local_llm.constants import INNER_THOUGHTS_KWARG
 from letta.log import get_logger
-from letta.agents import agent_hardening as _ah
+from letta.agents import agent_hardening as _hard
+from letta.security import agent_security as _sec
+from letta.security import audit_helpers as _ah
 from letta.observability import step_recorder_integration as _sri
 from letta.otel.tracing import log_event, trace_method, tracer
 from letta.prompts.prompt_generator import PromptGenerator
@@ -225,7 +227,7 @@ class LettaAgentV2(BaseAgentV2):
         self.client_skills = client_skills or []
         self.override_system = override_system
         # Initialize token budget and reset circuit breaker for this run
-        _ah.init_run_hardening(self)
+        _hard.init_run_hardening(self)
         request_span = self._request_checkpoint_start(request_start_timestamp_ns=request_start_timestamp_ns)
 
         in_context_messages, input_messages_to_persist = await _prepare_in_context_messages_no_persist_async(
@@ -272,7 +274,7 @@ class LettaAgentV2(BaseAgentV2):
                 break
 
             # Step succeeded — reset circuit breaker counters
-            _ah.record_circuit_breaker_success(self)
+            _hard.record_circuit_breaker_success(self)
 
             # Fire credit check to run in parallel with loop overhead / next step setup
             credit_task = safe_create_task_with_return(self._check_credits())
@@ -296,17 +298,7 @@ class LettaAgentV2(BaseAgentV2):
 
         # Security: log message_sent when the agent responds to the user
         if self.stop_reason.stop_reason == StopReasonType.end_turn.value:
-            try:
-                await self.audit_logger.log(
-                    agent_id=self.agent_id,
-                    organization_id=self.actor.organization_id if self.actor else None,
-                    event_type="message_sent",
-                    event_data={"agent_id": self.agent_id},
-                    step_id=None,
-                    run_id=run_id,
-                )
-            except Exception as _e:
-                self.logger.warning(f"Failed to write audit log (message_sent): {_e}")
+            await _ah.log_message_sent(self.audit_logger, self.agent_id, self.actor, None, run_id)
 
         result = LettaResponse(messages=response_letta_messages, stop_reason=self.stop_reason, usage=self.usage)
         if run_id:
@@ -364,7 +356,7 @@ class LettaAgentV2(BaseAgentV2):
         self.client_skills = client_skills or []
         self.override_system = override_system
         # Initialize token budget and reset circuit breaker for this run
-        _ah.init_run_hardening(self)
+        _hard.init_run_hardening(self)
         request_span = self._request_checkpoint_start(request_start_timestamp_ns=request_start_timestamp_ns)
         first_chunk = True
 
@@ -465,17 +457,7 @@ class LettaAgentV2(BaseAgentV2):
         # Security: log message_sent when the agent responds to the user
         # Fire unconditionally — not gated on run_id (audit_logger handles run_id=None)
         if self.stop_reason and self.stop_reason.stop_reason == StopReasonType.end_turn.value:
-            try:
-                await self.audit_logger.log(
-                    agent_id=self.agent_id,
-                    organization_id=self.actor.organization_id if self.actor else None,
-                    event_type="message_sent",
-                    event_data={"agent_id": self.agent_id},
-                    step_id=None,
-                    run_id=run_id,
-                )
-            except Exception as _e:
-                self.logger.warning(f"Failed to write audit log (message_sent): {_e}")
+            await _ah.log_message_sent(self.audit_logger, self.agent_id, self.actor, None, run_id)
 
         await self._request_checkpoint_finish(
             request_span=request_span, request_start_timestamp_ns=request_start_timestamp_ns, run_id=run_id
@@ -537,8 +519,8 @@ class LettaAgentV2(BaseAgentV2):
         try:
             self.last_function_response = _load_last_function_response(messages)
             # Security: load policy and canary before any tool execution
-            await self._load_tool_call_policy()
-            await self._load_canary()
+            await _sec.load_tool_call_policy(self)
+            await _sec.load_canary(self)
             valid_tools = await self._get_valid_tools()
             approval_request, approval_response = _maybe_get_approval_messages(messages)
             if approval_request and approval_response:
@@ -607,11 +589,11 @@ class LettaAgentV2(BaseAgentV2):
                     except LLMError as e:
                         self.stop_reason = LettaStopReason(stop_reason=StopReasonType.llm_api_error.value)
                         # Circuit breaker: track consecutive LLM errors
-                        action = _ah.record_circuit_breaker_error(self, "llm_api_error")
+                        action = _hard.record_circuit_breaker_error(self, "llm_api_error")
                         if action == "auto_compact":
                             self.logger.warning(
                                 "Circuit breaker triggered for llm_api_error (%d consecutive), force-clearing context",
-                                _ah.get_circuit_breaker_counts(self).get("llm_api_error", 0),
+                                _hard.get_circuit_breaker_counts(self).get("llm_api_error", 0),
                             )
                             messages = await self.summarize_conversation_history(
                                 in_context_messages=messages,
@@ -625,11 +607,11 @@ class LettaAgentV2(BaseAgentV2):
                     except Exception as e:
                         if isinstance(e, ContextWindowExceededError) and llm_request_attempt < summarizer_settings.max_summarizer_retries:
                             # Circuit breaker: track consecutive context overflow errors
-                            action = _ah.record_circuit_breaker_error(self, "context_window_overflow")
+                            action = _hard.record_circuit_breaker_error(self, "context_window_overflow")
                             if action == "auto_compact":
                                 self.logger.warning(
                                     "Circuit breaker triggered for context_window_overflow (%d consecutive), force-clearing context",
-                                    _ah.get_circuit_breaker_counts(self).get("context_window_overflow", 0),
+                                    _hard.get_circuit_breaker_counts(self).get("context_window_overflow", 0),
                                 )
                             # Retry case
                             messages = await self.summarize_conversation_history(
@@ -1226,7 +1208,6 @@ class LettaAgentV2(BaseAgentV2):
 
         # Security: check tool call policy FIRST
         from letta.security.policy import PolicyDecision
-        from letta.security.audit import classify_tool
         policy_decision = self._check_policy(tool_call_name, tool_args, step_id, run_id)
         if not policy_decision.allowed:
             tool_execution_result = ToolExecutionResult(
@@ -1234,23 +1215,12 @@ class LettaAgentV2(BaseAgentV2):
                 func_return=f"Tool '{tool_call_name}' is denied by the security policy. {policy_decision.reason}",
             )
             # Audit log: tool denied by policy
-            _tc = classify_tool(tool_call_name)
-            _ed = {"tool_name": tool_call_name, "reason": policy_decision.reason}
-            if policy_decision.matched_rule:
-                _ed["matched_rule"] = policy_decision.matched_rule
-            if _tc:
-                _ed["tool_category"] = _tc
-            try:
-                await self.audit_logger.log(
-                    agent_id=self.agent_id,
-                    organization_id=self.actor.organization_id if self.actor else None,
-                    event_type="tool_denied",
-                    event_data=_ed,
-                    step_id=step_id,
-                    run_id=run_id,
-                )
-            except Exception as _e:
-                self.logger.warning(f"Failed to write audit log (tool_denied/policy): {_e}")
+            await _ah.log_tool_denied(
+                self.audit_logger, self.agent_id, self.actor,
+                tool_call_name, policy_decision.reason,
+                step_id, run_id,
+                matched_rule=policy_decision.matched_rule,
+            )
         elif self.canary_checker.check(tool_args):
             # Security: canary detected in tool arguments — prompt exfiltration attempt
             tool_execution_result = ToolExecutionResult(
@@ -1258,21 +1228,7 @@ class LettaAgentV2(BaseAgentV2):
                 func_return="Tool call blocked: potential prompt exfiltration detected.",
             )
             # Audit log: canary detected
-            _tc = classify_tool(tool_call_name)
-            _ed = {"tool_name": tool_call_name}
-            if _tc:
-                _ed["tool_category"] = _tc
-            try:
-                await self.audit_logger.log(
-                    agent_id=self.agent_id,
-                    organization_id=self.actor.organization_id if self.actor else None,
-                    event_type="canary_detected",
-                    event_data=_ed,
-                    step_id=step_id,
-                    run_id=run_id,
-                )
-            except Exception as _e:
-                self.logger.warning(f"Failed to write audit log (canary_detected): {_e}")
+            await _ah.log_canary_detected(self.audit_logger, self.agent_id, self.actor, tool_call_name, step_id, run_id)
         elif policy_decision.action == "require_approval" and not is_approval:
             # Policy requires approval — same code path as RequiresApprovalToolRule
             # SKIP the ToolRulesSolver approval check to prevent double approval
@@ -1292,17 +1248,11 @@ class LettaAgentV2(BaseAgentV2):
             continue_stepping = False
             stop_reason = LettaStopReason(stop_reason=StopReasonType.requires_approval.value)
             # Audit log: approval requested by policy
-            try:
-                await self.audit_logger.log(
-                    agent_id=self.agent_id,
-                    organization_id=self.actor.organization_id if self.actor else None,
-                    event_type="tool_approval_requested",
-                    event_data={"tool_name": tool_call_name, "reason": "policy: approval_required_tools"},
-                    step_id=step_id,
-                    run_id=run_id,
-                )
-            except Exception as _e:
-                self.logger.warning(f"Failed to write audit log (tool_approval_requested/policy): {_e}")
+            await _ah.log_tool_approval_requested(
+                self.audit_logger, self.agent_id, self.actor,
+                tool_call_name, "policy: approval_required_tools",
+                step_id, run_id,
+            )
         elif not is_approval and tool_rules_solver.is_requires_approval_tool(tool_call_name):
             tool_args[REQUEST_HEARTBEAT_PARAM] = request_heartbeat
             approval_messages = create_approval_request_message_from_llm_response(
@@ -1325,21 +1275,11 @@ class LettaAgentV2(BaseAgentV2):
             if tool_rule_violated:
                 tool_execution_result = _build_rule_violation_result(tool_call_name, valid_tool_names, tool_rules_solver)
                 # Audit log: tool denied by rule
-                _tc = classify_tool(tool_call_name)
-                _ed = {"tool_name": tool_call_name, "reason": "tool_rule_violation"}
-                if _tc:
-                    _ed["tool_category"] = _tc
-                try:
-                    await self.audit_logger.log(
-                        agent_id=self.agent_id,
-                        organization_id=self.actor.organization_id if self.actor else None,
-                        event_type="tool_denied",
-                        event_data=_ed,
-                        step_id=step_id,
-                        run_id=run_id,
-                    )
-                except Exception as _e:
-                    self.logger.warning(f"Failed to write audit log (tool_denied/violation): {_e}")
+                await _ah.log_tool_denied(
+                    self.audit_logger, self.agent_id, self.actor,
+                    tool_call_name, "tool_rule_violation",
+                    step_id, run_id,
+                )
             else:
                 # Track tool execution time
                 tool_start_time = get_utc_timestamp_ns()
@@ -1358,21 +1298,11 @@ class LettaAgentV2(BaseAgentV2):
                 step_metrics.tool_execution_ns = tool_end_time - tool_start_time
 
                 # Audit log: tool executed (with category classification)
-                _tool_category = classify_tool(tool_call_name)
-                _event_data = {"tool_call_id": tool_call_id, "tool_name": tool_call_name}
-                if _tool_category:
-                    _event_data["tool_category"] = _tool_category
-                try:
-                    await self.audit_logger.log(
-                        agent_id=self.agent_id,
-                        organization_id=self.actor.organization_id if self.actor else None,
-                        event_type="tool_executed",
-                        event_data=_event_data,
-                        step_id=step_id,
-                        run_id=run_id,
-                    )
-                except Exception as _e:
-                    self.logger.warning(f"Failed to write audit log (tool_executed): {_e}")
+                await _ah.log_tool_executed(
+                    self.audit_logger, self.agent_id, self.actor,
+                    tool_call_id, tool_call_name,
+                    step_id, run_id,
+                )
 
                 # Record tool call for observability
                 try:

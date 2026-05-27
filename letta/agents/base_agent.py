@@ -52,44 +52,11 @@ class BaseAgent(ABC):
         self.client_skills: list = []
         self.conversation_id: str | None = None
 
-        # Observability: recorder receives step lifecycle events and
-        # emits OTel data. No-op when tracing is disabled.
-        from letta.observability.agent_step_recorder import AgentStepRecorder
-        self.recorder = AgentStepRecorder()
-
-        # Observability: tool_call_recorder persists per-tool-call records
-        # to the DB. Separate from the OTel recorder so DB failures don't
-        # affect event emission. Creates its own session per call.
-        from letta.observability.tool_call_recorder import ToolCallRecorder
-        self.tool_call_recorder = ToolCallRecorder()
-
-        # Security: audit_logger writes security events to the
-        # security_events table. Append-only timeline for incident
-        # reconstruction. Creates its own session per call.
-        from letta.security.audit import AuditLogger
-        self.audit_logger = AuditLogger()
-
-        # Security: policy_checker enforces per-agent tool call policies.
-        # Loaded from tool_call_policies table at step start.
-        from letta.security.policy import PolicyChecker
-        self.policy_checker = PolicyChecker()
-
-        # Security: canary_checker detects prompt exfiltration attempts.
-        # Loaded from __canary__ memory block at step start.
-        from letta.security.canary import CanaryChecker
-        self.canary_checker = CanaryChecker()
-
-        # Local model hardening: token_budget enforces per-run and
-        # per-step token limits. Initialized from agent metadata at
-        # step start. Prevents VRAM OOM on local inference.
-        from letta.agents.token_budget import TokenBudget
-        self.token_budget = TokenBudget()  # defaults (no limits) until step() sets it up
-
-        # Local model hardening: circuit_breaker breaks consecutive
-        # error death spirals. Tracks consecutive llm_api_error counts
-        # and triggers auto-compaction when threshold is exceeded.
-        from letta.agents.circuit_breaker import AgentCircuitBreaker
-        self.circuit_breaker = AgentCircuitBreaker()
+        # Fork: security, observability, and hardening attributes.
+        # All fork-local state is initialized from one module so this
+        # HIGH-activity upstream file doesn't accumulate fork imports.
+        from letta.security import agent_security as _sec
+        _sec.init_agent_attributes(self)
 
     @abstractmethod
     async def step(
@@ -104,30 +71,6 @@ class BaseAgent(ABC):
         """
         raise NotImplementedError
 
-    def _create_token_budget(self, agent_state) -> "TokenBudget":
-        """Create a TokenBudget from agent metadata.
-
-        Token budget settings are stored in agent.metadata, not in
-        LLMConfig (which is HIGH-activity upstream). Budgets are
-        resource management, not security — they stay separate
-        from the policy engine.
-
-        Metadata keys:
-        - token_budget_run: int | None — max cumulative tokens per run
-        - token_budget_step: int | None — max tokens per single step
-        - token_budget_context_ratio: float — fraction of context_window
-          to allow (default 0.7)
-        """
-        from letta.agents.token_budget import TokenBudget
-
-        metadata = getattr(agent_state, "metadata", None) or {}
-        return TokenBudget(
-            max_run_tokens=metadata.get("token_budget_run"),
-            max_step_tokens=metadata.get("token_budget_step"),
-            context_window_limit=agent_state.llm_config.context_window,
-            context_window_ratio=metadata.get("token_budget_context_ratio", 0.7),
-        )
-
     @abstractmethod
     async def step_stream(
         self, input_messages: List[MessageCreate], max_steps: int = DEFAULT_MAX_STEPS
@@ -136,41 +79,6 @@ class BaseAgent(ABC):
         Main streaming execution loop for the agent.
         """
         raise NotImplementedError
-
-    def _handle_circuit_breaker_error(self, error_type: str) -> str | None:
-        """Record an error with the circuit breaker and return the recovery action.
-
-        Wraps ``self.circuit_breaker.record_error()`` so that agent
-        subclasses call this one-liner instead of interacting with the
-        circuit breaker directly. Keeps the HIGH-activity agent file
-        diffs minimal.
-
-        Returns:
-            ``"auto_compact"`` if the threshold is exceeded, ``None`` otherwise.
-        """
-        return self.circuit_breaker.record_error(error_type)
-
-    def _check_policy(self, tool_name: str, tool_args: dict | None = None, step_id: str | None = None, run_id: str | None = None) -> "PolicyDecision":
-        """Check a tool call against the security policy with full context.
-
-        Wraps ``self.policy_checker.check()`` with the evaluation context
-        so that agent subclasses call this one-liner instead of building
-        the context dict themselves. Keeps the HIGH-activity agent file
-        diffs minimal.
-        """
-        from letta.security.policy import PolicyDecision
-        eval_context = {
-            "tool_name": tool_name,
-            "tool_args": tool_args or {},
-            "tool_call_count": self.policy_checker.get_call_count(tool_name),
-            "actor_id": self.actor.id if self.actor else None,
-            "agent_id": self.agent_id,
-        }
-        decision = self.policy_checker.check(tool_name, eval_context=eval_context)
-        # Record the call for rate limiting if allowed
-        if decision.allowed:
-            self.policy_checker.record_call(tool_name)
-        return decision
 
     @staticmethod
     def pre_process_input_message(input_messages: List[MessageCreate]) -> Any:

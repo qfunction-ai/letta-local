@@ -36,6 +36,9 @@ from letta.helpers.tool_execution_helper import enable_strict_mode
 from letta.llm_api.llm_client import LLMClient
 from letta.local_llm.constants import INNER_THOUGHTS_KWARG
 from letta.agents import agent_hardening as _ah
+from letta.security import agent_security as _sec
+from letta.security import audit_helpers as _ah_audit
+from letta.llm_api import tool_call_repair as _tcr
 from letta.observability import step_recorder_integration as _sri
 from letta.otel.tracing import trace_method
 from letta.schemas.agent import AgentState
@@ -423,17 +426,7 @@ class LettaAgentV3(LettaAgentV2):
         # Security: log message_sent when the agent responds to the user
         # (end_turn means the agent produced text output instead of a tool call)
         if self.stop_reason.stop_reason == StopReasonType.end_turn.value:
-            try:
-                await self.audit_logger.log(
-                    agent_id=self.agent_id,
-                    organization_id=self.actor.organization_id if self.actor else None,
-                    event_type="message_sent",
-                    event_data={"agent_id": self.agent_id},
-                    step_id=None,
-                    run_id=run_id,
-                )
-            except Exception as _e:
-                self.logger.warning(f"Failed to write audit log (message_sent): {_e}")
+            await _ah_audit.log_message_sent(self.audit_logger, self.agent_id, self.actor, None, run_id)
 
         # construct the response
         response_letta_messages = Message.to_letta_messages_from_list(
@@ -674,17 +667,7 @@ class LettaAgentV3(LettaAgentV2):
             # Security: log message_sent when the agent responds to the user
             # (end_turn means the agent produced text output instead of a tool call)
             if self.stop_reason.stop_reason == StopReasonType.end_turn.value:
-                try:
-                    await self.audit_logger.log(
-                        agent_id=self.agent_id,
-                        organization_id=self.actor.organization_id if self.actor else None,
-                        event_type="message_sent",
-                        event_data={"agent_id": self.agent_id},
-                        step_id=None,
-                        run_id=run_id,
-                    )
-                except Exception as _e:
-                    self.logger.warning(f"Failed to write audit log (message_sent): {_e}")
+                await _ah_audit.log_message_sent(self.audit_logger, self.agent_id, self.actor, None, run_id)
 
         except Exception as e:
             # Use repr() if str() is empty (happens with Exception() with no args)
@@ -993,8 +976,8 @@ class LettaAgentV3(LettaAgentV2):
         try:
             self.last_function_response = _load_last_function_response(messages)
             # Security: load policy and canary before any tool execution
-            await self._load_tool_call_policy()
-            await self._load_canary()
+            await _sec.load_tool_call_policy(self)
+            await _sec.load_canary(self)
             valid_tools = await self._get_valid_tools()
             require_tool_call = self.tool_rules_solver.should_force_tool_call()
 
@@ -1886,31 +1869,10 @@ class LettaAgentV3(LettaAgentV2):
             # call but the JSON was unparseable even after repair. Instead of
             # executing with empty args (which will fail on required params),
             # inject a structured error so the model can retry.
-            if not args and raw_args_str and active_llm_config.constraints and active_llm_config.constraints.tool_call_retry_count > 0:
-                retry_count = getattr(self, "_tool_call_retry_count", 0)
-                max_retries = active_llm_config.constraints.tool_call_retry_count
-                if retry_count < max_retries:
-                    self._tool_call_retry_count = retry_count + 1
-                    exec_specs.append(
-                        {
-                            "id": call_id,
-                            "name": name,
-                            "args": {},
-                            "violated": False,
-                            "error": (
-                                f"Tool call JSON parsing failed. Your tool call arguments were malformed JSON "
-                                f"that could not be repaired. Please retry the tool call with valid JSON. "
-                                f"Raw arguments: {raw_args_str[:200]}"
-                            ),
-                        }
-                    )
-                    continue
-                else:
-                    self._tool_call_retry_count = 0
-                    self.logger.warning(
-                        f"Tool call retry limit ({max_retries}) exceeded for {name}. "
-                        f"Proceeding with empty args."
-                    )
+            retry_spec = _tcr.handle_malformed_args(self, call_id, name, raw_args_str, args, active_llm_config)
+            if retry_spec:
+                exec_specs.append(retry_spec)
+                continue
 
             # Validate against allowed tools
             tool_rule_violated = name not in valid_tool_names and not is_approval_response
@@ -1956,87 +1918,27 @@ class LettaAgentV3(LettaAgentV2):
 
         # 5c. Execute tools (sequentially for single, parallel for multiple)
         async def _run_one(spec: Dict[str, Any]):
-            from letta.security.audit import classify_tool
-
             if spec.get("error"):
                 # Audit log: malformed tool call
-                _tc = classify_tool(spec["name"])
-                _ed = {"tool_name": spec["name"], "reason": "malformed_arguments"}
-                if _tc:
-                    _ed["tool_category"] = _tc
-                try:
-                    await self.audit_logger.log(
-                        agent_id=self.agent_id,
-                        organization_id=self.actor.organization_id if self.actor else None,
-                        event_type="tool_denied",
-                        event_data=_ed,
-                        step_id=step_id,
-                        run_id=run_id,
-                    )
-                except Exception as _e:
-                    self.logger.warning(f"Failed to write audit log (tool_denied/malformed): {_e}")
+                await _ah_audit.log_tool_denied(self.audit_logger, self.agent_id, self.actor, spec["name"], "malformed_arguments", step_id, run_id)
                 return ToolExecutionResult(status="error", func_return=spec["error"]), 0
             if spec["violated"]:
                 result = _build_rule_violation_result(spec["name"], valid_tool_names, tool_rules_solver)
                 # Audit log: tool rule violation
-                _tc = classify_tool(spec["name"])
-                _ed = {"tool_name": spec["name"], "reason": "tool_rule_violation"}
-                if _tc:
-                    _ed["tool_category"] = _tc
-                try:
-                    await self.audit_logger.log(
-                        agent_id=self.agent_id,
-                        organization_id=self.actor.organization_id if self.actor else None,
-                        event_type="tool_denied",
-                        event_data=_ed,
-                        step_id=step_id,
-                        run_id=run_id,
-                    )
-                except Exception as _e:
-                    self.logger.warning(f"Failed to write audit log (tool_denied/violation): {_e}")
+                await _ah_audit.log_tool_denied(self.audit_logger, self.agent_id, self.actor, spec["name"], "tool_rule_violation", step_id, run_id)
                 return result, 0
             # Security: check tool call policy FIRST
-            policy_decision = self._check_policy(spec["name"], spec.get("args"), step_id, run_id)
+            policy_decision = _sec.check_policy(self, spec["name"], spec.get("args"), step_id, run_id)
             if not policy_decision.allowed:
                 # V3 treats REQUIRE_APPROVAL as DENY (fail-closed — no approval wiring in V3)
-                _tc = classify_tool(spec["name"])
-                _ed = {"tool_name": spec["name"], "reason": policy_decision.reason}
-                if policy_decision.matched_rule:
-                    _ed["matched_rule"] = policy_decision.matched_rule
-                if _tc:
-                    _ed["tool_category"] = _tc
-                try:
-                    await self.audit_logger.log(
-                        agent_id=self.agent_id,
-                        organization_id=self.actor.organization_id if self.actor else None,
-                        event_type="tool_denied",
-                        event_data=_ed,
-                        step_id=step_id,
-                        run_id=run_id,
-                    )
-                except Exception as _e:
-                    self.logger.warning(f"Failed to write audit log (tool_denied/policy): {_e}")
+                await _ah_audit.log_tool_denied(self.audit_logger, self.agent_id, self.actor, spec["name"], policy_decision.reason, step_id, run_id, matched_rule=policy_decision.matched_rule)
                 return ToolExecutionResult(
                     status="error",
                     func_return=f"Tool '{spec['name']}' is denied by the security policy. {policy_decision.reason}",
                 ), 0
             # Security: canary check on tool arguments
             if self.canary_checker.check(spec["args"]):
-                _tc = classify_tool(spec["name"])
-                _ed = {"tool_name": spec["name"]}
-                if _tc:
-                    _ed["tool_category"] = _tc
-                try:
-                    await self.audit_logger.log(
-                        agent_id=self.agent_id,
-                        organization_id=self.actor.organization_id if self.actor else None,
-                        event_type="canary_detected",
-                        event_data=_ed,
-                        step_id=step_id,
-                        run_id=run_id,
-                    )
-                except Exception as _e:
-                    self.logger.warning(f"Failed to write audit log (canary_detected): {_e}")
+                await _ah_audit.log_canary_detected(self.audit_logger, self.agent_id, self.actor, spec["name"], step_id, run_id)
                 return ToolExecutionResult(
                     status="error",
                     func_return="Tool call blocked: potential prompt exfiltration detected.",
@@ -2052,21 +1954,7 @@ class LettaAgentV3(LettaAgentV2):
             )
             dt = get_utc_timestamp_ns() - t0
             # Audit log: tool executed (with category classification)
-            _tool_category = classify_tool(spec["name"])
-            _event_data = {"tool_call_id": spec["id"], "tool_name": spec["name"]}
-            if _tool_category:
-                _event_data["tool_category"] = _tool_category
-            try:
-                await self.audit_logger.log(
-                    agent_id=self.agent_id,
-                    organization_id=self.actor.organization_id if self.actor else None,
-                    event_type="tool_executed",
-                    event_data=_event_data,
-                    step_id=step_id,
-                    run_id=run_id,
-                )
-            except Exception as _e:
-                self.logger.warning(f"Failed to write audit log (tool_executed): {_e}")
+            await _ah_audit.log_tool_executed(self.audit_logger, self.agent_id, self.actor, spec["id"], spec["name"], step_id, run_id)
             # Record tool call for observability
             try:
                 await self.tool_call_recorder.record_tool_call(
