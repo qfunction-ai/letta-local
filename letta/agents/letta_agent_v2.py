@@ -30,6 +30,7 @@ from letta.log import get_logger
 from letta.agents import agent_hardening as _hard
 from letta.security import agent_security as _sec
 from letta.security import audit_helpers as _ah
+from letta.security import output_filter as _outf
 from letta.observability import step_recorder_integration as _sri
 from letta.otel.tracing import log_event, trace_method, tracer
 from letta.prompts.prompt_generator import PromptGenerator
@@ -301,6 +302,8 @@ class LettaAgentV2(BaseAgentV2):
             await _ah.log_message_sent(self.audit_logger, self.agent_id, self.actor, None, run_id)
 
         result = LettaResponse(messages=response_letta_messages, stop_reason=self.stop_reason, usage=self.usage)
+        # Security: output filter runs before return (before audit log reflects redacted content)
+        result = await _outf.apply_output_filters(self, result)
         if run_id:
             if self.job_update_metadata is None:
                 self.job_update_metadata = {}

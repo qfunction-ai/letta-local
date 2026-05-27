@@ -116,3 +116,23 @@ async def log_message_sent(
         SecurityEventType.MESSAGE_SENT, {"agent_id": agent_id},
         step_id, run_id, "message_sent",
     )
+
+
+async def log_canary_output_detected(
+    audit_logger: "AuditLogger",
+    agent_id: str,
+    actor: "User | None",
+    step_id: str | None,
+    run_id: str | None,
+) -> None:
+    """Log a canary_output_detected audit event.
+
+    Fired when the output filter redacts a canary token from an
+    assistant message. Distinct from CANARY_DETECTED which fires
+    on tool-call interception.
+    """
+    await audit_log(
+        audit_logger, agent_id, actor,
+        SecurityEventType.CANARY_OUTPUT_DETECTED, {"agent_id": agent_id},
+        step_id, run_id, "canary_output_detected",
+    )

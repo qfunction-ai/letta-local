@@ -40,7 +40,8 @@ class SecurityEventType(str, Enum):
     TOOL_APPROVAL_REQUESTED = "tool_approval_requested"
 
     # Canary events
-    CANARY_DETECTED = "canary_detected"
+    CANARY_DETECTED = "canary_detected"          # tool-call interception
+    CANARY_OUTPUT_DETECTED = "canary_output_detected"  # assistant message redaction
 
     # Agent output events
     MESSAGE_SENT = "message_sent"

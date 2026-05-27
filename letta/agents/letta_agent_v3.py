@@ -38,6 +38,7 @@ from letta.local_llm.constants import INNER_THOUGHTS_KWARG
 from letta.agents import agent_hardening as _ah
 from letta.security import agent_security as _sec
 from letta.security import audit_helpers as _ah_audit
+from letta.security import output_filter as _outf
 from letta.llm_api import tool_call_repair as _tcr
 from letta.observability import step_recorder_integration as _sri
 from letta.otel.tracing import trace_method
@@ -446,6 +447,8 @@ class LettaAgentV3(LettaAgentV2):
             logprobs=self.logprobs,
             turns=self.turns if self.return_token_ids and self.turns else None,
         )
+        # Security: output filter runs before return (before audit log reflects redacted content)
+        result = await _outf.apply_output_filters(self, result)
         if run_id:
             if self.job_update_metadata is None:
                 self.job_update_metadata = {}
