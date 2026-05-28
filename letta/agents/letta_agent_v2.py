@@ -1211,7 +1211,7 @@ class LettaAgentV2(BaseAgentV2):
 
         # Security: check tool call policy FIRST
         from letta.security.policy import PolicyDecision
-        policy_decision = self._check_policy(tool_call_name, tool_args, step_id, run_id)
+        policy_decision = await _sec.check_policy(self, tool_call_name, tool_args, step_id, run_id)
         if not policy_decision.allowed:
             tool_execution_result = ToolExecutionResult(
                 status="error",
@@ -1295,6 +1295,12 @@ class LettaAgentV2(BaseAgentV2):
                     agent_step_span=agent_step_span,
                     step_id=step_id,
                 )
+                # Security: append audit warning from policy engine (e.g., secret detected)
+                if policy_decision.audit_warning:
+                    tool_execution_result.func_return = (
+                        (tool_execution_result.func_return or "")
+                        + "\n\n[SECURITY WARNING] " + policy_decision.audit_warning
+                    )
                 tool_end_time = get_utc_timestamp_ns()
 
                 # Store tool execution time in metrics

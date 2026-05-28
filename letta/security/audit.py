@@ -42,6 +42,7 @@ class SecurityEventType(str, Enum):
     # Canary events
     CANARY_DETECTED = "canary_detected"          # tool-call interception
     CANARY_OUTPUT_DETECTED = "canary_output_detected"  # assistant message redaction
+    SECRET_DETECTED = "secret_detected"          # secret in tool args (policy AUDIT)
 
     # Agent output events
     MESSAGE_SENT = "message_sent"

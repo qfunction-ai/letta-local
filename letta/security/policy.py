@@ -99,6 +99,7 @@ class PolicyOperator(str, Enum):
     NOT_IN = "not_in"
     MATCHES = "matches"  # regex
     CONTAINS = "contains"  # substring
+    CONTAINS_SECRET = "contains_secret"  # entropy + regex check on tool args
 
 
 class PolicyCondition(BaseModel):
@@ -215,6 +216,7 @@ class PolicyDecision(BaseModel):
         default_factory=dict,
         description="Audit metadata: {tool_name, matched_rule, action, reason, tool_category}",
     )
+    audit_warning: Optional[str] = Field(default=None, description="Warning text for AUDIT action — appended to tool result")
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +331,16 @@ def _evaluate_condition(condition: PolicyCondition, context: Dict[str, Any], rul
             return compare_value in field_value
         if isinstance(field_value, (list, tuple)):
             return compare_value in field_value
+        return False
+    elif op == PolicyOperator.CONTAINS_SECRET:
+        # Check all tool_args values for secrets using entropy + regex
+        from letta.security.secret_scanner import SecretPatternChecker
+        tool_args = context.get("tool_args", {})
+        for value in tool_args.values():
+            if isinstance(value, str):
+                result = SecretPatternChecker.check(value)
+                if result is not None:
+                    return True
         return False
 
     return False
@@ -534,6 +546,16 @@ class PolicyChecker:
         """Update the policy (e.g., after loading from DB)."""
         self.policy = policy
         self.deny_all = False  # Successful update clears the fail-closed flag
+
+    def add_rule(self, rule: PolicyRule) -> None:
+        """Add a single rule to the current policy.
+
+        Used for injecting default rules (e.g., secret detection)
+        that aren't stored in the DB but should be present.
+        """
+        if self.policy is None:
+            self.policy = ToolCallPolicy()
+        self.policy.rules.append(rule)
 
 
 # ---------------------------------------------------------------------------

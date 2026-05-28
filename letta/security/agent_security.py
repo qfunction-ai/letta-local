@@ -89,6 +89,38 @@ def init_security(agent: "BaseAgentV2") -> None:
 # ---------------------------------------------------------------------------
 
 
+def _inject_default_secret_rule(agent) -> None:
+    """Inject a default CONTAINS_SECRET audit rule if the policy doesn't have one.
+
+    The default rule audits memory-write tool calls that contain secrets.
+    It does NOT block — it logs the event and appends a warning to the
+    tool result so the LLM can inform the user. Strict deployments can
+    change the action to DENY or REQUIRE_APPROVAL.
+    """
+    from letta.security.policy import PolicyAction, PolicyCondition, PolicyOperator, PolicyRule
+
+    # Check if a contains_secret rule already exists
+    if hasattr(agent, "policy_checker") and agent.policy_checker.policy:
+        for rule in agent.policy_checker.policy.rules:
+            if rule.condition.operator == PolicyOperator.CONTAINS_SECRET:
+                return  # already has one
+
+    rule = PolicyRule(
+        name="secret-in-memory-write",
+        condition=PolicyCondition(
+            field="tool_args",
+            operator=PolicyOperator.CONTAINS_SECRET,
+            value=True,
+        ),
+        action=PolicyAction.AUDIT,
+        priority=90,
+        message="Memory write contains what appears to be a secret. "
+                "Consider storing credentials in the Credentials page instead.",
+    )
+    if hasattr(agent, "policy_checker"):
+        agent.policy_checker.add_rule(rule)
+
+
 async def load_tool_call_policy(agent) -> None:
     """Load the per-agent tool call policy from the DB.
 
@@ -115,6 +147,8 @@ async def load_tool_call_policy(agent) -> None:
                 agent.policy_checker.update_policy(ToolCallPolicy(**policy_model.policy))
             else:
                 agent.policy_checker.update_policy(ToolCallPolicy())
+            # Inject default secret-detection rule if not present
+            _inject_default_secret_rule(agent)
     except Exception as e:
         agent.logger.error(f"Failed to load tool call policy, denying all tools (fail-closed): {e}")
         agent.policy_checker.deny_all = True
@@ -238,7 +272,7 @@ async def _create_canary_block(agent, agent_state, canary_value: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def check_policy(agent, tool_name: str, tool_args: dict | None = None, step_id: str | None = None, run_id: str | None = None) -> "PolicyDecision":
+async def check_policy(agent, tool_name: str, tool_args: dict | None = None, step_id: str | None = None, run_id: str | None = None) -> "PolicyDecision":
     """Check a tool call against the security policy with full context.
 
     Wraps ``agent.policy_checker.check()`` with the evaluation context
@@ -261,6 +295,24 @@ def check_policy(agent, tool_name: str, tool_args: dict | None = None, step_id: 
     # Record the call for rate limiting if allowed
     if decision.allowed:
         agent.policy_checker.record_call(tool_name)
+    # Handle AUDIT action: log event + set warning for caller to append to tool result
+    if decision.action == "audit":
+        from letta.security import audit_helpers as _ah
+        from letta.security.secret_scanner import SecretPatternChecker
+        # Determine the label for the audit event
+        tool_args = tool_args or {}
+        label = "unknown"
+        for value in tool_args.values():
+            if isinstance(value, str):
+                result = SecretPatternChecker.check(value)
+                if result is not None:
+                    label = result
+                    break
+        await _ah.log_secret_detected(
+            agent.audit_logger, agent.agent_id, agent.actor,
+            tool_name, label, step_id, run_id,
+        )
+        decision.audit_warning = decision.reason
     return decision
 
 

@@ -136,3 +136,25 @@ async def log_canary_output_detected(
         SecurityEventType.CANARY_OUTPUT_DETECTED, {"agent_id": agent_id},
         step_id, run_id, "canary_output_detected",
     )
+
+
+async def log_secret_detected(
+    audit_logger: "AuditLogger",
+    agent_id: str,
+    actor: "User | None",
+    tool_name: str,
+    label: str,
+    step_id: str | None,
+    run_id: str | None,
+) -> None:
+    """Log a secret_detected audit event.
+
+    Fired when the secret scanner detects a potential secret in tool
+    arguments. The label identifies the type (e.g., "AWS Access Key ID",
+    "High-entropy secret").
+    """
+    await audit_log(
+        audit_logger, agent_id, actor,
+        SecurityEventType.SECRET_DETECTED, {"tool_name": tool_name, "label": label},
+        step_id, run_id, "secret_detected",
+    )

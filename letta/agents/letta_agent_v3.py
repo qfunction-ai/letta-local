@@ -1931,7 +1931,7 @@ class LettaAgentV3(LettaAgentV2):
                 await _ah_audit.log_tool_denied(self.audit_logger, self.agent_id, self.actor, spec["name"], "tool_rule_violation", step_id, run_id)
                 return result, 0
             # Security: check tool call policy FIRST
-            policy_decision = _sec.check_policy(self, spec["name"], spec.get("args"), step_id, run_id)
+            policy_decision = await _sec.check_policy(self, spec["name"], spec.get("args"), step_id, run_id)
             if not policy_decision.allowed:
                 # V3 treats REQUIRE_APPROVAL as DENY (fail-closed — no approval wiring in V3)
                 await _ah_audit.log_tool_denied(self.audit_logger, self.agent_id, self.actor, spec["name"], policy_decision.reason, step_id, run_id, matched_rule=policy_decision.matched_rule)
@@ -1955,6 +1955,12 @@ class LettaAgentV3(LettaAgentV2):
                 agent_step_span=agent_step_span,
                 step_id=step_id,
             )
+            # Security: append audit warning from policy engine (e.g., secret detected)
+            if policy_decision.audit_warning:
+                res.func_return = (
+                    (res.func_return or "")
+                    + "\n\n[SECURITY WARNING] " + policy_decision.audit_warning
+                )
             dt = get_utc_timestamp_ns() - t0
             # Audit log: tool executed (with category classification)
             await _ah_audit.log_tool_executed(self.audit_logger, self.agent_id, self.actor, spec["id"], spec["name"], step_id, run_id)

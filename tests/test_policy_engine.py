@@ -50,7 +50,7 @@ class TestPolicyAction:
 
 class TestPolicyOperator:
     def test_all_operators(self):
-        expected = ["eq", "ne", "gt", "lt", "gte", "lte", "in", "not_in", "matches", "contains"]
+        expected = ["eq", "ne", "gt", "lt", "gte", "lte", "in", "not_in", "matches", "contains", "contains_secret"]
         actual = [op.value for op in PolicyOperator]
         assert sorted(actual) == sorted(expected)
 
@@ -315,6 +315,18 @@ class TestEvaluateCondition:
         rule = PolicyRule(name="test", condition=cond, action=PolicyAction.DENY)
         assert _evaluate_condition(cond, {"tool_args": {"query": "internal data"}}, rule) is True
         assert _evaluate_condition(cond, {"tool_args": {"query": "public data"}}, rule) is False
+
+    def test_contains_secret(self):
+        cond = PolicyCondition(field="tool_args", operator=PolicyOperator.CONTAINS_SECRET, value=True)
+        rule = PolicyRule(name="secret-in-memory-write", condition=cond, action=PolicyAction.AUDIT)
+        # AWS key in tool args — should match
+        assert _evaluate_condition(cond, {"tool_args": {"content": "AKIAIOSFODNN7EXAMPLE"}}, rule) is True
+        # GitHub token in tool args — should match
+        assert _evaluate_condition(cond, {"tool_args": {"content": "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij1234"}}, rule) is True
+        # Clean content — should not match
+        assert _evaluate_condition(cond, {"tool_args": {"content": "hello world"}}, rule) is False
+        # No tool_args — should not match
+        assert _evaluate_condition(cond, {}, rule) is False
 
     def test_missing_field_returns_false(self):
         cond = PolicyCondition(field="nonexistent", operator=PolicyOperator.EQ, value="test")
