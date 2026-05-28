@@ -12,11 +12,9 @@ class TestSecurityEventType:
         assert SecurityEventType.TOOL_EXECUTED == "tool_executed"
         assert SecurityEventType.TOOL_DENIED == "tool_denied"
         assert SecurityEventType.TOOL_APPROVAL_REQUESTED == "tool_approval_requested"
-        assert SecurityEventType.TOOL_APPROVAL_GRANTED == "tool_approval_granted"
-        assert SecurityEventType.TOOL_APPROVAL_DENIED == "tool_approval_denied"
-        assert SecurityEventType.POLICY_VIOLATION == "policy_violation"
         assert SecurityEventType.CANARY_DETECTED == "canary_detected"
-        assert SecurityEventType.MEMORY_BLOCK_MODIFIED == "memory_block_modified"
+        assert SecurityEventType.CANARY_OUTPUT_DETECTED == "canary_output_detected"
+        assert SecurityEventType.MESSAGE_SENT == "message_sent"
 
     def test_event_type_is_string(self):
         """SecurityEventType is a str enum, so values are strings."""

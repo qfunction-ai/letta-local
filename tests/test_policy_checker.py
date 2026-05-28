@@ -54,13 +54,18 @@ class TestToolCallPolicy:
 class TestPolicyChecker:
     def test_default_policy_allows_all(self):
         checker = PolicyChecker()
-        assert checker.check("web_search") == PolicyAction.ALLOW
-        assert checker.check("core_memory_append") == PolicyAction.ALLOW
-        assert checker.check("archival_memory_insert") == PolicyAction.ALLOW
+        decision = checker.check("web_search")
+        assert decision.allowed is True
+        assert decision.action == PolicyAction.ALLOW
+        decision = checker.check("core_memory_append")
+        assert decision.allowed is True
+        decision = checker.check("archival_memory_insert")
+        assert decision.allowed is True
 
     def test_none_policy_allows_all(self):
         checker = PolicyChecker(policy=None)
-        assert checker.check("web_search") == PolicyAction.ALLOW
+        decision = checker.check("web_search")
+        assert decision.allowed is True
 
     def test_deny_takes_precedence(self):
         """If a tool is in both denied and approval_required, deny wins."""
@@ -69,21 +74,31 @@ class TestPolicyChecker:
             approval_required_tools=["web_search"],
         )
         checker = PolicyChecker(policy=policy)
-        assert checker.check("web_search") == PolicyAction.DENY
+        decision = checker.check("web_search")
+        assert decision.allowed is False
+        assert decision.action == PolicyAction.DENY
 
     def test_denied_tool(self):
         policy = ToolCallPolicy(denied_tools=["web_search", "fetch_webpage"])
         checker = PolicyChecker(policy=policy)
-        assert checker.check("web_search") == PolicyAction.DENY
-        assert checker.check("fetch_webpage") == PolicyAction.DENY
-        assert checker.check("core_memory_append") == PolicyAction.ALLOW
+        decision = checker.check("web_search")
+        assert decision.allowed is False
+        assert decision.action == PolicyAction.DENY
+        decision = checker.check("fetch_webpage")
+        assert decision.allowed is False
+        assert decision.action == PolicyAction.DENY
+        decision = checker.check("core_memory_append")
+        assert decision.allowed is True
 
     def test_approval_required_tool(self):
         policy = ToolCallPolicy(approval_required_tools=["archival_memory_insert", "core_memory_replace"])
         checker = PolicyChecker(policy=policy)
-        assert checker.check("archival_memory_insert") == PolicyAction.REQUIRE_APPROVAL
-        assert checker.check("core_memory_replace") == PolicyAction.REQUIRE_APPROVAL
-        assert checker.check("core_memory_append") == PolicyAction.ALLOW
+        decision = checker.check("archival_memory_insert")
+        assert decision.action == PolicyAction.REQUIRE_APPROVAL
+        decision = checker.check("core_memory_replace")
+        assert decision.action == PolicyAction.REQUIRE_APPROVAL
+        decision = checker.check("core_memory_append")
+        assert decision.allowed is True
 
     def test_mixed_policy(self):
         policy = ToolCallPolicy(
@@ -91,21 +106,28 @@ class TestPolicyChecker:
             approval_required_tools=["archival_memory_insert"],
         )
         checker = PolicyChecker(policy=policy)
-        assert checker.check("web_search") == PolicyAction.DENY
-        assert checker.check("archival_memory_insert") == PolicyAction.REQUIRE_APPROVAL
-        assert checker.check("core_memory_append") == PolicyAction.ALLOW
+        decision = checker.check("web_search")
+        assert decision.action == PolicyAction.DENY
+        decision = checker.check("archival_memory_insert")
+        assert decision.action == PolicyAction.REQUIRE_APPROVAL
+        decision = checker.check("core_memory_append")
+        assert decision.allowed is True
 
     def test_update_policy(self):
         checker = PolicyChecker()
-        assert checker.check("web_search") == PolicyAction.ALLOW
+        decision = checker.check("web_search")
+        assert decision.allowed is True
 
         new_policy = ToolCallPolicy(denied_tools=["web_search"])
         checker.update_policy(new_policy)
-        assert checker.check("web_search") == PolicyAction.DENY
+        decision = checker.check("web_search")
+        assert decision.allowed is False
 
     def test_update_policy_resets(self):
         checker = PolicyChecker(policy=ToolCallPolicy(denied_tools=["web_search"]))
-        assert checker.check("web_search") == PolicyAction.DENY
+        decision = checker.check("web_search")
+        assert decision.allowed is False
 
         checker.update_policy(ToolCallPolicy())  # allow all
-        assert checker.check("web_search") == PolicyAction.ALLOW
+        decision = checker.check("web_search")
+        assert decision.allowed is True
