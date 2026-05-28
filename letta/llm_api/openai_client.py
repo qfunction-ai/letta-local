@@ -767,10 +767,16 @@ class OpenAIClient(LLMClientBase):
                             msg.pop(field, None)
             # Enable reasoning via chat_template_args for GLM-5 on BYOK deployments (e.g. Baseten TRT-LLM)
             # Thinking is off by default; must be explicitly enabled
-            if llm_config.enable_reasoner:
-                request_data["extra_body"] = {
-                    "chat_template_args": {"enable_thinking": True},
-                }
+            # NOTE: This is now also handled below for all enable_reasoner models
+
+        # Enable reasoning via chat_template_args for any model with enable_reasoner
+        # (Ollama thinking models like gemma4, deepseek-r1, qwen3, etc., and GLM-5)
+        # Ollama's OpenAI proxy requires this to activate thinking mode;
+        # without it, reasoning tokens get mixed into content.
+        if llm_config.enable_reasoner:
+            request_data["extra_body"] = {
+                "chat_template_args": {"enable_thinking": True},
+            }
 
         # Add OpenRouter reasoning configuration via extra_body
         if is_openrouter and llm_config.enable_reasoner:
