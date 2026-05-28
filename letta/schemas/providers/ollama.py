@@ -155,7 +155,7 @@ class OllamaProvider(OpenAIProvider):
                     provider_category=self.provider_category,
                     constraints=constraints,
                     # put_inner_thoughts_in_kwargs=True,
-                    # enable_reasoner=supports_thinking,
+                    enable_reasoner=supports_thinking,
                 )
             )
         return configs

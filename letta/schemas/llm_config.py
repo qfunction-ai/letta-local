@@ -816,6 +816,14 @@ class LLMConfig(BaseModel):
                     config.max_reasoning_tokens = 1024
                 return config
 
+            # Provider-detected reasoning capability (e.g., Ollama "thinking" capability)
+            # The provider set enable_reasoner=True, and reasoning=True was passed.
+            # Honor it — the model has native reasoning support.
+            if reasoning:
+                config.put_inner_thoughts_in_kwargs = False
+                config.enable_reasoner = True
+                return config
+
             # Everything else: disabled (no inner_thoughts-in-kwargs simulation)
             config.put_inner_thoughts_in_kwargs = False
             config.enable_reasoner = False
