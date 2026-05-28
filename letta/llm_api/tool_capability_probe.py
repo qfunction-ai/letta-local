@@ -437,83 +437,116 @@ class ToolCapabilityCache:
 
 
 def resolve_tool_calling_mode(llm_config: LLMConfig) -> str:
-    """Resolve tool_calling_mode="auto" to "native" or "prompt" (sync).
+    """Resolve tool_calling_mode to "native" or "prompt" (sync).
 
-    If the mode is "native" or "prompt", return it unchanged.
-    If the mode is "auto", probe the model's capability and return the result.
-    The probe result is cached, so this is O(1) after the first call.
+    Resolution order:
+    1. Override — if llm_config.tool_calling_mode is set, use it (user knows best)
+    2. Pre-resolved — cached value from a previous call
+    3. Constraints — explicit mode from model constraints
+    4. Probe — when constraints is None, probe instead of assuming native
 
     For async callers, use resolve_tool_calling_mode_async() instead.
 
     Returns:
         "native" or "prompt"
     """
-    # Check pre-resolved value first
+    # 1. Check override first — user knows best
+    if llm_config.tool_calling_mode is not None:
+        llm_config.resolved_tool_calling_mode = llm_config.tool_calling_mode
+        return llm_config.tool_calling_mode
+
+    # 2. Check pre-resolved value
     if llm_config.resolved_tool_calling_mode is not None:
         return llm_config.resolved_tool_calling_mode
 
-    if llm_config.constraints is None:
-        return "native"  # default: native mode
+    # 3. Check constraints
+    if llm_config.constraints is not None:
+        mode = llm_config.constraints.tool_calling_mode
+        if mode in ("native", "prompt"):
+            return mode
 
-    mode = llm_config.constraints.tool_calling_mode
-    if mode in ("native", "prompt"):
-        return mode
-
-    if mode == "auto":
-        cache = ToolCapabilityCache.instance()
-        supports_native = cache.probe(llm_config)
-        resolved = "native" if supports_native else "prompt"
-        logger.info(
-            f"Resolved tool_calling_mode='auto' to '{resolved}' for "
-            f"{llm_config.model} on {llm_config.model_endpoint_type}"
-        )
-        # Store on config for downstream callers
-        llm_config.resolved_tool_calling_mode = resolved
-        # Relax defensive constraints now that we know the model's capability
-        if llm_config.constraints is not None:
+        if mode == "auto":
+            cache = ToolCapabilityCache.instance()
+            supports_native = cache.probe(llm_config)
+            resolved = "native" if supports_native else "prompt"
+            logger.info(
+                f"Resolved tool_calling_mode='auto' to '{resolved}' for "
+                f"{llm_config.model} on {llm_config.model_endpoint_type}"
+            )
+            llm_config.resolved_tool_calling_mode = resolved
             llm_config.constraints.relax_constraints_after_probe(resolved)
-        return resolved
+            return resolved
 
-    # Unknown mode — default to native
-    logger.warning(f"Unknown tool_calling_mode '{mode}', defaulting to 'native'")
-    return "native"
+        # Unknown mode — default to native
+        logger.warning(f"Unknown tool_calling_mode '{mode}', defaulting to 'native'")
+        return "native"
+
+    # 4. No constraints — probe instead of assuming native
+    cache = ToolCapabilityCache.instance()
+    supports_native = cache.probe(llm_config)
+    resolved = "native" if supports_native else "prompt"
+    logger.info(
+        f"No constraints set for {llm_config.model} on {llm_config.model_endpoint_type}, "
+        f"probe resolved to '{resolved}'"
+    )
+    llm_config.resolved_tool_calling_mode = resolved
+    return resolved
 
 
 async def resolve_tool_calling_mode_async(llm_config: LLMConfig) -> str:
-    """Resolve tool_calling_mode="auto" to "native" or "prompt" (async).
+    """Resolve tool_calling_mode to "native" or "prompt" (async).
 
     Preferred over the sync version in async contexts (agent loop, etc.).
     Uses httpx for non-blocking HTTP calls. Stores the resolved mode on
     llm_config.resolved_tool_calling_mode for downstream code to read.
 
+    Resolution order:
+    1. Override — if llm_config.tool_calling_mode is set, use it (user knows best)
+    2. Pre-resolved — cached value from a previous call
+    3. Constraints — explicit mode from model constraints
+    4. Probe — when constraints is None, probe instead of assuming native
+
     Returns:
         "native" or "prompt"
     """
-    # Check pre-resolved value first
+    # 1. Check override first — user knows best
+    if llm_config.tool_calling_mode is not None:
+        llm_config.resolved_tool_calling_mode = llm_config.tool_calling_mode
+        return llm_config.tool_calling_mode
+
+    # 2. Check pre-resolved value
     if llm_config.resolved_tool_calling_mode is not None:
         return llm_config.resolved_tool_calling_mode
 
-    if llm_config.constraints is None:
+    # 3. Check constraints
+    if llm_config.constraints is not None:
+        mode = llm_config.constraints.tool_calling_mode
+        if mode in ("native", "prompt"):
+            llm_config.resolved_tool_calling_mode = mode
+            return mode
+
+        if mode == "auto":
+            cache = ToolCapabilityCache.instance()
+            supports_native = await cache.probe_async(llm_config)
+            resolved = "native" if supports_native else "prompt"
+            logger.info(
+                f"Resolved tool_calling_mode='auto' to '{resolved}' for "
+                f"{llm_config.model} on {llm_config.model_endpoint_type}"
+            )
+            llm_config.resolved_tool_calling_mode = resolved
+            llm_config.constraints.relax_constraints_after_probe(resolved)
+            return resolved
+
+        logger.warning(f"Unknown tool_calling_mode '{mode}', defaulting to 'native'")
         return "native"
 
-    mode = llm_config.constraints.tool_calling_mode
-    if mode in ("native", "prompt"):
-        llm_config.resolved_tool_calling_mode = mode
-        return mode
-
-    if mode == "auto":
-        cache = ToolCapabilityCache.instance()
-        supports_native = await cache.probe_async(llm_config)
-        resolved = "native" if supports_native else "prompt"
-        logger.info(
-            f"Resolved tool_calling_mode='auto' to '{resolved}' for "
-            f"{llm_config.model} on {llm_config.model_endpoint_type}"
-        )
-        llm_config.resolved_tool_calling_mode = resolved
-        # Relax defensive constraints now that we know the model's capability
-        if llm_config.constraints is not None:
-            llm_config.constraints.relax_constraints_after_probe(resolved)
-        return resolved
-
-    logger.warning(f"Unknown tool_calling_mode '{mode}', defaulting to 'native'")
-    return "native"
+    # 4. No constraints — probe instead of assuming native
+    cache = ToolCapabilityCache.instance()
+    supports_native = await cache.probe_async(llm_config)
+    resolved = "native" if supports_native else "prompt"
+    logger.info(
+        f"No constraints set for {llm_config.model} on {llm_config.model_endpoint_type}, "
+        f"probe resolved to '{resolved}'"
+    )
+    llm_config.resolved_tool_calling_mode = resolved
+    return resolved

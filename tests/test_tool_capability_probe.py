@@ -247,10 +247,20 @@ class TestResolveToolCallingMode:
         config = _make_config(tool_calling_mode="prompt")
         assert resolve_tool_calling_mode(config) == "prompt"
 
-    def test_no_constraints_defaults_to_native(self):
+    def test_no_constraints_probes_instead_of_assuming_native(self):
+        """When constraints is None, probe instead of assuming native."""
         config = _make_config(tool_calling_mode=None)
         config.constraints = None
-        assert resolve_tool_calling_mode(config) == "native"
+        cache = ToolCapabilityCache.instance()
+        # Pre-seed the cache so the probe returns a known value
+        cache.set_cached(config, False)
+        result = resolve_tool_calling_mode(config)
+        assert result == "prompt"
+        # Pre-seed with True
+        cache.set_cached(config, True)
+        config.resolved_tool_calling_mode = None  # reset
+        result = resolve_tool_calling_mode(config)
+        assert result == "native"
 
     def test_auto_mode_resolves_to_prompt_for_non_tool_model(self):
         """Auto mode with a model that doesn't support tools -> prompt."""

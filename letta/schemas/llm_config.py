@@ -181,6 +181,12 @@ class LLMConfig(BaseModel):
         description="Model capability constraints for graceful degradation. "
         "Set for models with known limitations (e.g., 1-bit models, small local models).",
     )
+    tool_calling_mode: Optional[Literal["native", "prompt"]] = Field(
+        None,
+        description="Override tool calling mode. If set, overrides auto-detection. "
+        "Use 'prompt' for models unreliable at native tool calling "
+        "(e.g., reasoning models on Ollama).",
+    )
     # Runtime-only field: set by the agent loop after probing tool calling capability.
     # Not persisted to the database. If None, resolve_tool_calling_mode() must be called.
     resolved_tool_calling_mode: Optional[str] = Field(
