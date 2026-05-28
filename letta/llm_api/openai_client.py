@@ -1050,23 +1050,35 @@ class OpenAIClient(LLMClientBase):
                     choice.message.content = None  # Clear text content since it was a tool call
                     choice.finish_reason = "tool_calls"
                 else:
-                    # No tool call found in text — treat as a send_message fallback
-                    logger.info(
-                        "Prompt-based tool calling: no tool call found in text, "
-                        "falling back to send_message"
-                    )
-                    import json
-                    tool_call = ToolCall(
-                        id=get_tool_call_id(),
-                        type="function",
-                        function=FunctionCall(
-                            name="send_message",
-                            arguments=json.dumps({"message": text_content}),
-                        ),
-                    )
-                    choice.message.tool_calls = [tool_call]
-                    choice.message.content = None
-                    choice.finish_reason = "tool_calls"
+                    # No tool call found in text — fall back to send_message if available
+                    valid_tool_names = (getattr(llm_config, "valid_tool_names", None) or set()) if llm_config else set()
+                    if "send_message" in valid_tool_names:
+                        logger.info(
+                            "Prompt-based tool calling: no tool call found in text, "
+                            "falling back to send_message"
+                        )
+                        import json
+                        tool_call = ToolCall(
+                            id=get_tool_call_id(),
+                            type="function",
+                            function=FunctionCall(
+                                name="send_message",
+                                arguments=json.dumps({"message": text_content}),
+                            ),
+                        )
+                        choice.message.tool_calls = [tool_call]
+                        choice.message.content = None
+                        choice.finish_reason = "tool_calls"
+                    else:
+                        logger.info(
+                            "Prompt-based tool calling: no tool call found in text, "
+                            "and send_message not in tool list. "
+                            "Returning text as assistant message."
+                        )
+                        # Keep text content, no tool calls — agent loop will
+                        # produce an assistant message with this content.
+                        choice.message.tool_calls = None
+                        choice.finish_reason = "stop"
 
         # Detect empty responses (no content and no tool calls)
         # Some providers (e.g., OpenRouter/GLM-5) return these instead of an error

@@ -1127,6 +1127,9 @@ class LettaAgentV3(LettaAgentV2):
 
                     await resolve_tool_calling_mode_async(active_llm_config)
 
+                # Set valid_tool_names for prompt-based tool calling fallback
+                active_llm_config.valid_tool_names = {tool["name"] for tool in valid_tools}
+
                 effective_tool_calling_mode = active_llm_config.resolved_tool_calling_mode or "native"
                 if effective_tool_calling_mode == "prompt":
                     self.logger.info(

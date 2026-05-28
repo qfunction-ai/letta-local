@@ -136,6 +136,7 @@ class LettaLLMStreamAdapter(LettaLLMAdapter):
                 run_id=self.run_id,
                 step_id=step_id,
                 tool_calling_mode=tool_calling_mode,
+                llm_config=self.llm_config,
             )
         else:
             raise ValueError(f"Streaming not supported for provider {self.llm_config.model_endpoint_type}")

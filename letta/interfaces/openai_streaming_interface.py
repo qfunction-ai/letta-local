@@ -94,8 +94,10 @@ class OpenAIStreamingInterface:
         step_id: str | None = None,
         cancellation_event: Optional["asyncio.Event"] = None,
         tool_calling_mode: str | None = None,
+        llm_config: Optional["LLMConfig"] = None,
     ):
         self.use_assistant_message = use_assistant_message
+        self.llm_config = llm_config
 
         # Create token counter for fallback token counting (when API doesn't return usage)
         # Use openai endpoint type for approximate counting in streaming context
@@ -246,19 +248,28 @@ class OpenAIStreamingInterface:
                         ),
                     )
                 else:
-                    # No tool call found — fall back to send_message
+                    # No tool call found — fall back to send_message if available
                     import json
-                    logger.info(
-                        "Prompt-based tool calling (streaming): no tool call found "
-                        "in text, falling back to send_message"
-                    )
-                    return ToolCall(
-                        id=get_tool_call_id(),
-                        function=FunctionCall(
-                            name="send_message",
-                            arguments=json.dumps({"message": text_content}),
-                        ),
-                    )
+                    valid_tool_names = getattr(self.llm_config, "valid_tool_names", None) or set()
+                    if "send_message" in valid_tool_names:
+                        logger.info(
+                            "Prompt-based tool calling (streaming): no tool call found "
+                            "in text, falling back to send_message"
+                        )
+                        return ToolCall(
+                            id=get_tool_call_id(),
+                            function=FunctionCall(
+                                name="send_message",
+                                arguments=json.dumps({"message": text_content}),
+                            ),
+                        )
+                    else:
+                        logger.info(
+                            "Prompt-based tool calling (streaming): no tool call found "
+                            "in text, and send_message not in tool list. "
+                            "Returning text as assistant message."
+                        )
+                        raise ValueError("No tool call found in stream")
 
         raise ValueError("No tool call found in stream")
 
@@ -650,10 +661,12 @@ class SimpleOpenAIStreamingInterface:
         step_id: str | None = None,
         cancellation_event: Optional["asyncio.Event"] = None,
         tool_calling_mode: str | None = None,
+        llm_config: Optional["LLMConfig"] = None,
     ):
         self.run_id = run_id
         self.step_id = step_id
         self.cancellation_event = cancellation_event
+        self.llm_config = llm_config
         # Premake IDs for database writes
         self.letta_message_id = Message.generate_id()
 
@@ -786,19 +799,28 @@ class SimpleOpenAIStreamingInterface:
                         ),
                     )]
                 else:
-                    # No tool call found — fall back to send_message
+                    # No tool call found — fall back to send_message if available
                     import json
-                    logger.info(
-                        "Prompt-based tool calling (streaming): no tool call found "
-                        "in text, falling back to send_message"
-                    )
-                    return [ToolCall(
-                        id=get_tool_call_id(),
-                        function=FunctionCall(
-                            name="send_message",
-                            arguments=json.dumps({"message": text_content}),
-                        ),
-                    )]
+                    valid_tool_names = getattr(self.llm_config, "valid_tool_names", None) or set()
+                    if "send_message" in valid_tool_names:
+                        logger.info(
+                            "Prompt-based tool calling (streaming): no tool call found "
+                            "in text, falling back to send_message"
+                        )
+                        return [ToolCall(
+                            id=get_tool_call_id(),
+                            function=FunctionCall(
+                                name="send_message",
+                                arguments=json.dumps({"message": text_content}),
+                            ),
+                        )]
+                    else:
+                        logger.info(
+                            "Prompt-based tool calling (streaming): no tool call found "
+                            "in text, and send_message not in tool list. "
+                            "Returning text as assistant message."
+                        )
+                        return []
 
         return []
 

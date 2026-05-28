@@ -525,6 +525,8 @@ class LettaAgentV2(BaseAgentV2):
             await _sec.load_tool_call_policy(self)
             await _sec.load_canary(self)
             valid_tools = await self._get_valid_tools()
+            # Set valid_tool_names for prompt-based tool calling fallback
+            self.agent_state.llm_config.valid_tool_names = {t["name"] for t in valid_tools}
             approval_request, approval_response = _maybe_get_approval_messages(messages)
             if approval_request and approval_response:
                 tool_call = approval_request.tool_calls[0]

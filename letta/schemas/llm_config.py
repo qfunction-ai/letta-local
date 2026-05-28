@@ -195,6 +195,13 @@ class LLMConfig(BaseModel):
         "Set by the agent loop after probing. Ephemeral — not persisted.",
         exclude=True,  # Don't include in serialization
     )
+    valid_tool_names: Optional[set[str]] = Field(
+        None,
+        description="Runtime-only: set of valid tool names for the current agent. "
+        "Used by prompt-based tool calling fallback to check if send_message "
+        "is available. Not persisted to DB.",
+        exclude=True,  # Don't include in serialization
+    )
     verbosity: Optional[Literal["low", "medium", "high"]] = Field(
         None,
         description="Soft control for how verbose model output should be, used for GPT-5 models.",
