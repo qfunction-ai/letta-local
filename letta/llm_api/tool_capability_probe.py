@@ -219,6 +219,14 @@ class ToolCapabilityCache:
             "stream": False,
         }
 
+        # Enable thinking mode for reasoning models (e.g., Ollama gemma4)
+        # Without this, reasoning models produce text instead of tool calls.
+        # Also increase max_tokens — reasoning models need thinking tokens before
+        # the tool call, and 50 is too low for that.
+        if llm_config.enable_reasoner:
+            payload["chat_template_args"] = {"enable_thinking": True}
+            payload["max_tokens"] = 500
+
         headers = {"Content-Type": "application/json"}
         if llm_config.model_endpoint:
             # Some providers require an API key even if it's just "ollama"
@@ -385,6 +393,14 @@ class ToolCapabilityCache:
             "max_tokens": 50,
             "stream": False,
         }
+
+        # Enable thinking mode for reasoning models (e.g., Ollama gemma4)
+        # Without this, reasoning models produce text instead of tool calls.
+        # Also increase max_tokens — reasoning models need thinking tokens before
+        # the tool call, and 50 is too low for that.
+        if llm_config.enable_reasoner:
+            payload["chat_template_args"] = {"enable_thinking": True}
+            payload["max_tokens"] = 500
 
         headers = {"Content-Type": "application/json"}
 
