@@ -25,7 +25,11 @@ class SandboxConfig(SqlalchemyBase, OrganizationMixin):
     __table_args__ = (UniqueConstraint("type", "organization_id", name="uix_type_organization"),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
-    type: Mapped[SandboxType] = mapped_column(SqlEnum(SandboxType), nullable=False, doc="The type of sandbox.")
+    type: Mapped[SandboxType] = mapped_column(
+        SqlEnum(SandboxType, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        doc="The type of sandbox.",
+    )
     config: Mapped[Dict] = mapped_column(JSON, nullable=False, doc="The JSON configuration data.")
 
     # relationships

@@ -23,7 +23,7 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     # SQLite just uses strings
     if settings.database_engine == DatabaseChoice.POSTGRES:
-        op.execute("ALTER TYPE sandboxtype ADD VALUE 'MODAL' AFTER 'E2B'")
+        op.execute("ALTER TYPE sandboxtype ADD VALUE 'modal' AFTER 'e2b'")
 
 
 def downgrade() -> None:
@@ -35,7 +35,7 @@ def downgrade() -> None:
                 """
             SELECT COUNT(*)
             FROM sandbox_configs
-            WHERE "type" NOT IN ('E2B', 'LOCAL')
+            WHERE "type" NOT IN ('e2b', 'local')
         """
             )
         ).fetchone()
@@ -49,7 +49,7 @@ def downgrade() -> None:
             )
 
         # Postgres does not support dropping enum values. Create a new enum and swap them.
-        op.execute("CREATE TYPE sandboxtype_old AS ENUM ('E2B', 'LOCAL')")
+        op.execute("CREATE TYPE sandboxtype_old AS ENUM ('e2b', 'local')")
         op.execute('ALTER TABLE sandbox_configs ALTER COLUMN "type" TYPE sandboxtype_old USING "type"::text::sandboxtype_old')
         op.execute("DROP TYPE sandboxtype")
         op.execute("ALTER TYPE sandboxtype_old RENAME to sandboxtype")

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, model_validator
@@ -104,22 +105,22 @@ class LandlockSandboxConfig(BaseModel):
     """
     # Filesystem access
     allowed_read_paths: List[str] = Field(
-        default_factory=lambda: ["/usr", "/lib", "/lib64", "/etc"],
-        description="Paths allowed for read access (recursively).",
+        default_factory=lambda: ["/usr", "/lib", "/lib64", "/etc", "/app", "/extra-packages"],
+        description="Paths allowed for read access (recursively). Includes /app for the Python venv and /extra-packages for pip-sidecar packages.",
     )
     allowed_write_paths: List[str] = Field(
         default_factory=lambda: [],  # Set dynamically from tool_exec_dir
         description="Paths allowed for write access (recursively).",
     )
     allowed_execute_paths: List[str] = Field(
-        default_factory=lambda: ["/usr/bin", "/usr/local/bin", "/lib"],
-        description="Paths allowed for execution (recursively). /lib must be included for the ELF dynamic linker (ld-linux-aarch64.so.1 on ARM, ld-linux-x86-64.so.2 on x86_64).",
+        default_factory=lambda: ["/usr/bin", "/usr/local/bin", "/lib", "/app/.venv/bin"],
+        description="Paths allowed for execution (recursively). /lib must be included for the ELF dynamic linker (ld-linux-aarch64.so.1 on ARM, ld-linux-x86-64.so.2 on x86_64). /app/.venv/bin for the Python venv executable.",
     )
 
     # Network access (ABI v4+, kernel 6.7+)
     allow_tcp_connect: bool = Field(
         False,
-        description="Allow outbound TCP connections. Default: deny. Requires Landlock ABI >= 4.",
+        description="Allow outbound TCP connections. Default: deny. Must be explicitly enabled for tools that call external APIs. Requires Landlock ABI >= 4. NOTE: also controls seccomp network syscall filtering — if False, network syscalls are blocked even when Landlock net rules are unavailable.",
     )
     allow_tcp_bind: bool = Field(
         False,
@@ -154,14 +155,22 @@ class LandlockSandboxConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def set_default_sandbox_dir(cls, data):
+    def set_defaults_from_env(cls, data):
         if not isinstance(data, dict):
             return data
+        # Sandbox dir
         if data.get("sandbox_dir") is None:
             if tool_settings.tool_exec_dir:
                 data["sandbox_dir"] = tool_settings.tool_exec_dir
             else:
                 data["sandbox_dir"] = LETTA_TOOL_EXECUTION_DIR
+        # Network access: deny-by-default, but allow opt-in via env var.
+        # This lets deployments (e.g. Delta) enable TCP for tools that call
+        # external APIs without changing the secure default for all users.
+        if "allow_tcp_connect" not in data:
+            env_val = os.environ.get("LETTA_LANDLOCK_ALLOW_TCP_CONNECT", "").lower()
+            if env_val in ("1", "true", "yes"):
+                data["allow_tcp_connect"] = True
         return data
 
 

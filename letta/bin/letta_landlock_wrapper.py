@@ -44,6 +44,30 @@ def main():
     os.execvp(exec_args[0], exec_args)
 
 
+def _probe_net_rules(abi, NET_BIND_TCP, NET_CONNECT_TCP, landlock_create_ruleset, landlock_add_net_rule, config):
+    """Probe whether the kernel actually supports Landlock network rules.
+
+    Some kernels report ABI >= 4 but the landlock_add_rule syscall for
+    LANDLOCK_RULE_NET_PORT fails (e.g. Docker Desktop VMs, restricted
+    containers). Returns True if net rules work, False if they don't.
+    """
+    if abi < 4:
+        return False
+
+    # Create a throwaway ruleset to test network rule support
+    test_fd = landlock_create_ruleset(0, NET_BIND_TCP | NET_CONNECT_TCP, 0)
+    try:
+        if config.get("allow_tcp_connect"):
+            landlock_add_net_rule(test_fd, NET_CONNECT_TCP)
+        if config.get("allow_tcp_bind"):
+            landlock_add_net_rule(test_fd, NET_BIND_TCP)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(test_fd)
+
+
 def apply_landlock(config):
     """Apply Landlock filesystem and network restrictions.
 
@@ -86,9 +110,21 @@ def apply_landlock(config):
     if abi >= 5:
         handled_fs |= FS_IOCTL
 
+    # Probe whether the kernel actually supports network rules.
+    # If it doesn't, we MUST NOT include NET rights in handled_net —
+    # otherwise Landlock would deny ALL network access (handled but no
+    # rules allow it), breaking any tool that makes HTTP calls.
+    net_supported = _probe_net_rules(
+        abi, NET_BIND_TCP, NET_CONNECT_TCP,
+        landlock_create_ruleset, landlock_add_net_rule, config,
+    )
+
     handled_net = 0
-    if abi >= 4:
+    if net_supported:
         handled_net = NET_BIND_TCP | NET_CONNECT_TCP
+    elif abi >= 4 and (config.get("allow_tcp_connect") or config.get("allow_tcp_bind")):
+        print("WARNING: Landlock ABI >= 4 but kernel rejected network rules. "
+              "Network restrictions not enforced.", file=sys.stderr)
 
     scope = 0
     if abi >= 6:
@@ -128,15 +164,12 @@ def apply_landlock(config):
         except (FileNotFoundError, OSError):
             pass  # /proc/self should always exist, but be safe
 
-        # Add network rules if ABI >= 4 and network is allowed
-        if abi >= 4:
+        # Add network rules if kernel actually supports them
+        if net_supported:
             if config.get("allow_tcp_connect"):
                 landlock_add_net_rule(ruleset_fd, NET_CONNECT_TCP)
             if config.get("allow_tcp_bind"):
                 landlock_add_net_rule(ruleset_fd, NET_BIND_TCP)
-        elif config.get("allow_tcp_connect") or config.get("allow_tcp_bind"):
-            print("WARNING: Network access requested but Landlock ABI < 4. "
-                  "Network restrictions not available.", file=sys.stderr)
 
         # Apply the sandbox — IRREVERSIBLE
         landlock_restrict_self(ruleset_fd)
