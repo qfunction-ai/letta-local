@@ -1,3 +1,6 @@
+import os
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
 
 from letta.functions.types import FileOpenRequest
@@ -75,7 +78,118 @@ async def grep_files(
                                 offset=40 for third page, etc. The tool will tell you the exact
                                 offset to use for the next page.
     """
-    raise NotImplementedError("Tool not implemented. Please contact the Letta team.")
+    from letta.functions.function_sets.file_persistence import _agent_file_dir
+
+    base_dir = _agent_file_dir(agent_state)
+    if context_lines is None:
+        context_lines = 1
+    if offset is None:
+        offset = 0
+
+    # Compile the search pattern
+    try:
+        pattern_re = re.compile(pattern)
+    except re.error as e:
+        return f"Invalid regex pattern: {e}"
+
+    # Compile the include filter if provided
+    include_re = None
+    if include:
+        try:
+            include_re = re.compile(include)
+        except re.error as e:
+            return f"Invalid include regex pattern: {e}"
+
+    # Collect all matches
+    all_matches = []  # List of (rel_path, line_num, line_text, context_before, context_after)
+    file_match_counts = {}  # rel_path -> count
+
+    for dirpath, dirnames, filenames in os.walk(base_dir):
+        # Skip .staging directory
+        if ".staging" in dirnames:
+            dirnames.remove(".staging")
+
+        for fname in filenames:
+            fpath = os.path.join(dirpath, fname)
+            rel_path = os.path.relpath(fpath, base_dir)
+
+            # Apply include filter
+            if include_re and not include_re.search(rel_path):
+                continue
+
+            # Skip binary files (detect via null bytes in first 8KB)
+            try:
+                with open(fpath, "rb") as f:
+                    chunk = f.read(8192)
+                if b"\x00" in chunk:
+                    continue
+            except OSError:
+                continue
+
+            # Read file and search
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+            except OSError:
+                continue
+
+            file_count = 0
+            for i, line in enumerate(lines):
+                if pattern_re.search(line):
+                    # Collect context
+                    ctx_before = []
+                    ctx_after = []
+                    for j in range(max(0, i - context_lines), i):
+                        ctx_before.append(lines[j].rstrip("\n"))
+                    for j in range(i + 1, min(len(lines), i + 1 + context_lines)):
+                        ctx_after.append(lines[j].rstrip("\n"))
+
+                    all_matches.append((
+                        rel_path,
+                        i + 1,  # 1-indexed line number
+                        line.rstrip("\n"),
+                        ctx_before,
+                        ctx_after,
+                    ))
+                    file_count += 1
+
+            if file_count > 0:
+                file_match_counts[rel_path] = file_count
+
+    total_matches = len(all_matches)
+
+    if total_matches == 0:
+        return "No matches found."
+
+    # Pagination
+    page_size = 20
+    start = offset
+    end = min(offset + page_size, total_matches)
+    page_matches = all_matches[start:end]
+
+    # Format output
+    output_lines = []
+    output_lines.append(f"Found {total_matches} matches in {len(file_match_counts)} files (showing matches {start + 1}-{end}):")
+    output_lines.append("")
+
+    current_file = None
+    for rel_path, line_num, line_text, ctx_before, ctx_after in page_matches:
+        if rel_path != current_file:
+            current_file = rel_path
+            count = file_match_counts[rel_path]
+            output_lines.append(f"--- {rel_path} ({count} matches) ---")
+
+        for ctx_line in ctx_before:
+            output_lines.append(f"  {ctx_line}")
+        output_lines.append(f"Line {line_num}: {line_text}")
+        for ctx_line in ctx_after:
+            output_lines.append(f"  {ctx_line}")
+        output_lines.append("")
+
+    if end < total_matches:
+        output_lines.append(f"Use offset={end} to see the next {min(page_size, total_matches - end)} matches.")
+
+    return "\n".join(output_lines)
 
 
 async def semantic_search_files(agent_state: "AgentState", query: str, limit: int = 5) -> List["FileMetadata"]:

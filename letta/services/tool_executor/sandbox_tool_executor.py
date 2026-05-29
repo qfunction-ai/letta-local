@@ -150,6 +150,9 @@ class SandboxToolExecutor(ToolExecutor):
 
                 tool_execution_result = await sandbox.run(agent_state=agent_state_copy)
 
+            # Promote staging files (sandbox tools that wrote to .staging/)
+            await sandbox.promote_staging_files(agent_state=agent_state_copy)
+
             log_lines = (tool_execution_result.stdout or []) + (tool_execution_result.stderr or [])
             logger.debug("Tool execution log: %s", "\n".join(log_lines))
 

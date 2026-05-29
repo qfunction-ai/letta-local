@@ -116,6 +116,130 @@ class AsyncToolSandboxBase(ABC):
         """
         raise NotImplementedError
 
+    async def promote_staging_files(self, agent_state: Optional[AgentState] = None) -> None:
+        """After tool execution, move validated files from .staging/ to agent files dir.
+
+        Sandbox tools that write large output (e.g., query results) can write
+        to LETTA_STAGING_DIR instead of returning everything in the tool result.
+        This method validates the staged files (size limits, path safety) and
+        moves them to the agent's persistent file directory.
+
+        Called by sandbox_tool_executor.py after sandbox.run() returns,
+        before the result is returned to the agent. This keeps the promotion
+        sandbox-agnostic — any sandbox type that writes to .staging/ gets
+        the same promotion.
+        """
+        if not self.agent_id:
+            return
+
+        # Compute paths
+        try:
+            from letta.settings import file_persistence_settings, settings
+            base = file_persistence_settings.agent_files_dir or os.path.join(str(settings.letta_dir), "agent_files")
+        except Exception:
+            base = os.path.expanduser("~/.letta/agent_files")
+
+        staging_dir = os.path.join(base, self.agent_id, ".staging")
+        agent_files_dir = os.path.join(base, self.agent_id)
+
+        if not os.path.isdir(staging_dir):
+            return
+
+        # Read size limits (same as file_write)
+        _DEFAULT_MAX_FILE_SIZE = 1_000_000   # 1MB
+        _DEFAULT_MAX_TOTAL_SIZE = 50_000_000  # 50MB
+        try:
+            from letta.settings import file_persistence_settings as fps
+            max_file_size = fps.max_file_size_bytes or _DEFAULT_MAX_FILE_SIZE
+            max_total_size = fps.max_total_size_bytes or _DEFAULT_MAX_TOTAL_SIZE
+        except Exception:
+            max_file_size = _DEFAULT_MAX_FILE_SIZE
+            max_total_size = _DEFAULT_MAX_TOTAL_SIZE
+
+        # Compute current total size of agent files dir
+        current_total = 0
+        for dirpath, dirnames, filenames in os.walk(agent_files_dir):
+            # Skip .staging when computing current total
+            if ".staging" in dirnames:
+                dirnames.remove(".staging")
+            for fname in filenames:
+                fpath = os.path.join(dirpath, fname)
+                try:
+                    current_total += os.path.getsize(fpath)
+                except OSError:
+                    pass
+
+        promoted = 0
+        rejected = 0
+
+        for dirpath, dirnames, filenames in os.walk(staging_dir):
+            for fname in filenames:
+                src_path = os.path.join(dirpath, fname)
+
+                # Compute relative path from staging_dir
+                rel_path = os.path.relpath(src_path, staging_dir)
+
+                # Validate path (no .., no absolute, no null bytes)
+                if not rel_path or "\0" in rel_path or rel_path.startswith("/") or ".." in rel_path.split(os.sep):
+                    logger.warning(f"Staging file rejected (invalid path): {rel_path}")
+                    rejected += 1
+                    continue
+
+                # Validate resolved path doesn't escape agent files dir
+                dst_path = os.path.join(agent_files_dir, rel_path)
+                dst_resolved = os.path.realpath(dst_path)
+                agent_resolved = os.path.realpath(agent_files_dir)
+                if not dst_resolved.startswith(agent_resolved + os.sep) and dst_resolved != agent_resolved:
+                    logger.warning(f"Staging file rejected (path escape): {rel_path}")
+                    rejected += 1
+                    continue
+
+                # Validate per-file size
+                try:
+                    file_size = os.path.getsize(src_path)
+                except OSError:
+                    logger.warning(f"Staging file rejected (cannot stat): {rel_path}")
+                    rejected += 1
+                    continue
+
+                if file_size > max_file_size:
+                    logger.warning(
+                        f"Staging file rejected (too large: {file_size} > {max_file_size}): {rel_path}"
+                    )
+                    rejected += 1
+                    continue
+
+                # Validate total size after adding
+                if current_total + file_size > max_total_size:
+                    logger.warning(
+                        f"Staging file rejected (total would exceed {max_total_size}): {rel_path}"
+                    )
+                    rejected += 1
+                    continue
+
+                # Move file to agent files dir
+                try:
+                    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                    os.rename(src_path, dst_path)
+                    current_total += file_size
+                    promoted += 1
+                except OSError as e:
+                    logger.warning(f"Failed to promote staging file {rel_path}: {e}")
+                    rejected += 1
+
+        # Clean up staging dir (remove any remaining files)
+        try:
+            import shutil
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+        if promoted or rejected:
+            logger.info(
+                f"Staging promotion for agent {self.agent_id}: "
+                f"{promoted} promoted, {rejected} rejected"
+            )
+
     def is_typescript_tool(self) -> bool:
         """Check if the tool is a TypeScript tool based on source_type."""
         if self.tool and self.tool.source_type:
@@ -508,6 +632,15 @@ class AsyncToolSandboxBase(ABC):
         # Inject agent, project, and tool IDs as environment variables
         if self.agent_id:
             env["LETTA_AGENT_ID"] = self.agent_id
+            # Compute agent files directory and staging directory
+            try:
+                from letta.settings import file_persistence_settings, settings
+                base = file_persistence_settings.agent_files_dir or os.path.join(str(settings.letta_dir), "agent_files")
+            except Exception:
+                base = os.path.expanduser("~/.letta/agent_files")
+            agent_files_dir = os.path.join(base, self.agent_id)
+            env["LETTA_AGENT_FILES_DIR"] = agent_files_dir
+            env["LETTA_STAGING_DIR"] = os.path.join(agent_files_dir, ".staging")
         if self.project_id:
             env["LETTA_PROJECT_ID"] = self.project_id
         env["LETTA_TOOL_ID"] = self.tool_id

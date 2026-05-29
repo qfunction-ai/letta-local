@@ -153,9 +153,22 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
             )
 
             # Build wrapper config
+            # Compute staging directory for file persistence (agent files)
+            staging_write_paths = []
+            if self.agent_id:
+                try:
+                    from letta.settings import file_persistence_settings, settings
+                    base = file_persistence_settings.agent_files_dir or os.path.join(str(settings.letta_dir), "agent_files")
+                except Exception:
+                    base = os.path.expanduser("~/.letta/agent_files")
+                staging_dir = os.path.join(base, self.agent_id, ".staging")
+                # Ensure staging dir exists so Landlock can grant write access
+                os.makedirs(staging_dir, exist_ok=True)
+                staging_write_paths = [staging_dir]
+
             wrapper_config = {
                 "allowed_read_paths": landlock_config.allowed_read_paths + [sandbox_dir],
-                "allowed_write_paths": landlock_config.allowed_write_paths + [sandbox_dir],
+                "allowed_write_paths": landlock_config.allowed_write_paths + [sandbox_dir] + staging_write_paths,
                 "allowed_execute_paths": landlock_config.allowed_execute_paths,
                 "allow_tcp_connect": landlock_config.allow_tcp_connect,
                 "allow_tcp_bind": landlock_config.allow_tcp_bind,
