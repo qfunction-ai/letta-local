@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 from typing import Any, Dict, List, Optional
 
@@ -359,7 +360,10 @@ class LettaFileToolExecutor(ToolExecutor):
         )
 
         if not file_agents:
-            return "No files are currently attached to search"
+            # Filesystem fallback: if no DB-registered files, search the agent's
+            # filesystem directory directly. This handles promoted staging files
+            # that exist on disk but aren't in the FileAgent table yet.
+            return await self._grep_files_filesystem(agent_state, pattern, include_regex, context_lines, offset)
 
         # Filter files by filename pattern if include is specified
         if include_regex:
@@ -532,6 +536,141 @@ class LettaFileToolExecutor(ToolExecutor):
                 results.append("Showing last page of collected matches. There may be more matches beyond the collection limit.")
             else:
                 results.append("No more matches to show.")
+
+        return "\n".join(results)
+
+    async def _grep_files_filesystem(
+        self,
+        agent_state: AgentState,
+        pattern: str,
+        include_regex: Optional[re.Pattern] = None,
+        context_lines: int = 1,
+        offset: Optional[int] = None,
+    ) -> str:
+        """Filesystem fallback for grep_files when no DB-registered files exist.
+
+        Searches the agent's filesystem directory directly. This handles
+        promoted staging files and any other files on disk that aren't
+        registered in the FileAgent table yet.
+        """
+        from pathlib import Path as FilePath
+
+        from letta.functions.function_sets.file_persistence import _agent_file_dir
+
+        base_dir = _agent_file_dir(agent_state)
+        if offset is None:
+            offset = 0
+
+        # Compile regex
+        regex_flags = re.MULTILINE | re.IGNORECASE
+        pattern_regex = re.compile(pattern, regex_flags)
+
+        page_size = self.GREP_PAGE_SIZE
+        all_matches = []
+        file_match_counts = {}
+
+        for dirpath, dirnames, filenames in os.walk(base_dir):
+            # Skip .staging directory
+            if ".staging" in dirnames:
+                dirnames.remove(".staging")
+
+            for fname in filenames:
+                fpath = os.path.join(dirpath, fname)
+                rel_path = os.path.relpath(fpath, base_dir)
+
+                # Apply include filter
+                if include_regex and not include_regex.search(rel_path):
+                    continue
+
+                # Skip binary files (detect via null bytes in first 8KB)
+                try:
+                    with open(fpath, "rb") as f:
+                        chunk = f.read(8192)
+                    if b"\x00" in chunk:
+                        continue
+                except OSError:
+                    continue
+
+                # Read file and search
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                        lines = f.readlines()
+                except OSError:
+                    continue
+
+                file_count = 0
+                for i, line in enumerate(lines):
+                    if len(all_matches) >= self.MAX_TOTAL_COLLECTED:
+                        break
+                    if pattern_regex.search(line):
+                        # Collect context
+                        ctx_before = []
+                        ctx_after = []
+                        for j in range(max(0, i - context_lines), i):
+                            ctx_before.append(lines[j].rstrip("\n"))
+                        for j in range(i + 1, min(len(lines), i + 1 + context_lines)):
+                            ctx_after.append(lines[j].rstrip("\n"))
+
+                        all_matches.append((
+                            rel_path,
+                            i + 1,  # 1-indexed line number
+                            line.rstrip("\n"),
+                            ctx_before,
+                            ctx_after,
+                        ))
+                        file_count += 1
+
+                if file_count > 0:
+                    file_match_counts[rel_path] = file_count
+
+                if len(all_matches) >= self.MAX_TOTAL_COLLECTED:
+                    break
+
+        total_matches = len(all_matches)
+
+        if total_matches == 0:
+            return "No matches found."
+
+        # Pagination
+        start = offset
+        end = min(offset + page_size, total_matches)
+        page_matches = all_matches[start:end]
+
+        # Format output
+        results = []
+        hit_limit = len(all_matches) >= self.MAX_TOTAL_COLLECTED
+
+        if hit_limit:
+            results.append(f"Found {self.MAX_TOTAL_COLLECTED}+ matches in {len(file_match_counts)} files (showing matches {start + 1}-{end})")
+        else:
+            results.append(f"Found {total_matches} matches in {len(file_match_counts)} files (showing matches {start + 1}-{end})")
+
+        # File summary
+        sorted_files = sorted(file_match_counts.items(), key=lambda x: x[1], reverse=True)
+        results.append("\nFiles with matches:")
+        for file_name, count in sorted_files:
+            results.append(f"  - {file_name}: {count} matches")
+        results.append("")
+
+        # Format matches
+        current_file = None
+        for rel_path, line_num, line_text, ctx_before, ctx_after in page_matches:
+            if rel_path != current_file:
+                current_file = rel_path
+                count = file_match_counts[rel_path]
+                results.append(f"--- {rel_path} ({count} matches) ---")
+
+            for ctx_line in ctx_before:
+                results.append(f"  {ctx_line}")
+            results.append(f"Line {line_num}: {line_text}")
+            for ctx_line in ctx_after:
+                results.append(f"  {ctx_line}")
+            results.append("")
+
+        if end < total_matches:
+            results.append(f'Use offset={end} to see the next {min(page_size, total_matches - end)} matches.')
+        elif hit_limit:
+            results.append(f"Note: Only the first {self.MAX_TOTAL_COLLECTED} matches were collected. There may be more.")
 
         return "\n".join(results)
 
