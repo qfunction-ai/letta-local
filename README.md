@@ -18,6 +18,14 @@ Upstream assumes models support native OpenAI-style tool calling. Most local mod
 - **Circuit breaker for error loops.** Tracks consecutive LLM errors (3) and context overflows (2). When threshold is exceeded, force-clears the context window instead of retrying with an even larger prompt.
 - **Landlock + seccomp-BPF sandbox.** Kernel-level filesystem and network isolation for tool execution subprocesses. Works inside Docker Desktop containers with zero extra flags, on bare Linux, no external dependencies. Replaces the Docker sandbox backend (which required root-equivalent Docker socket access).
 - **Agent OS-compatible policy engine.** Argument-level rules, rate limiting, regex matching, YAML loading. Schema matches Microsoft's Agent Governance Toolkit so policy files are interchangeable. No AGT dependency.
+- **Unified audit logging.** Every security event (tool execution, denial, approval request, canary detection, secret detection, message sent) is logged with agent ID, actor, step/run IDs, and matched rule. Fork-only module — no upstream equivalent.
+- **Canary exfiltration detection.** A random canary value is injected into the agent's memory. Before every tool call, the arguments are checked for the canary. If found, the tool call is blocked — that's a prompt exfiltration attack. Post-LLM output filtering also redacts canary tokens from assistant messages before they reach the user.
+- **Secret scanning.** Entropy + regex detection in tool arguments. Shannon entropy ≥4.5 bits/char in strings of 20+ chars is the primary signal. Regex patterns (AWS keys, GitHub tokens, PEM keys, Slack tokens, Stripe keys) are confirmatory. Routed through the policy engine via `CONTAINS_SECRET` operator. Default: audit (log + warn in tool result, don't block). Configurable to deny or require approval.
+- **Tool calling mode override.** `tool_calling_mode: "native" | "prompt"` on LLMConfig overrides auto-detection entirely. For models unreliable at native tool calling under the real system prompt (e.g., reasoning models on Ollama), set `tool_calling_mode="prompt"` and skip the probe.
+- **Ollama reasoning model auto-detection.** The Ollama provider detects the `thinking` capability via `/api/show` and sets `enable_reasoner=True`. The V1 agent path now honors provider-detected reasoning capability instead of overriding it to `False`. Thinking mode (`chat_template_args: {enable_thinking: true}`) is sent in the LLM request for all `enable_reasoner` models.
+- **Prompt-based send_message fallback.** When prompt-based tool calling can't parse a tool call from the model's text, the fallback now checks if `send_message` is in the agent's tool list. Custom agents without `send_message` get the text as an assistant message instead of a crash loop.
+- **Sandbox staging directory.** Sandbox tools that return large data (e.g., 2.5MB query results) can write to `LETTA_STAGING_DIR` instead of returning everything in the tool result. The runtime validates staged files (1MB per-file, 50MB per-agent, path safety) and moves them to the agent's persistent file directory. The sandbox can only write to `.staging/` — not directly to agent files.
+- **grep_files.** Searches the agent's file workspace recursively. Supports regex pattern, include filter (regex on filename), context lines, and pagination (20 matches per page). Skips `.staging/` and binary files.
 
 ## Supported providers
 
@@ -316,11 +324,14 @@ pytest tests/test_tool_capability_probe.py tests/test_model_constraints.py \
 # Local model hardening tests (43 tests, no servers needed)
 pytest tests/test_local_model_hardening.py
 
+# Security tests (196 tests, no servers needed)
+pytest tests/test_audit_logger.py tests/test_canary_checker.py \
+       tests/test_policy_engine.py tests/test_policy_checker.py \
+       tests/test_agent_step_recorder.py tests/test_constraint_relaxation.py \
+       tests/test_tool_capability_probe.py tests/test_ollama_capability_filter.py
+
 # Landlock sandbox tests (28 tests, Linux with Landlock ABI >= 1 required)
 pytest tests/test_landlock_sandbox.py tests/test_landlock_ctypes.py
-
-# Policy engine tests (73 tests, no servers needed)
-pytest tests/test_policy_engine.py
 
 # Integration tests (requires live servers)
 RUN_LOCAL_INTEGRATION_TESTS=1 \
@@ -332,17 +343,19 @@ pytest tests/integration_test_local_model_agent.py -v
 ## Known issues
 
 - **vLLM on macOS Metal GPU**: OOMs under sustained load. Use `--gpu-memory-utilization 0.7` to reduce KV cache allocation. The token budget enforcer (default `context_window_ratio=0.7`) helps prevent this by stopping the agent before it exceeds the GPU's real capacity.
-- **Non-deterministic tool calling**: Some models (Gemma 4 on vLLM) produce native tool calls sometimes and text other times. The probe tries twice; the agent loop's retry mechanism handles occasional failures.
+- **Non-deterministic tool calling**: Some models (Gemma 4 on vLLM) produce native tool calls sometimes and text other times. The probe tries twice; the agent loop's retry mechanism handles occasional failures. For models that are unreliable at native tool calling, set `tool_calling_mode="prompt"` to skip the probe.
 - **vLLM requires flags**: Native tool calling on vLLM needs `--enable-auto-tool-choice --tool-call-parser hermes`. Without these, all models fall back to prompt mode (which still works).
 - **Correction factor placeholders**: `TOKEN_ESTIMATE_CORRECTION` values for specific model families (qwen, llama, etc.) are placeholders (`None`). They fall back to `DEFAULT_TOKEN_CORRECTION = 2.5` until a benchmark script measures real ratios. Live calibration makes this less critical — the first API response provides the real ratio.
+- **vLLM reasoning models**: vLLM doesn't expose model capability metadata like Ollama's `/api/show`. Reasoning models served via vLLM need `reasoning=True` set explicitly on agent creation. The `enable_reasoner` flag is not auto-detected for vLLM.
 
 ## Differences from upstream
 
 | Area | Upstream | This fork |
 |------|----------|-----------|
 | Target | Cloud models (OpenAI, Anthropic) | Local inference servers |
-| Tool calling | Assumes native support | Auto-detects, falls back to prompt |
+| Tool calling | Assumes native support | Auto-detects, falls back to prompt, mode override |
 | Provider types | Cloud-focused | 6 additional local providers |
+| Reasoning models | Hardcoded lists | Provider-detected (Ollama thinking capability) |
 | Model constraints | Not implemented | Full schema with auto-apply |
 | Repair pipeline | None | Handles malformed JSON from local models |
 | Model settings | OpenAI-centric | OllamaModelSettings, VLLMModelSettings |
@@ -350,7 +363,11 @@ pytest tests/integration_test_local_model_agent.py -v
 | Token budget | No enforcement | Per-step, per-run, context-window ratio |
 | Error loops | Retry until max steps | Circuit breaker with force-compact |
 | Sandbox | LOCAL (host subprocess), E2B, Modal | + LANDLOCK (kernel-level isolation, no Docker socket) |
-| Policy engine | Two-list (denied_tools, approval_required_tools) | Agent OS-compatible rules + rate limiting + YAML |
+| Policy engine | Two-list (denied_tools, approval_required_tools) | Agent OS-compatible rules + rate limiting + YAML + secret scanning |
+| Audit logging | None | Unified audit trail for all security events |
+| Exfiltration detection | None | Canary injection + output filtering |
+| Secret scanning | None | Entropy + regex via policy engine |
+| File tools | grep_files is a stub | grep_files implemented, sandbox staging dir for large output |
 
 ## Upstream sync
 
@@ -363,7 +380,9 @@ git merge upstream/main
 # Resolve conflicts, run tests
 pytest tests/test_tool_capability_probe.py tests/test_model_constraints.py \
        tests/test_tool_call_repair.py tests/test_prompt_tool_calling.py \
-       tests/test_local_model_hardening.py tests/test_landlock_sandbox.py tests/test_policy_engine.py
+       tests/test_local_model_hardening.py tests/test_landlock_sandbox.py \
+       tests/test_policy_engine.py tests/test_audit_logger.py \
+       tests/test_canary_checker.py tests/test_policy_checker.py
 ```
 
 ## License
