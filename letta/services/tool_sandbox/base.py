@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 
 from letta.constants import LETTA_MULTI_AGENT_TOOL_MODULE_NAME
 from letta.functions.helpers import generate_model_from_args_json_schema
+from letta.log import get_logger
 from letta.otel.tracing import trace_method
 from letta.schemas.agent import AgentState
 from letta.schemas.enums import ToolSourceType, ToolType
@@ -19,6 +20,8 @@ from letta.services.helpers.tool_parser_helper import convert_param_to_str_value
 from letta.services.sandbox_config_manager import SandboxConfigManager
 from letta.services.tool_manager import ToolManager
 from letta.types import JsonDict, JsonValue
+
+logger = get_logger(__name__)
 
 
 class AsyncToolSandboxBase(ABC):
