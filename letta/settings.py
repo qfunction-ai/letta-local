@@ -752,8 +752,8 @@ class FilePersistenceSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="letta_file_persistence_", extra="ignore")
 
     max_file_size_bytes: int = Field(
-        default=1_000_000,
-        description="Per-file size limit in bytes. Default: 1MB.",
+        default=10_000_000,
+        description="Per-file size limit in bytes. Default: 10MB.",
     )
     max_total_size_bytes: int = Field(
         default=50_000_000,
