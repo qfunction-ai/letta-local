@@ -106,6 +106,10 @@ def enable_strict_mode(tool_schema: Dict[str, Any], strict: bool = True) -> Dict
     Returns:
         Dict[str, Any]: A new tool schema with strict mode conditionally enabled.
     """
+    # Tools without a schema (e.g., file persistence tools) are returned as-is
+    if tool_schema is None:
+        return {}
+
     # Deep copy to avoid mutating the original schema
     schema = copy.deepcopy(tool_schema)
 
