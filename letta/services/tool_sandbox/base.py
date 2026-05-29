@@ -148,8 +148,8 @@ class AsyncToolSandboxBase(ABC):
         if not os.path.isdir(staging_dir):
             return
 
-        # Read size limits (same as file_write)
-        _DEFAULT_MAX_FILE_SIZE = 1_000_000   # 1MB
+        # Read size limits (same as file_write, but with higher per-file default)
+        _DEFAULT_MAX_FILE_SIZE = 10_000_000  # 10MB (security logs can be large)
         _DEFAULT_MAX_TOTAL_SIZE = 50_000_000  # 50MB
         try:
             from letta.settings import file_persistence_settings as fps
