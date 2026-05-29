@@ -1300,7 +1300,7 @@ class LettaAgentV2(BaseAgentV2):
                 # Security: append audit warning from policy engine (e.g., secret detected)
                 if policy_decision.audit_warning:
                     tool_execution_result.func_return = (
-                        (tool_execution_result.func_return or "")
+                        (str(tool_execution_result.func_return) if tool_execution_result.func_return else "")
                         + "\n\n[SECURITY WARNING] " + policy_decision.audit_warning
                     )
                 tool_end_time = get_utc_timestamp_ns()

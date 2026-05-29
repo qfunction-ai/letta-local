@@ -1961,7 +1961,7 @@ class LettaAgentV3(LettaAgentV2):
             # Security: append audit warning from policy engine (e.g., secret detected)
             if policy_decision.audit_warning:
                 res.func_return = (
-                    (res.func_return or "")
+                    (str(res.func_return) if res.func_return else "")
                     + "\n\n[SECURITY WARNING] " + policy_decision.audit_warning
                 )
             dt = get_utc_timestamp_ns() - t0
