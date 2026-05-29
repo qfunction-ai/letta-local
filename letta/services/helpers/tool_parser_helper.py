@@ -89,7 +89,10 @@ def runtime_override_tool_json_schema(
     """
     if terminal_tools is None:
         terminal_tools = set()
-    for tool_json in tool_list:
+    # Filter out schema-less tools (e.g., file persistence tools with json_schema=None)
+    # These are internal tools not sent to the LLM
+    result = [t for t in tool_list if "name" in t]
+    for tool_json in result:
         if tool_json["name"] == SEND_MESSAGE_TOOL_NAME and response_format and response_format.type != ResponseFormatType.text:
             if response_format.type == ResponseFormatType.json_schema:
                 tool_json["parameters"]["properties"]["message"] = response_format.json_schema["schema"]
@@ -110,4 +113,4 @@ def runtime_override_tool_json_schema(
                 if REQUEST_HEARTBEAT_PARAM not in tool_json["parameters"]["required"]:
                     tool_json["parameters"]["required"].append(REQUEST_HEARTBEAT_PARAM)
 
-    return tool_list
+    return result
