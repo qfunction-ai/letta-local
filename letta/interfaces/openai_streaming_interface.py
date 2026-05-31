@@ -155,10 +155,6 @@ class OpenAIStreamingInterface:
         # expected in text content rather than native tool_call deltas.
         self.tool_calling_mode = tool_calling_mode
 
-        # Prompt-based tool calling mode: when "prompt", tool calls are
-        # expected in text content rather than native tool_call deltas.
-        self.tool_calling_mode = tool_calling_mode
-
         # Diagnostic: track last event for debugging
         self.last_event_type: str | None = None
         self.total_events_received: int = 0

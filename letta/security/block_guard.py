@@ -25,29 +25,6 @@ from typing import Optional
 from letta.constants import READ_ONLY_BLOCK_EDIT_ERROR
 
 
-def check_read_only_delete(block_id: str, actor_id: Optional[str] = None) -> None:
-    """Pre-deletion hook: check if a block is read-only before allowing deletion.
-
-    This is designed to be called before block_manager.delete_block_async().
-    The caller must fetch the block first to check its read_only flag.
-
-    Usage:
-        memory_block = agent_state.memory.get_block(label)
-        check_read_only_block(memory_block)  # raises if read_only
-        await block_manager.delete_block_async(block_id=memory_block.id, actor=actor)
-
-    Args:
-        block_id: The block ID to delete (for error messages).
-        actor_id: The actor attempting the deletion (for audit logging, future).
-
-    Raises:
-        ValueError: If the block is read-only.
-    """
-    # This is a placeholder for the actual guard pattern.
-    # Real usage: check block.read_only before calling block_manager.
-    pass
-
-
 def check_read_only_block(block, operation: str = "modify") -> None:
     """Check if a block is read-only and reject the operation if so.
 
