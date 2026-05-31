@@ -210,7 +210,7 @@ class PolicyDecision(BaseModel):
 
     allowed: bool = Field(default=True, description="Whether the tool call is allowed")
     matched_rule: Optional[str] = Field(default=None, description="Name of the matched rule, if any")
-    action: str = Field(default="allow", description="The action taken")
+    action: PolicyAction = Field(default=PolicyAction.ALLOW, description="The action taken")
     reason: str = Field(default="No rules matched; default action applied", description="Why this decision was made")
     audit_entry: Dict[str, Any] = Field(
         default_factory=dict,
@@ -334,13 +334,26 @@ def _evaluate_condition(condition: PolicyCondition, context: Dict[str, Any], rul
         return False
     elif op == PolicyOperator.CONTAINS_SECRET:
         # Check all tool_args values for secrets using entropy + regex
+        # Recursively walk nested dicts/lists to find secrets at any depth
         from letta.security.secret_scanner import SecretPatternChecker
         tool_args = context.get("tool_args", {})
-        for value in tool_args.values():
-            if isinstance(value, str):
-                result = SecretPatternChecker.check(value)
-                if result is not None:
-                    return True
+
+        def _collect_strings(obj):
+            if isinstance(obj, str):
+                return [obj]
+            strings = []
+            if isinstance(obj, dict):
+                for v in obj.values():
+                    strings.extend(_collect_strings(v))
+            elif isinstance(obj, (list, tuple)):
+                for item in obj:
+                    strings.extend(_collect_strings(item))
+            return strings
+
+        for value in _collect_strings(tool_args):
+            result = SecretPatternChecker.check(value)
+            if result is not None:
+                return True
         return False
 
     return False
@@ -456,7 +469,7 @@ class PolicyChecker:
 
                     return PolicyDecision(
                         allowed=allowed,
-                        action=action.value,
+                        action=action,
                         matched_rule=rule.name,
                         reason=rule.message or f"Matched rule '{rule.name}'",
                         audit_entry={
@@ -474,7 +487,7 @@ class PolicyChecker:
             allowed = default_action in (PolicyAction.ALLOW, PolicyAction.AUDIT)
             return PolicyDecision(
                 allowed=allowed,
-                action=default_action.value,
+                action=default_action,
                 matched_rule=None,
                 reason=f"No rules matched; default action is {default_action.value}",
                 audit_entry={"tool_name": tool_name, "matched_rule": None, "action": default_action.value, "reason": "default action"},
@@ -563,6 +576,11 @@ class PolicyChecker:
 # ---------------------------------------------------------------------------
 
 
+def _yaml_required(key: str, rule_data: dict) -> str:
+    """Raise ValueError for missing required keys instead of KeyError."""
+    raise ValueError(f"Missing required key '{key}' in rule: {rule_data}")
+
+
 def load_policies_from_yaml(yaml_text: str) -> ToolCallPolicy:
     """Load a ToolCallPolicy from a YAML string in Agent OS format.
 
@@ -594,7 +612,7 @@ def load_policies_from_yaml(yaml_text: str) -> ToolCallPolicy:
         raise ValueError(f"Invalid YAML: {e}") from e
 
     if not isinstance(data, dict):
-        raise ValueError("YAML must be a mapping (dict), got {type(data).__name__}")
+        raise ValueError(f"YAML must be a mapping (dict), got {type(data).__name__}")
 
     # Parse rules
     rules = []
@@ -607,16 +625,16 @@ def load_policies_from_yaml(yaml_text: str) -> ToolCallPolicy:
             raise ValueError(f"Rule '{rule_data.get('name', '?')}' must have a 'condition' mapping")
 
         condition = PolicyCondition(
-            field=condition_data["field"],
-            operator=PolicyOperator(condition_data["operator"]),
-            value=condition_data["value"],
+            field=condition_data.get("field") or _yaml_required("field", rule_data),
+            operator=PolicyOperator(condition_data.get("operator") or _yaml_required("operator", rule_data)),
+            value=condition_data.get("value") if condition_data.get("value") is not None else _yaml_required("value", rule_data),
         )
 
         action_str = rule_data.get("action", "allow")
         action = PolicyAction(action_str)
 
         rule = PolicyRule(
-            name=rule_data["name"],
+            name=rule_data.get("name") or _yaml_required("name", rule_data),
             condition=condition,
             action=action,
             priority=rule_data.get("priority", 0),

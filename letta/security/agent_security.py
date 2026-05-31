@@ -27,7 +27,7 @@ from letta.log import get_logger
 if TYPE_CHECKING:
     from letta.agents.base_agent import BaseAgent
     from letta.agents.base_agent_v2 import BaseAgentV2
-    from letta.security.policy import PolicyDecision
+    from letta.security.policy import PolicyDecision, PolicyAction
 
 logger = get_logger(__name__)
 
@@ -296,7 +296,7 @@ async def check_policy(agent, tool_name: str, tool_args: dict | None = None, ste
     if decision.allowed:
         agent.policy_checker.record_call(tool_name)
     # Handle AUDIT action: log event + set warning for caller to append to tool result
-    if decision.action == "audit":
+    if decision.action == PolicyAction.AUDIT:
         from letta.security import audit_helpers as _ah
         from letta.security.secret_scanner import SecretPatternChecker
         # Determine the label for the audit event

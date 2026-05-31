@@ -151,7 +151,12 @@ class SandboxToolExecutor(ToolExecutor):
                 tool_execution_result = await sandbox.run(agent_state=agent_state_copy)
 
             # Promote staging files (sandbox tools that wrote to .staging/)
-            await sandbox.promote_staging_files(agent_state=agent_state_copy)
+            # Isolated from tool execution — a promotion failure should not
+            # discard a successful tool result.
+            try:
+                await sandbox.promote_staging_files(agent_state=agent_state_copy)
+            except Exception as e:
+                logger.warning(f"Staging file promotion failed (tool result still valid): {e}")
 
             log_lines = (tool_execution_result.stdout or []) + (tool_execution_result.stderr or [])
             logger.debug("Tool execution log: %s", "\n".join(log_lines))
