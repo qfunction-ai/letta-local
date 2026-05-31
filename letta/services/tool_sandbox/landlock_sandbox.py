@@ -34,7 +34,6 @@ from letta.services.helpers.tool_execution_helper import (
 )
 from letta.services.helpers.tool_parser_helper import parse_stdout_best_effort
 from letta.services.tool_sandbox.base import AsyncToolSandboxBase
-from letta.settings import tool_settings
 from letta.utils import get_friendly_error_msg, parse_stderr_error_msg, safe_create_task
 
 logger = get_logger(__name__)

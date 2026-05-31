@@ -1,6 +1,5 @@
 import os
 import re
-from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
 
 from letta.functions.types import FileOpenRequest

@@ -20,8 +20,6 @@ not a security boundary. The tool executor guards them anyway for
 consistency, but the data model guard doesn't need to.
 """
 
-from typing import Optional
-
 from letta.constants import READ_ONLY_BLOCK_EDIT_ERROR
 
 

@@ -27,6 +27,7 @@ from letta.log import get_logger
 if TYPE_CHECKING:
     from letta.agents.base_agent import BaseAgent
     from letta.agents.base_agent_v2 import BaseAgentV2
+    from letta.agents.token_budget import TokenBudget
     from letta.security.policy import PolicyDecision, PolicyAction
 
 logger = get_logger(__name__)
@@ -282,8 +283,6 @@ async def check_policy(agent, tool_name: str, tool_args: dict | None = None, ste
     Replaces the duplicate _check_policy() methods on BaseAgent and
     BaseAgentV2, and the inline policy check in LettaAgent._step().
     """
-    from letta.security.policy import PolicyDecision
-
     eval_context = {
         "tool_name": tool_name,
         "tool_args": tool_args or {},

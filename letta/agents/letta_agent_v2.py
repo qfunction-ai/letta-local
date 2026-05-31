@@ -1212,7 +1212,6 @@ class LettaAgentV2(BaseAgentV2):
         )
 
         # Security: check tool call policy FIRST
-        from letta.security.policy import PolicyDecision
         policy_decision = await _sec.check_policy(self, tool_call_name, tool_args, step_id, run_id)
         if not policy_decision.allowed:
             tool_execution_result = ToolExecutionResult(

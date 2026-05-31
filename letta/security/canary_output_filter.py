@@ -27,7 +27,6 @@ from letta.log import get_logger
 
 if TYPE_CHECKING:
     from letta.schemas.letta_message import LettaMessageUnion
-    from letta.schemas.letta_response import LettaResponse
 
 logger = get_logger(__name__)
 
