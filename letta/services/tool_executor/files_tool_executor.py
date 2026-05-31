@@ -553,8 +553,6 @@ class LettaFileToolExecutor(ToolExecutor):
         promoted staging files and any other files on disk that aren't
         registered in the FileAgent table yet.
         """
-        from pathlib import Path as FilePath
-
         from letta.functions.function_sets.file_persistence import _agent_file_dir
 
         base_dir = _agent_file_dir(agent_state)

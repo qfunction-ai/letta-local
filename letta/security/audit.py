@@ -139,7 +139,7 @@ async def audit_log(
     actor,
     event_type: str,
     event_data: dict,
-    step_id: str,
+    step_id: str | None,
     run_id: str | None,
     label: str = "",
     actor_id: str | None = None,

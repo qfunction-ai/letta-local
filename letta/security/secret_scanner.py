@@ -32,21 +32,6 @@ try:
 except ImportError:
     import re
 
-from letta.log import get_logger
-
-logger = get_logger(__name__)
-
-# ---------------------------------------------------------------------------
-# Entropy detection (primary signal)
-# ---------------------------------------------------------------------------
-
-# Variable names that suggest a secret value. Used by the AST visitor
-# in Delta's code_safety.py; kept here for consistency.
-_KEY_LIKE_NAMES = re.compile(
-    r"(?i)(?:api[_-]?key|apikey|access[_-]?key|secret|token|"
-    r"password|credential|private[_-]?key|auth[_-]?token|bearer)",
-)
-
 _ENTROPY_THRESHOLD = 4.5   # bits per character
 _ENTROPY_MIN_LENGTH = 20   # minimum string length to check
 

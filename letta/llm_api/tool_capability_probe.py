@@ -16,8 +16,6 @@ Both sync and async probe methods are provided. The async versions use httpx
 and should be preferred in the agent loop.
 """
 
-import asyncio
-import json
 import threading
 from typing import Optional
 
@@ -228,9 +226,6 @@ class ToolCapabilityCache:
             payload["max_tokens"] = 500
 
         headers = {"Content-Type": "application/json"}
-        if llm_config.model_endpoint:
-            # Some providers require an API key even if it's just "ollama"
-            pass
 
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=30)

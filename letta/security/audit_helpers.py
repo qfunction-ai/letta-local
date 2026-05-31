@@ -14,7 +14,7 @@ Usage in agent files:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from letta.security.audit import audit_log, classify_tool, SecurityEventType
 
