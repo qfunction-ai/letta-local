@@ -283,6 +283,8 @@ async def check_policy(agent, tool_name: str, tool_args: dict | None = None, ste
     Replaces the duplicate _check_policy() methods on BaseAgent and
     BaseAgentV2, and the inline policy check in LettaAgent._step().
     """
+    from letta.security.policy import PolicyAction
+
     eval_context = {
         "tool_name": tool_name,
         "tool_args": tool_args or {},
