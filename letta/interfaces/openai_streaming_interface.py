@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from opentelemetry.trace import Span
 
+    from letta.schemas.llm_config import LLMConfig
     from letta.schemas.usage import LettaUsageStatistics
 
 from openai import AsyncStream

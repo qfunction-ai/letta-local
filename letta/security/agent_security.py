@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from letta.agents.base_agent import BaseAgent
     from letta.agents.base_agent_v2 import BaseAgentV2
     from letta.agents.token_budget import TokenBudget
-    from letta.security.policy import PolicyDecision, PolicyAction
+    from letta.security.policy import PolicyDecision
 
 logger = get_logger(__name__)
 
