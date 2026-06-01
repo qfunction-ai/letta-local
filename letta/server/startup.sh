@@ -1,10 +1,9 @@
 #!/bin/sh
 set -e  # Exit on any error
 
-# Force DNS over TCP (Landlock sandbox blocks UDP; glibc resolver needs TCP)
-# This must be done at runtime, not during build, because /etc/resolv.conf
-# is read-only in Docker BuildKit.
-echo "options use-vc" >> /etc/resolv.conf 2>/dev/null || true
+# DNS-over-TCP is now handled by RES_OPTIONS=use-vc in the compose
+# environment, which glibc reads at resolver init. No need to write
+# to /etc/resolv.conf at runtime.
 
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8283}"

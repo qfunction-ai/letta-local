@@ -159,7 +159,10 @@ def generate_openapi_schema(app: FastAPI):
     ]:
         if settings.cors_origins:
             docs["servers"] = [{"url": host} for host in settings.cors_origins]
-        Path(f"openapi_{name}.json").write_text(json.dumps(docs, indent=2))
+        try:
+            Path(f"openapi_{name}.json").write_text(json.dumps(docs, indent=2))
+        except OSError:
+            pass  # Read-only filesystem — skip schema file write
 
 
 # middleware that only allows requests to pass through if user provides a password thats randomly generated and stored in memory
