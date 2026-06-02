@@ -178,6 +178,14 @@ class LettaFileToolExecutor(ToolExecutor):
             )
 
             if not file_agent:
+                # Filesystem fallback: file may exist on disk but not in the DB
+                # (e.g. promoted staging files, files written by tools)
+                fs_content = self._open_file_from_filesystem(agent_state, file_name, start, end)
+                if fs_content is not None:
+                    visible_content = fs_content
+                    # No LRU tracking for filesystem-only files
+                    opened_files.append(file_name)
+                    continue
                 raise ValueError(
                     f"{file_name} not attached - did you get the filename correct? Currently you have the following files attached: {attached_file_names}"
                 )
@@ -538,6 +546,75 @@ class LettaFileToolExecutor(ToolExecutor):
                 results.append("No more matches to show.")
 
         return "\n".join(results)
+
+    def _open_file_from_filesystem(
+        self,
+        agent_state: AgentState,
+        file_name: str,
+        start: Optional[int],
+        end: Optional[int],
+    ) -> Optional[str]:
+        """Read a file from the agent's filesystem directory.
+
+        Returns the visible content string with line numbers, or None if
+        the file doesn't exist on disk. Used as fallback when the file
+        isn't in the FileAgent DB table (e.g. promoted staging files,
+        files written by tools).
+
+        Output format matches LineChunker: numbered lines with a header.
+        """
+        from letta.functions.function_sets.file_persistence import _agent_file_dir
+
+        base_dir = _agent_file_dir(agent_state)
+        file_path = os.path.join(base_dir, file_name)
+
+        # Prevent path traversal
+        if not os.path.realpath(file_path).startswith(os.path.realpath(base_dir)):
+            return None
+
+        if not os.path.isfile(file_path):
+            return None
+
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+        except OSError:
+            return None
+
+        # Strip trailing newlines (matching LineChunker behavior)
+        lines = [line.rstrip("\n") for line in lines]
+
+        total_lines = len(lines)
+        line_offset = 0
+
+        if start is not None or end is not None:
+            if start is not None:
+                if start >= total_lines:
+                    raise ValueError(
+                        f"File {file_name} has only {total_lines} lines, but requested offset {start + 1} is out of range"
+                    )
+                line_offset = max(0, start)
+
+            if end is not None:
+                end = min(end, total_lines)
+
+            lines = lines[line_offset:end]
+        else:
+            line_offset = 0
+
+        # Format with line numbers (1-indexed, matching LineChunker output)
+        numbered = [f"{i + line_offset + 1}: {line}" for i, line in enumerate(lines)]
+
+        # Add header (matching LineChunker metadata format)
+        if start is not None and end is not None:
+            header = f"[Viewing lines {start + 1} to {end} (out of {total_lines} lines)]"
+        elif start is not None:
+            header = f"[Viewing lines {start + 1} to end (out of {total_lines} lines)]"
+        else:
+            header = f"[Viewing file start (out of {total_lines} lines)]"
+
+        numbered.insert(0, header)
+        return "\n".join(numbered)
 
     async def _grep_files_filesystem(
         self,
