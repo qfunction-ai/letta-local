@@ -49,28 +49,26 @@ ARG NODE_VERSION=22
 ARG OTEL_VERSION=0.96.0
 ARG TARGETARCH
 
+RUN apt-get update && \
+    apt-get install -y curl python3 python3-venv libpq-dev redis-server && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - && \
+    apt-get install -y nodejs && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
 RUN set -eux; \
-    # Map TARGETARCH to the naming used by otel release assets
     case "${TARGETARCH:-amd64}" in \
       arm64|aarch64) OTEL_ARCH=arm64 ;; \
       amd64|x86_64|x64) OTEL_ARCH=amd64 ;; \
       *) OTEL_ARCH=amd64 ;; \
     esac; \
-    apt-get update && \
-    # Install curl, Python, and PostgreSQL client libraries
-    apt-get install -y curl python3 python3-venv libpq-dev redis-server && \
-    # Install Node.js
-    curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - && \
-    apt-get install -y nodejs && \
-    # Download and install OpenTelemetry Collector for the target architecture
     OTEL_FILENAME="otelcol-contrib_${OTEL_VERSION}_linux_${OTEL_ARCH}.tar.gz"; \
     echo "Downloading https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${OTEL_VERSION}/${OTEL_FILENAME}"; \
     curl -L "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${OTEL_VERSION}/${OTEL_FILENAME}" -o /tmp/otel-collector.tar.gz && \
     tar xzf /tmp/otel-collector.tar.gz -C /usr/local/bin && \
     rm /tmp/otel-collector.tar.gz && \
-    mkdir -p /etc/otel && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    mkdir -p /etc/otel
 
 # Add OpenTelemetry Collector configs
 COPY otel/otel-collector-config-file.yaml /etc/otel/config-file.yaml
