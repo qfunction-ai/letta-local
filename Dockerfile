@@ -102,7 +102,8 @@ COPY --from=builder /app .
 # The user is created here so the image supports both modes.
 RUN groupadd --gid 1000 letta && \
     useradd --uid 1000 --gid letta --shell /bin/bash --create-home letta && \
-    mkdir -p /home/letta/.letta
+    mkdir -p /home/letta/.letta /data/logs && \
+    chown -R letta:letta /home/letta/.letta /data/logs
 
 # Copy initialization SQL if it exists
 COPY init.sql /docker-entrypoint-initdb.d/
