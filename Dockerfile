@@ -94,7 +94,17 @@ WORKDIR /app
 COPY --from=builder /app .
 
 # Force DNS over TCP at runtime (Landlock sandbox blocks UDP; glibc resolver needs TCP)
-# Cannot write /etc/resolv.conf during build (read-only in BuildKit), so we do it in startup.sh
+# Handled by RES_OPTIONS=use-vc in the compose environment — no /etc/resolv.conf write needed.
+
+# Create non-root user for running the Letta server.
+# When using external Postgres/Redis (LETTA_PG_URI + LETTA_REDIS_HOST),
+# set user: "1000:1000" and HOME=/home/letta in docker-compose.yml.
+# When using internal Postgres/Redis, the container must run as root
+# (the pgvector entrypoint uses gosu to drop to postgres).
+# The user is created here so the image supports both modes.
+RUN groupadd --gid 1000 letta && \
+    useradd --uid 1000 --gid letta --shell /bin/bash --create-home letta && \
+    mkdir -p /home/letta/.letta
 
 # Copy initialization SQL if it exists
 COPY init.sql /docker-entrypoint-initdb.d/
