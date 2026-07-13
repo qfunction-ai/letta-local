@@ -36,6 +36,7 @@ from letta.helpers.tool_execution_helper import enable_strict_mode
 from letta.llm_api.llm_client import LLMClient
 from letta.local_llm.constants import INNER_THOUGHTS_KWARG
 from letta.agents import agent_hardening as _ah
+from letta.agents.token_budget import enforce_budget_override
 from letta.security import agent_security as _sec
 from letta.security import audit_helpers as _ah_audit
 from letta.security import output_filter as _outf
@@ -1455,6 +1456,7 @@ class LettaAgentV3(LettaAgentV2):
                 finish_reason=llm_adapter.finish_reason,
                 active_llm_config=active_llm_config,
             )
+            enforce_budget_override(self)
 
             # extend trackers with new messages
             self.response_messages.extend(new_messages)

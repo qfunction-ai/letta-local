@@ -376,6 +376,7 @@ class LettaAgent(BaseAgent):
                     budget_decision = self.token_budget.check(
                         step_tokens=response.usage.prompt_tokens + response.usage.completion_tokens,
                         total_run_tokens=usage.total_tokens,
+                        current_context_tokens=response.usage.prompt_tokens,
                     )
                     if budget_decision.exceeded:
                         self.stop_reason = LettaStopReason(stop_reason=StopReasonType.max_tokens_exceeded.value)
