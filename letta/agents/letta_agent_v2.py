@@ -28,6 +28,7 @@ from letta.llm_api.llm_client import LLMClient
 from letta.local_llm.constants import INNER_THOUGHTS_KWARG
 from letta.log import get_logger
 from letta.agents import agent_hardening as _hard
+from letta.agents.token_budget import enforce_budget_override
 from letta.security import agent_security as _sec
 from letta.security import audit_helpers as _ah
 from letta.security import output_filter as _outf
@@ -672,6 +673,7 @@ class LettaAgentV2(BaseAgentV2):
                 is_denial=(approval_response.approve == False) if approval_response is not None else False,
                 denial_reason=approval_response.denial_reason if approval_response is not None else None,
             )
+            enforce_budget_override(self)
 
             new_message_idx = len(input_messages_to_persist) if input_messages_to_persist else 0
             self.response_messages.extend(persisted_messages[new_message_idx:])
@@ -795,6 +797,7 @@ class LettaAgentV2(BaseAgentV2):
         self.last_function_response = None
         self.response_messages = []
         self.override_system: str | None = None
+        self._budget_exceeded: bool = False
 
     async def _check_credits(self) -> bool:
         """Check if the organization still has credits. Returns True if OK or not configured."""
@@ -1120,11 +1123,13 @@ class LettaAgentV2(BaseAgentV2):
         budget_decision = self.token_budget.check(
             step_tokens=step_usage_stats.prompt_tokens + step_usage_stats.completion_tokens,
             total_run_tokens=self.usage.total_tokens,
+            current_context_tokens=step_usage_stats.prompt_tokens,
         )
         if budget_decision.exceeded:
             from letta.schemas.letta_stop_reason import LettaStopReason, StopReasonType
             self.stop_reason = LettaStopReason(stop_reason=StopReasonType.max_tokens_exceeded.value)
             self.should_continue = False
+            self._budget_exceeded = True
             self.logger.warning(f"Token budget exceeded: {budget_decision.reason}")
         # Aggregate cache and reasoning token fields (handle None values)
         if step_usage_stats.cached_input_tokens is not None:

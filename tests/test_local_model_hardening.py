@@ -3,7 +3,7 @@
 import pytest
 
 from letta.agents.circuit_breaker import AgentCircuitBreaker
-from letta.agents.token_budget import TokenBudget, TokenBudgetDecision
+from letta.agents.token_budget import TokenBudget, TokenBudgetDecision, enforce_budget_override
 from letta.local_llm.token_correction import (
     DEFAULT_TOKEN_CORRECTION,
     LiveTokenCalibration,
@@ -178,6 +178,85 @@ class TestTokenBudget:
     def test_default_context_window_ratio_is_0_7(self):
         tb = TokenBudget(context_window_limit=8192)
         assert tb.context_window_ratio == 0.7
+
+    def test_context_window_uses_current_context_tokens(self):
+        """Context window check should use current_context_tokens, not cumulative."""
+        tb = TokenBudget(context_window_limit=10000, context_window_ratio=0.7)
+        # effective_limit = 7000
+        # Cumulative is 20000 (would exceed), but actual context is only 4000
+        d = tb.check(step_tokens=500, total_run_tokens=20000, current_context_tokens=4000)
+        assert not d.exceeded
+
+    def test_context_window_exceeded_with_current_context_tokens(self):
+        """Context window check triggers when current context exceeds limit."""
+        tb = TokenBudget(context_window_limit=10000, context_window_ratio=0.7)
+        # effective_limit = 7000; current context is 7500
+        d = tb.check(step_tokens=500, total_run_tokens=20000, current_context_tokens=7500)
+        assert d.exceeded
+        assert d.budget_type == "context_window"
+        assert "context_tokens=7500" in d.reason
+
+    def test_context_window_none_falls_back_to_total_run_tokens(self):
+        """When current_context_tokens is None, falls back to legacy behavior."""
+        tb = TokenBudget(context_window_limit=10000, context_window_ratio=0.7)
+        d = tb.check(step_tokens=100, total_run_tokens=7500, current_context_tokens=None)
+        assert d.exceeded
+        assert "context_tokens=7500" in d.reason
+
+    def test_context_window_reason_shows_context_tokens_not_run_tokens(self):
+        """Reason string should say context_tokens, not run_tokens."""
+        tb = TokenBudget(context_window_limit=10000, context_window_ratio=0.7)
+        d = tb.check(step_tokens=100, total_run_tokens=20000, current_context_tokens=7500)
+        assert d.exceeded
+        assert "context_tokens=7500" in d.reason
+        assert "run_tokens=20000" not in d.reason
+
+
+class TestEnforceBudgetOverride:
+    """Test the enforce_budget_override helper for Bug 1 fix."""
+
+    def test_no_override_when_flag_not_set(self):
+        class FakeAgent:
+            should_continue = True
+            stop_reason = None
+            _budget_exceeded = False
+
+        agent = FakeAgent()
+        enforce_budget_override(agent)
+        assert agent.should_continue is True
+        assert agent.stop_reason is None
+
+    def test_override_stops_agent(self):
+        class FakeAgent:
+            should_continue = True
+            stop_reason = None
+            _budget_exceeded = True
+
+        agent = FakeAgent()
+        enforce_budget_override(agent)
+        assert agent.should_continue is False
+        assert agent.stop_reason is not None
+
+    def test_override_preserves_existing_stop_reason(self):
+        class FakeAgent:
+            should_continue = True
+            stop_reason = "already_set"
+            _budget_exceeded = True
+
+        agent = FakeAgent()
+        enforce_budget_override(agent)
+        assert agent.should_continue is False
+        assert agent.stop_reason == "already_set"
+
+    def test_override_handles_missing_flag(self):
+        class FakeAgent:
+            should_continue = True
+            stop_reason = None
+
+        agent = FakeAgent()
+        # Should not raise even though _budget_exceeded is not set
+        enforce_budget_override(agent)
+        assert agent.should_continue is True
 
 
 class TestTokenBudgetDecision:

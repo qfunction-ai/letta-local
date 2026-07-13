@@ -71,7 +71,12 @@ class TokenBudget:
         self.context_window_ratio = context_window_ratio
         self._run_tokens_used: int = 0
 
-    def check(self, step_tokens: int, total_run_tokens: int) -> TokenBudgetDecision:
+    def check(
+        self,
+        step_tokens: int,
+        total_run_tokens: int,
+        current_context_tokens: int | None = None,
+    ) -> TokenBudgetDecision:
         """Check if the token budget is exceeded after a step.
 
         Called after each LLM call where usage.total_tokens is updated.
@@ -79,6 +84,11 @@ class TokenBudget:
         Args:
             step_tokens: prompt_tokens + completion_tokens for this step.
             total_run_tokens: cumulative total_tokens for the run.
+            current_context_tokens: prompt_tokens from the most recent LLM
+                call, representing the actual context size. If None, falls
+                back to total_run_tokens (legacy behavior). Used only for
+                the context window check — the per-step and per-run checks
+                use step_tokens and total_run_tokens respectively.
 
         Returns:
             TokenBudgetDecision with exceeded flag and reason.
@@ -102,14 +112,19 @@ class TokenBudget:
             )
 
         # 3. Context window check — the VRAM budget for local models
-        #    This is the most important check for local inference users.
+        #    Uses current_context_tokens (prompt_tokens from the latest LLM
+        #    call) instead of the cumulative total, because the cumulative
+        #    sum double-counts earlier context massively. The current
+        #    context size is what determines whether the next LLM call will
+        #    OOM the model.
         if self.context_window_limit is not None:
             effective_limit = int(self.context_window_limit * self.context_window_ratio)
-            if total_run_tokens > effective_limit:
+            context_tokens = current_context_tokens if current_context_tokens is not None else total_run_tokens
+            if context_tokens > effective_limit:
                 return TokenBudgetDecision(
                     exceeded=True,
                     reason=(
-                        f"run_tokens={total_run_tokens} exceeds "
+                        f"context_tokens={context_tokens} exceeds "
                         f"{self.context_window_ratio:.0%} of "
                         f"context_window={self.context_window_limit} "
                         f"(effective_limit={effective_limit})"
@@ -123,3 +138,22 @@ class TokenBudget:
     def run_tokens_used(self) -> int:
         """Total tokens consumed so far in this run."""
         return self._run_tokens_used
+
+
+def enforce_budget_override(agent: object) -> None:
+    """Re-apply a token-budget stop decision after _handle_ai_response.
+
+    In V2/V3 agents, _update_global_usage_stats() sets should_continue=False
+    and stop_reason when the budget is exceeded. But the subsequent
+    _handle_ai_response() call returns (messages, should_continue, stop_reason)
+    and overwrites both fields, throwing away the budget decision.
+
+    This helper checks the _budget_exceeded flag (set by
+    _update_global_usage_stats) and re-applies the stop decision.
+    Call it immediately after _handle_ai_response returns.
+    """
+    if getattr(agent, "_budget_exceeded", False):
+        agent.should_continue = False
+        if agent.stop_reason is None:
+            from letta.schemas.letta_stop_reason import LettaStopReason, StopReasonType
+            agent.stop_reason = LettaStopReason(stop_reason=StopReasonType.max_tokens_exceeded.value)
