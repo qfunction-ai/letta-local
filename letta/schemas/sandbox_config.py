@@ -105,8 +105,8 @@ class LandlockSandboxConfig(BaseModel):
     """
     # Filesystem access
     allowed_read_paths: List[str] = Field(
-        default_factory=lambda: ["/usr", "/lib", "/lib64", "/etc", "/app", "/extra-packages"],
-        description="Paths allowed for read access (recursively). Includes /app for the Python venv and /extra-packages for pip-sidecar packages.",
+        default_factory=lambda: ["/usr", "/lib", "/lib64", "/etc", "/app", "/extra-packages", "/data/config"],
+        description="Paths allowed for read access (recursively). Includes /app for the Python venv and /extra-packages for pip-sidecar packages. /data/config for Delta's read-only config volume.",
     )
     allowed_write_paths: List[str] = Field(
         default_factory=lambda: [],  # Set dynamically from tool_exec_dir
