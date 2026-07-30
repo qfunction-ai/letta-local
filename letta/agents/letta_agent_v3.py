@@ -587,6 +587,9 @@ class LettaAgentV3(LettaAgentV2):
                 input_messages_to_persist = [input_messages_to_persist[0]]
 
             self.in_context_messages = in_context_messages
+            # Parse skill state and add dynamic required-tool rules
+            from letta.agents.skill_state import parse_and_strip_skill_state
+            parse_and_strip_skill_state(self.in_context_messages, self.tool_rules_solver)
             credit_task = None
             for i in range(max_steps):
                 if i == 1 and follow_up_messages:
