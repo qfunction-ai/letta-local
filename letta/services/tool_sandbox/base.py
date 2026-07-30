@@ -6,7 +6,7 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
-from letta.constants import LETTA_MULTI_AGENT_TOOL_MODULE_NAME
+from letta.constants import LETTA_FILE_PERSISTENCE_TOOL_MODULE_NAME, LETTA_MULTI_AGENT_TOOL_MODULE_NAME
 from letta.functions.helpers import generate_model_from_args_json_schema
 from letta.log import get_logger
 from letta.otel.tracing import trace_method
@@ -72,6 +72,9 @@ class AsyncToolSandboxBase(ABC):
 
             if not self.tool.source_code and self.tool.tool_type == ToolType.LETTA_MULTI_AGENT_CORE:
                 module = importlib.import_module(LETTA_MULTI_AGENT_TOOL_MODULE_NAME)
+                self.tool.source_code = inspect.getsource(module)
+            elif not self.tool.source_code and self.tool.tool_type == ToolType.LETTA_FILE_PERSISTENCE_CORE:
+                module = importlib.import_module(LETTA_FILE_PERSISTENCE_TOOL_MODULE_NAME)
                 self.tool.source_code = inspect.getsource(module)
 
             # TypeScript tools do not support agent_state or agent_id injection as function params
