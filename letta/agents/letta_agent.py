@@ -240,6 +240,12 @@ class LettaAgent(BaseAgent):
         initial_messages = new_in_context_messages
         in_context_messages = current_in_context_messages
         tool_rules_solver = ToolRulesSolver(agent_state.tool_rules)
+        # Parse skill state and add dynamic required-tool rules
+        from letta.agents.skill_state import parse_and_strip_skill_state
+        parse_and_strip_skill_state(
+            in_context_messages + initial_messages,
+            tool_rules_solver,
+        )
         await _sec.load_tool_call_policy(self)
         self.agent_state = agent_state
         await _sec.load_canary(self)

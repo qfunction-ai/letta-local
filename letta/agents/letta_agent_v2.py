@@ -392,6 +392,9 @@ class LettaAgentV2(BaseAgentV2):
                 input_messages, self.agent_state, self.message_manager, self.actor, run_id
             )
             in_context_messages = in_context_messages + input_messages_to_persist
+            # Parse skill state and add dynamic required-tool rules
+            from letta.agents.skill_state import parse_and_strip_skill_state
+            parse_and_strip_skill_state(in_context_messages, self.tool_rules_solver)
             credit_task = None
             for i in range(max_steps):
                 # Await credit check from previous iteration before running next step
