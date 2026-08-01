@@ -49,6 +49,11 @@ class ToolRulesSolver(BaseModel):
         default_factory=list, description="Tool rules that trigger an approval request for human-in-the-loop.", exclude=True
     )
     tool_call_history: list[str] = Field(default_factory=list, description="History of tool calls, updated with each tool call.")
+    previously_called_tools: set[str] = Field(
+        default_factory=set,
+        description="Tool calls from previous messages in the same skill session. Used by RequiredBeforeExitToolRule to avoid re-requiring tools already called.",
+        exclude=True,
+    )
 
     # Last-evaluated prefilled args cache (per step)
     last_prefilled_args_by_tool: dict[str, dict] = Field(
@@ -92,6 +97,10 @@ class ToolRulesSolver(BaseModel):
     def clear_tool_history(self):
         """Clear the history of tool calls."""
         self.tool_call_history.clear()
+
+    def mark_previously_called(self, tool_name: str):
+        """Mark a tool as called in a previous message of the current skill session."""
+        self.previously_called_tools.add(tool_name)
 
     def get_allowed_tool_names(
         self, available_tools: set[ToolName], error_on_empty: bool = True, last_function_response: str | None = None
@@ -201,7 +210,7 @@ class ToolRulesSolver(BaseModel):
             return []  # No required tools means no uncalled tools
 
         required_tool_names = {rule.tool_name for rule in self.required_before_exit_tool_rules}
-        called_tool_names = set(self.tool_call_history)
+        called_tool_names = set(self.tool_call_history) | self.previously_called_tools
 
         # Get required tools that are uncalled AND available
         return list((required_tool_names & available_tools) - called_tool_names)
