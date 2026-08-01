@@ -5,7 +5,7 @@ import logging
 import re
 
 from letta.helpers.tool_rule_solver import ToolRulesSolver
-from letta.schemas.letta_message_content import TextContent
+from letta.schemas.letta_message_content import TextContent, ToolCallContent
 from letta.schemas.message import Message, MessageRole
 from letta.schemas.tool_rule import RequiredBeforeExitToolRule
 
@@ -91,5 +91,28 @@ def parse_and_strip_skill_state(
                         f"Added RequiredBeforeExitToolRule for '{tool_name}' "
                         f"from skill '{skill_name}'"
                     )
+
+        # Pre-populate previously_called_tools by scanning message history
+        # for tool calls from previous messages in this skill session.
+        required_names = {r.tool_name for r in tool_rules_solver.required_before_exit_tool_rules}
+        if required_names:
+            for hist_msg in messages:
+                # Check OpenAI-format tool_calls on assistant messages
+                if hist_msg.tool_calls:
+                    for tc in hist_msg.tool_calls:
+                        tool_name = tc.function.name
+                        if tool_name in required_names:
+                            tool_rules_solver.mark_previously_called(tool_name)
+                # Check ToolCallContent in message content
+                if hist_msg.content and isinstance(hist_msg.content, list):
+                    for c in hist_msg.content:
+                        if isinstance(c, ToolCallContent):
+                            if c.name in required_names:
+                                tool_rules_solver.mark_previously_called(c.name)
+
+            if tool_rules_solver.previously_called_tools:
+                logger.info(
+                    f"Pre-registered previously called tools: {tool_rules_solver.previously_called_tools}"
+                )
 
         break  # Only process the first message with skill_state
