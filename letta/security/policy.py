@@ -39,6 +39,8 @@ except ImportError:
     import re  # fallback — Layer 2 validation still rejects pathological patterns
 from enum import Enum
 from typing import Any, Dict, List, Optional
+import hashlib
+import json
 
 import yaml
 from pydantic import BaseModel, Field
@@ -100,6 +102,7 @@ class PolicyOperator(str, Enum):
     MATCHES = "matches"  # regex
     CONTAINS = "contains"  # substring
     CONTAINS_SECRET = "contains_secret"  # entropy + regex check on tool args
+    CONTAINS_INJECTION = "contains_injection"  # prompt injection pattern check on tool args
 
 
 class PolicyCondition(BaseModel):
@@ -163,6 +166,20 @@ class PolicyDefaults(BaseModel):
     timeout_seconds: Optional[int] = Field(default=None, description="Timeout limit (future)")
 
 
+class LoopDetectionConfig(BaseModel):
+    """Configuration for tool loop detection.
+
+    Detects when the same tool is called with the same arguments
+    repeatedly within a sliding window of recent calls. This catches
+    agents stuck in loops that would not be caught by per-tool rate
+    limits alone (e.g., calling web_search with the same query 5 times
+    when the per-tool limit is 50).
+    """
+    enabled: bool = Field(default=False, description="Enable tool loop detection.")
+    window: int = Field(default=5, ge=2, description="Number of recent calls to examine.")
+    threshold: int = Field(default=3, ge=2, description="Number of identical calls within the window that triggers a denial.")
+
+
 class ToolCallPolicy(BaseModel):
     """Per-agent security policy for tool calls.
 
@@ -197,6 +214,10 @@ class ToolCallPolicy(BaseModel):
     defaults: Optional[PolicyDefaults] = Field(
         default=None,
         description="Default policy settings when no rule matches.",
+    )
+    loop_detection: Optional[LoopDetectionConfig] = Field(
+        default=None,
+        description="Tool loop detection configuration.",
     )
 
 
@@ -356,6 +377,30 @@ def _evaluate_condition(condition: PolicyCondition, context: Dict[str, Any], rul
                 return True
         return False
 
+    elif op == PolicyOperator.CONTAINS_INJECTION:
+        # Check all tool_args values for prompt injection patterns
+        # Recursively walk nested dicts/lists to find injection at any depth
+        from letta.security.content_validator import ContentValidator
+        tool_args = context.get("tool_args", {})
+
+        def _collect_injection_strings(obj):
+            if isinstance(obj, str):
+                return [obj]
+            strings = []
+            if isinstance(obj, dict):
+                for v in obj.values():
+                    strings.extend(_collect_injection_strings(v))
+            elif isinstance(obj, (list, tuple)):
+                for item in obj:
+                    strings.extend(_collect_injection_strings(item))
+            return strings
+
+        for value in _collect_injection_strings(tool_args):
+            result = ContentValidator.check(value)
+            if result is not None:
+                return True
+        return False
+
     return False
 
 
@@ -393,6 +438,7 @@ class PolicyChecker:
         self.deny_all = False  # Set to True when policy load fails (fail-closed)
         self._call_counts: Dict[str, int] = {}  # tool_name -> count (per-run)
         self._total_calls: int = 0  # total tool calls this run
+        self._call_window: list[tuple[str, str]] = []  # (tool_name, args_hash) for loop detection
 
     def check(self, tool_name: str, eval_context: Optional[Dict[str, Any]] = None) -> PolicyDecision:
         """Check a tool call against the security policy.
@@ -445,6 +491,12 @@ class PolicyChecker:
             rate_limit_decision = self._check_rate_limits(tool_name)
             if rate_limit_decision is not None:
                 return rate_limit_decision
+
+        # --- Loop detection (after rate limiting, before rule evaluation) ---
+        if eval_context is not None:
+            loop_decision = self._check_loop_detection(tool_name, eval_context)
+            if loop_decision is not None:
+                return loop_decision
 
         # --- Rule evaluation (Agent OS-compatible) ---
         if eval_context is not None and self.policy.rules:
@@ -541,10 +593,58 @@ class PolicyChecker:
 
         return None
 
-    def record_call(self, tool_name: str) -> None:
-        """Record a tool call for rate limiting. Called after a successful policy check."""
+    def _check_loop_detection(self, tool_name: str, eval_context: Optional[Dict[str, Any]]) -> Optional[PolicyDecision]:
+        """Check for tool call loops — same tool + same args repeated within a window.
+
+        Returns a DENY decision if the loop threshold is exceeded, None otherwise.
+        """
+        config = self.policy.loop_detection
+        if config is None or not config.enabled:
+            return None
+
+        # Hash the args for comparison (avoid storing raw args)
+        tool_args = eval_context.get("tool_args", {}) if eval_context else {}
+        args_hash = hashlib.sha256(
+            json.dumps(tool_args, sort_keys=True, default=str).encode()
+        ).hexdigest()[:16]
+        current = (tool_name, args_hash)
+
+        # Count occurrences of current call in the window
+        count = sum(1 for c in self._call_window if c == current)
+
+        if count >= config.threshold - 1:  # -1 because we haven't appended yet
+            return PolicyDecision(
+                allowed=False,
+                action="deny",
+                matched_rule="loop_detection",
+                reason=f"Tool loop detected: '{tool_name}' called with same args {count + 1} times within window of {config.window}",
+                audit_entry={
+                    "tool_name": tool_name,
+                    "matched_rule": "loop_detection",
+                    "action": "deny",
+                    "reason": f"Loop: {count + 1}/{config.threshold} identical calls in window {config.window}",
+                },
+            )
+
+        return None
+
+    def record_call(self, tool_name: str, tool_args: dict | None = None) -> None:
+        """Record a tool call for rate limiting and loop detection.
+
+        Called after a successful policy check.
+        """
         self._call_counts[tool_name] = self._call_counts.get(tool_name, 0) + 1
         self._total_calls += 1
+        # Loop detection tracking
+        config = self.policy.loop_detection
+        if config is not None and config.enabled:
+            args_hash = hashlib.sha256(
+                json.dumps(tool_args or {}, sort_keys=True, default=str).encode()
+            ).hexdigest()[:16]
+            self._call_window.append((tool_name, args_hash))
+            # Trim to window size
+            if len(self._call_window) > config.window:
+                self._call_window = self._call_window[-config.window:]
 
     def get_call_count(self, tool_name: str) -> int:
         """Get the number of calls made to a specific tool this run."""
@@ -554,6 +654,7 @@ class PolicyChecker:
         """Reset per-run call counts. Called at the start of each agent run."""
         self._call_counts.clear()
         self._total_calls = 0
+        self._call_window.clear()
 
     def update_policy(self, policy: ToolCallPolicy) -> None:
         """Update the policy (e.g., after loading from DB)."""
@@ -660,10 +761,23 @@ def load_policies_from_yaml(yaml_text: str) -> ToolCallPolicy:
     # Parse max_calls_per_tool (not in Agent OS schema — our extension)
     max_calls_per_tool = data.get("max_calls_per_tool", {})
 
+    # Parse loop_detection (not in Agent OS schema — our extension)
+    loop_detection_data = data.get("loop_detection")
+    loop_detection = None
+    if loop_detection_data is not None:
+        if not isinstance(loop_detection_data, dict):
+            raise ValueError(f"'loop_detection' must be a mapping, got {type(loop_detection_data).__name__}")
+        loop_detection = LoopDetectionConfig(
+            enabled=loop_detection_data.get("enabled", False),
+            window=loop_detection_data.get("window", 5),
+            threshold=loop_detection_data.get("threshold", 3),
+        )
+
     return ToolCallPolicy(
         rules=rules,
         defaults=defaults,
         max_calls_per_tool=max_calls_per_tool,
+        loop_detection=loop_detection,
     )
 
 

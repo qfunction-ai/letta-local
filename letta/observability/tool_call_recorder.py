@@ -38,6 +38,38 @@ _SENSITIVE_ARG_KEYS = frozenset({
 })
 
 
+def _parse_retrieval_results(tool_result: Any) -> Optional[list[dict]]:
+    """Extract passage IDs and similarity scores from archival_memory_search results.
+
+    The tool returns a list of dicts with 'id', 'content', 'tags',
+    and optionally 'relevance' (with rrf_score, vector_rank, fts_rank).
+    This function extracts just the audit-relevant fields: passage ID and
+    similarity scores. Returns None if the result is not parseable.
+
+    Fail-open: any exception returns None.
+    """
+    try:
+        if not isinstance(tool_result, list):
+            return None
+        results = []
+        for item in tool_result:
+            if not isinstance(item, dict) or "id" not in item:
+                continue
+            entry = {"passage_id": item["id"]}
+            relevance = item.get("relevance", {})
+            if isinstance(relevance, dict):
+                if relevance.get("rrf_score") is not None:
+                    entry["rrf_score"] = relevance["rrf_score"]
+                if relevance.get("vector_rank") is not None:
+                    entry["vector_rank"] = relevance["vector_rank"]
+                if relevance.get("fts_rank") is not None:
+                    entry["fts_rank"] = relevance["fts_rank"]
+            results.append(entry)
+        return results if results else None
+    except Exception:
+        return None
+
+
 def _sanitize_tool_args(tool_args: Optional[dict]) -> Optional[dict]:
     """Redact known-sensitive keys from tool_args before DB storage.
 
@@ -86,13 +118,26 @@ class ToolCallRecorder:
         success: bool,
         error: Optional[str] = None,
         request_id: Optional[str] = None,
+        retrieval_results: Optional[list[dict]] = None,
     ) -> None:
-        """Persist a ToolCall record to the DB."""
+        """Persist a ToolCall record to the DB.
+
+        Args:
+            retrieval_results: Optional list of {passage_id, rrf_score,
+                vector_rank, fts_rank} dicts. When present (for
+                archival_memory_search), stored in tool_args JSON
+                under the '_retrieval_results' key for audit purposes.
+        """
         from letta.orm.tool_call import ToolCall
         from letta.server.db import db_registry
 
         # Sanitize tool_args before storage
         tool_args = _sanitize_tool_args(tool_args)
+
+        # Attach retrieval results to tool_args for audit (archival_memory_search)
+        if retrieval_results:
+            tool_args = tool_args or {}
+            tool_args["_retrieval_results"] = retrieval_results
 
         if tool_result and len(tool_result) > _TRUNCATION_LIMIT:
             logger.debug(

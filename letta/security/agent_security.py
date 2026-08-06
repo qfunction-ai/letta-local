@@ -66,6 +66,10 @@ def init_agent_attributes(agent: "BaseAgent") -> None:
     agent.token_budget = TokenBudget()
     agent.circuit_breaker = AgentCircuitBreaker()
 
+    # Tool validation (default off — opt-in)
+    agent.tool_output_validation_enabled = False
+    agent.tool_arg_validation_enabled = False
+
 
 def init_security(agent: "BaseAgentV2") -> None:
     """Initialize security objects on a BaseAgentV2 instance.
@@ -83,6 +87,8 @@ def init_security(agent: "BaseAgentV2") -> None:
     agent.policy_checker = PolicyChecker()
     agent.canary_checker = CanaryChecker()
     agent.tool_call_recorder = ToolCallRecorder()
+    agent.tool_output_validation_enabled = False
+    agent.tool_arg_validation_enabled = False
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +289,39 @@ async def check_policy(agent, tool_name: str, tool_args: dict | None = None, ste
     Replaces the duplicate _check_policy() methods on BaseAgent and
     BaseAgentV2, and the inline policy check in LettaAgent._step().
     """
-    from letta.security.policy import PolicyAction
+    from letta.security.policy import PolicyAction, PolicyDecision
+
+    # Tool argument validation (opt-in, before policy check)
+    if getattr(agent, "tool_arg_validation_enabled", False):
+        from letta.security.tool_arg_validator import validate_tool_args
+        tool_schema = None
+        agent_state = getattr(agent, "agent_state", None)
+        if agent_state is not None:
+            target_tool = next((t for t in agent_state.tools if t.name == tool_name), None)
+            if target_tool is not None:
+                tool_schema = target_tool.args_json_schema or (
+                    target_tool.json_schema.get("parameters") if target_tool.json_schema else None
+                )
+        validation_error = validate_tool_args(tool_name, tool_args or {}, tool_schema)
+        if validation_error is not None:
+            from letta.security import audit_helpers as _ah
+            await _ah.log_tool_denied(
+                agent.audit_logger, agent.agent_id, agent.actor,
+                tool_name, validation_error, step_id, run_id,
+                matched_rule="argument_validation_failed",
+            )
+            return PolicyDecision(
+                allowed=False,
+                action="deny",
+                matched_rule="argument_validation_failed",
+                reason=validation_error,
+                audit_entry={
+                    "tool_name": tool_name,
+                    "matched_rule": "argument_validation_failed",
+                    "action": "deny",
+                    "reason": validation_error,
+                },
+            )
 
     eval_context = {
         "tool_name": tool_name,
@@ -295,11 +333,12 @@ async def check_policy(agent, tool_name: str, tool_args: dict | None = None, ste
     decision = agent.policy_checker.check(tool_name, eval_context=eval_context)
     # Record the call for rate limiting if allowed
     if decision.allowed:
-        agent.policy_checker.record_call(tool_name)
+        agent.policy_checker.record_call(tool_name, tool_args)
     # Handle AUDIT action: log event + set warning for caller to append to tool result
     if decision.action == PolicyAction.AUDIT:
         from letta.security import audit_helpers as _ah
         from letta.security.secret_scanner import SecretPatternChecker
+        from letta.security.content_validator import ContentValidator
         # Determine the label for the audit event
         tool_args = tool_args or {}
         label = "unknown"
@@ -313,6 +352,16 @@ async def check_policy(agent, tool_name: str, tool_args: dict | None = None, ste
             agent.audit_logger, agent.agent_id, agent.actor,
             tool_name, label, step_id, run_id,
         )
+        # Also check for injection patterns
+        for value in tool_args.values():
+            if isinstance(value, str):
+                injection_label = ContentValidator.check(value)
+                if injection_label is not None:
+                    await _ah.log_injection_detected(
+                        agent.audit_logger, agent.agent_id, agent.actor,
+                        tool_name, injection_label, step_id, run_id,
+                    )
+                    break
         decision.audit_warning = decision.reason
     return decision
 
