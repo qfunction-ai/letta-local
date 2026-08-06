@@ -158,3 +158,25 @@ async def log_secret_detected(
         SecurityEventType.SECRET_DETECTED, {"tool_name": tool_name, "label": label},
         step_id, run_id, "secret_detected",
     )
+
+
+async def log_injection_detected(
+    audit_logger: "AuditLogger",
+    agent_id: str,
+    actor: "User | None",
+    tool_name: str,
+    label: str,
+    step_id: str | None,
+    run_id: str | None,
+) -> None:
+    """Log an injection_detected audit event.
+
+    Fired when the content validator detects a potential prompt injection
+    in tool arguments. The label identifies the pattern type (e.g.,
+    "instruction_override", "system_marker", "hidden_unicode_zero_width").
+    """
+    await audit_log(
+        audit_logger, agent_id, actor,
+        SecurityEventType.INJECTION_DETECTED, {"tool_name": tool_name, "label": label},
+        step_id, run_id, "injection_detected",
+    )

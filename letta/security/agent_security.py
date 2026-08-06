@@ -295,11 +295,12 @@ async def check_policy(agent, tool_name: str, tool_args: dict | None = None, ste
     decision = agent.policy_checker.check(tool_name, eval_context=eval_context)
     # Record the call for rate limiting if allowed
     if decision.allowed:
-        agent.policy_checker.record_call(tool_name)
+        agent.policy_checker.record_call(tool_name, tool_args)
     # Handle AUDIT action: log event + set warning for caller to append to tool result
     if decision.action == PolicyAction.AUDIT:
         from letta.security import audit_helpers as _ah
         from letta.security.secret_scanner import SecretPatternChecker
+        from letta.security.content_validator import ContentValidator
         # Determine the label for the audit event
         tool_args = tool_args or {}
         label = "unknown"
@@ -313,6 +314,16 @@ async def check_policy(agent, tool_name: str, tool_args: dict | None = None, ste
             agent.audit_logger, agent.agent_id, agent.actor,
             tool_name, label, step_id, run_id,
         )
+        # Also check for injection patterns
+        for value in tool_args.values():
+            if isinstance(value, str):
+                injection_label = ContentValidator.check(value)
+                if injection_label is not None:
+                    await _ah.log_injection_detected(
+                        agent.audit_logger, agent.agent_id, agent.actor,
+                        tool_name, injection_label, step_id, run_id,
+                    )
+                    break
         decision.audit_warning = decision.reason
     return decision
 
