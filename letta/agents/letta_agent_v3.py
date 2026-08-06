@@ -1984,6 +1984,11 @@ class LettaAgentV3(LettaAgentV2):
             await _ah_audit.log_tool_executed(self.audit_logger, self.agent_id, self.actor, spec["id"], spec["name"], step_id, run_id)
             # Record tool call for observability
             try:
+                # Parse retrieval results for archival_memory_search (audit logging)
+                _retrieval_results = None
+                if spec["name"] == "archival_memory_search" and res.func_return:
+                    from letta.observability.tool_call_recorder import _parse_retrieval_results
+                    _retrieval_results = _parse_retrieval_results(res.func_return)
                 await self.tool_call_recorder.record_tool_call(
                     step_id=step_id,
                     agent_id=self.agent_id,
@@ -1993,6 +1998,7 @@ class LettaAgentV3(LettaAgentV2):
                     tool_result=str(res.func_return) if res.func_return else None,
                     duration_ns=dt,
                     success=res.success_flag,
+                    retrieval_results=_retrieval_results,
                 )
             except Exception as _rec_err:
                 self.logger.warning(f"Failed to record tool call: {_rec_err}")
