@@ -66,6 +66,9 @@ def init_agent_attributes(agent: "BaseAgent") -> None:
     agent.token_budget = TokenBudget()
     agent.circuit_breaker = AgentCircuitBreaker()
 
+    # Tool output validation (default off — opt-in)
+    agent.tool_output_validation_enabled = False
+
 
 def init_security(agent: "BaseAgentV2") -> None:
     """Initialize security objects on a BaseAgentV2 instance.
@@ -83,6 +86,7 @@ def init_security(agent: "BaseAgentV2") -> None:
     agent.policy_checker = PolicyChecker()
     agent.canary_checker = CanaryChecker()
     agent.tool_call_recorder = ToolCallRecorder()
+    agent.tool_output_validation_enabled = False
 
 
 # ---------------------------------------------------------------------------

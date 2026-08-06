@@ -1963,6 +1963,16 @@ class LettaAgentV3(LettaAgentV2):
                 agent_step_span=agent_step_span,
                 step_id=step_id,
             )
+            # Security: validate tool output for prompt injection (opt-in, fail-open)
+            from letta.security.tool_output_validator import validate_tool_output
+            _tool_output_warning = await validate_tool_output(
+                spec["name"], str(res.func_return) if res.func_return else "", self,
+            )
+            if _tool_output_warning:
+                res.func_return = (
+                    (str(res.func_return) if res.func_return else "")
+                    + _tool_output_warning
+                )
             # Security: append audit warning from policy engine (e.g., secret detected)
             if policy_decision.audit_warning:
                 res.func_return = (
