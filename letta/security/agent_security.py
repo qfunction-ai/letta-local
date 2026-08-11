@@ -87,8 +87,16 @@ def init_security(agent: "BaseAgentV2") -> None:
     agent.policy_checker = PolicyChecker()
     agent.canary_checker = CanaryChecker()
     agent.tool_call_recorder = ToolCallRecorder()
-    agent.tool_output_validation_enabled = False
-    agent.tool_arg_validation_enabled = False
+
+    # Read content validation flag from agent metadata.
+    # Epsilon sends enable_content_validation inside the metadata dict
+    # (top-level field would be dropped by Pydantic extra="ignore").
+    metadata = {}
+    if hasattr(agent, "agent_state") and agent.agent_state:
+        metadata = getattr(agent.agent_state, "metadata", {}) or {}
+    cv_enabled = metadata.get("enable_content_validation", False)
+    agent.tool_output_validation_enabled = cv_enabled
+    agent.tool_arg_validation_enabled = cv_enabled
 
 
 # ---------------------------------------------------------------------------
