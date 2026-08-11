@@ -591,6 +591,18 @@ class LettaAgentV3(LettaAgentV2):
             from letta.agents.skill_state import parse_and_strip_skill_state
             parse_and_strip_skill_state(self.in_context_messages, self.tool_rules_solver)
             credit_task = None
+
+            # Security: initialize streaming canary filter if canary is configured.
+            # The non-streaming step() path filters via apply_output_filters().
+            # The streaming path has a known gap — chunks are yielded before
+            # the filter runs. This rolling buffer catches canary tokens split
+            # across chunk boundaries before they reach the client.
+            _canary_filter = None
+            _canary_value = getattr(self.canary_checker, "canary_value", None) if hasattr(self, "canary_checker") else None
+            if _canary_value:
+                from letta.security.canary_output_filter import StreamingCanaryFilter
+                _canary_filter = StreamingCanaryFilter(_canary_value)
+
             for i in range(max_steps):
                 if i == 1 and follow_up_messages:
                     input_messages_to_persist = follow_up_messages
@@ -633,6 +645,27 @@ class LettaAgentV3(LettaAgentV2):
                             chunk.otid,
                             chunk.step_id,
                         )
+
+                    # Security: apply streaming canary filter to assistant_message chunks.
+                    # The filter uses a rolling buffer to catch canary tokens split
+                    # across chunk boundaries. Non-assistant chunks pass through.
+                    if _canary_filter and isinstance(chunk, LettaMessage):
+                        from letta.schemas.letta_message import MessageType
+                        if chunk.message_type == MessageType.assistant_message:
+                            chunk_content = str(chunk.content) if chunk.content else ""
+                            safe_text, detected = _canary_filter.feed(chunk_content)
+                            if detected:
+                                from letta.security import audit_helpers as _ah
+                                await _ah.log_canary_output_detected(
+                                    self.audit_logger, self.agent_id, self.actor, None, run_id,
+                                )
+                                _canary_filter.mark_warning()
+                            if safe_text or detected:
+                                chunk.content = safe_text if not detected else safe_text
+                            elif not safe_text and not detected:
+                                # All content held back in buffer — skip this chunk
+                                first_chunk = False
+                                continue
 
                     yield f"data: {chunk.model_dump_json()}\n\n"
                     first_chunk = False
@@ -736,6 +769,11 @@ class LettaAgentV3(LettaAgentV2):
                     logprobs=self.logprobs,
                     turns=self.turns if self.return_token_ids and self.turns else None,
                 )
+                # Security: apply output filters to the final response (same as non-streaming path).
+                # This ensures persisted/audited messages are filtered even when the streaming
+                # path was used. The rolling buffer filter above catches tokens mid-stream;
+                # this catches any remaining canary in the stored message.
+                result = await _outf.apply_output_filters(self, result)
                 if self.job_update_metadata is None:
                     self.job_update_metadata = {}
                 self.job_update_metadata["result"] = result.model_dump(mode="json")

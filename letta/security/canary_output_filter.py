@@ -120,3 +120,76 @@ def apply_canary_filter_to_message(
     except Exception as e:
         logger.warning(f"Canary output filter failed (fail-open): {e}")
         return message
+
+
+class StreamingCanaryFilter:
+    """Rolling buffer canary filter for the streaming path.
+
+    The non-streaming ``apply_canary_filter_to_message`` scans complete
+    messages. The streaming path yields token-level text deltas. This
+    filter buffers incoming deltas to detect canary tokens that may be
+    split across chunks.
+
+    Usage:
+        filt = StreamingCanaryFilter(canary_value)
+        for chunk in stream:
+            safe_text, detected = filt.feed(chunk_text)
+            if detected:
+                await log_canary_output_detected(...)
+            yield safe_text
+        # On stream end:
+        yield filt.flush()
+
+    The buffer holds back ``len(canary_value) - 1`` characters to catch
+    a canary token that is split across chunk boundaries. This adds a
+    small delay (one canary-length window) before content is emitted.
+    """
+
+    def __init__(self, canary_value: str):
+        self.canary_value = canary_value
+        self._holdback = max(len(canary_value) - 1, 0) if canary_value else 0
+        self._buffer: str = ""
+        self._warning_appended = False
+
+    def feed(self, text: str) -> tuple[str, bool]:
+        """Feed a text delta into the buffer. Returns (safe_text, was_detected).
+
+        The returned safe_text may be empty (if all content is held back
+        in the buffer). ``was_detected`` is True if a canary token was
+        found and replaced in this feed cycle.
+        """
+        if not text or not self.canary_value:
+            # No canary configured — pass through everything immediately
+            return text, False
+            return "", False
+
+        self._buffer += text
+        detected = False
+
+        # Check for canary in the buffer
+        if self.canary_value in self._buffer:
+            self._buffer = self._buffer.replace(self.canary_value, REDACTED_CANARY)
+            detected = True
+
+        # Emit all but the holdback (might be start of a split canary)
+        if len(self._buffer) <= self._holdback:
+            return "", detected
+
+        emit = self._buffer[: len(self._buffer) - self._holdback]
+        self._buffer = self._buffer[len(self._buffer) - self._holdback :]
+        return emit, detected
+
+    def flush(self) -> str:
+        """Flush remaining buffer content. Call once when the stream ends.
+
+        Appends the security warning if a canary was detected at any point.
+        """
+        remaining = self._buffer
+        self._buffer = ""
+        if self._warning_appended or remaining == "":
+            return remaining
+        return remaining
+
+    def mark_warning(self) -> None:
+        """Mark that the canary warning should be appended on flush."""
+        self._warning_appended = True
