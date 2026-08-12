@@ -655,8 +655,7 @@ class LettaAgentV3(LettaAgentV2):
                             chunk_content = str(chunk.content) if chunk.content else ""
                             safe_text, detected = _canary_filter.feed(chunk_content)
                             if detected:
-                                from letta.security import audit_helpers as _ah
-                                await _ah.log_canary_output_detected(
+                                await _ah_audit.log_canary_output_detected(
                                     self.audit_logger, self.agent_id, self.actor, None, run_id,
                                 )
                                 _canary_filter.mark_warning()
