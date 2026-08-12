@@ -69,6 +69,43 @@ class TestApplyDefaultConstraints:
         assert config.constraints.max_tools == 5
         assert config.constraints.simplify_tool_schemas is False
 
+    def test_auto_apply_ollama_via_openai_proxy(self):
+        """Ollama using model_endpoint_type='openai' with localhost endpoint gets constraints."""
+        config = LLMConfig(
+            model="mistral:7b",
+            model_endpoint_type="openai",
+            model_endpoint="http://localhost:11434/v1",
+            context_window=8192,
+        )
+        assert config.constraints is not None
+        assert config.constraints.max_tools == 15
+        assert config.constraints.simplify_tool_schemas is True
+
+    def test_auto_apply_vllm_via_openai_proxy(self):
+        """vLLM using model_endpoint_type='openai' with non-OpenAI endpoint gets constraints."""
+        config = LLMConfig(
+            model="meta-llama/Llama-3.1-8B-Instruct",
+            model_endpoint_type="openai",
+            model_endpoint="http://localhost:8000/v1",
+            context_window=8192,
+        )
+        assert config.constraints is not None
+        assert config.constraints.max_tools == 15
+        assert config.constraints.simplify_tool_schemas is True
+
+    def test_no_auto_apply_real_openai_endpoint(self):
+        """Real OpenAI endpoint (api.openai.com) does NOT get local constraints."""
+        config = LLMConfig(
+            model="gpt-4o",
+            model_endpoint_type="openai",
+            model_endpoint="https://api.openai.com/v1",
+            context_window=128000,
+        )
+        # Cloud providers either have no constraints or constraints without the new fields
+        if config.constraints is not None:
+            assert config.constraints.max_tools is None
+            assert config.constraints.simplify_tool_schemas is False
+
 
 class TestRelaxConstraintsAfterProbe:
     """Test relax_constraints_after_probe with new fields."""

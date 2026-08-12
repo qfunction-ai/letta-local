@@ -1245,14 +1245,6 @@ class LettaAgentV3(LettaAgentV2):
                         _sri.record_context_composed(self, messages=messages, valid_tools=valid_tools)
 
                         step_progression, step_metrics = self._step_checkpoint_llm_request_start(step_metrics, agent_step_span)
-                        # DEBUG: log request_data to see what's being sent to Ollama
-                        _tools_in_req = request_data.get("tools", [])
-                        _tool_names = [t.get("function",{}).get("name","?") for t in _tools_in_req] if _tools_in_req else []
-                        _tool_choice = request_data.get("tool_choice", "NOT_SET")
-                        _stream = request_data.get("stream", "NOT_SET")
-                        _reasoning = request_data.get("reasoning_effort", "NOT_SET")
-                        _extra = request_data.get("extra_body", "NOT_SET")
-                        self.logger.warning(f"DEBUG REQUEST: stream={_stream}, tool_choice={_tool_choice}, reasoning_effort={_reasoning}, extra_body={_extra}, tools={_tool_names}")
 
                         invocation = llm_adapter.invoke_llm(
                             request_data=request_data,

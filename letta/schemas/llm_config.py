@@ -345,11 +345,22 @@ class LLMConfig(BaseModel):
         # Providers that need prompt-based tool calling by default
         local_provider_types = {"ollama", "vllm", "localai", "llamacpp", "llamafile", "mlx", "openai_compatible", "bitnet"}
         endpoint_type = (self.model_endpoint_type or "").lower()
+        endpoint = self.model_endpoint or ""
 
-        if endpoint_type in local_provider_types:
+        # Detect local OpenAI-compatible proxies (Ollama /v1, vLLM, LM Studio, etc.)
+        # These use model_endpoint_type="openai" for client routing but still need
+        # local model constraints (max_tools, simplify_tool_schemas, etc.).
+        is_local_proxy = (
+            endpoint_type == "openai"
+            and "api.openai.com" not in endpoint
+            and endpoint != ""
+        )
+
+        if endpoint_type in local_provider_types or is_local_proxy:
+            reason = "local proxy endpoint" if is_local_proxy else f"provider_type={endpoint_type}"
             logger.info(
                 f"Auto-applying tool calling constraints for {self.model} "
-                f"(provider_type={endpoint_type})"
+                f"({reason})"
             )
             self.constraints = ModelConstraints(
                 tool_calling_mode="auto",
