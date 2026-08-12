@@ -81,11 +81,18 @@ class ModelConstraints(BaseModel):
     )
 
     def relax_constraints_after_probe(self, resolved_tool_calling_mode: str) -> None:
-        """Relax aggressive defaults after probe confirms model capability.
+        """Relax format-level defaults after probe confirms model capability.
 
         Called by the agent loop after resolve_tool_calling_mode_async().
-        When a model supports native tool calling, the defensive constraints
-        auto-applied by apply_default_constraints are unnecessary overhead.
+        When a model supports native tool calling, the defensive format
+        constraints auto-applied by apply_default_constraints are unnecessary
+        overhead.
+
+        simplify_tool_schemas and max_tools are NOT relaxed because the probe
+        tests with 1 trivial tool and cannot predict whether the model handles
+        the real tool set. The simplifier is idempotent (no-op on simple
+        schemas) and max_tools is a no-op when under the limit, so keeping them
+        active is cheap insurance.
 
         If the probe resolves to "prompt", constraints stay as-is — the model
         needs the aggressive repair pipeline.
@@ -102,12 +109,6 @@ class ModelConstraints(BaseModel):
         # Native tool calling means basic JSON repair is sufficient
         if self.json_repair_level == "aggressive":
             self.json_repair_level = "basic"
-        # Native tool calling — no need for schema simplification
-        if self.simplify_tool_schemas:
-            self.simplify_tool_schemas = False
-        # Native tool calling — no need for tool count limits
-        if self.max_tools is not None:
-            self.max_tools = None
 
 
 class LLMConfig(BaseModel):

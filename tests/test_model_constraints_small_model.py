@@ -111,7 +111,8 @@ class TestRelaxConstraintsAfterProbe:
     """Test relax_constraints_after_probe with new fields."""
 
     def test_relax_after_native_probe(self):
-        """When probe confirms native tool calling, new constraints are relaxed."""
+        """When probe confirms native tool calling, format constraints are
+        relaxed but simplify_tool_schemas and max_tools survive."""
         mc = ModelConstraints(
             tool_calling_mode="auto",
             disable_structured_output=True,
@@ -121,9 +122,10 @@ class TestRelaxConstraintsAfterProbe:
             simplify_tool_schemas=True,
         )
         mc.relax_constraints_after_probe("native")
-        assert mc.simplify_tool_schemas is False
-        assert mc.max_tools is None
-        # Other constraints also relaxed
+        # These survive — probe can't predict real tool set complexity
+        assert mc.simplify_tool_schemas is True
+        assert mc.max_tools == 15
+        # These are relaxed — they affect request format, not tool schemas
         assert mc.tool_call_retry_count == 0
         assert mc.disable_structured_output is False
         assert mc.json_repair_level == "basic"
