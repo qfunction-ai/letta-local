@@ -972,6 +972,29 @@ class LettaAgentV2(BaseAgentV2):
         allowed_tools = [
             enable_strict_mode(t.json_schema, strict=self.agent_state.llm_config.strict) for t in tools if t.name in set(valid_tool_names)
         ]
+
+        # Apply small-model constraints: simplify schemas and limit tool count
+        # BEFORE runtime_override_tool_json_schema so heartbeat descriptions stay intact
+        constraints = self.agent_state.llm_config.constraints
+        if constraints:
+            if constraints.simplify_tool_schemas:
+                from letta.llm_api.schema_simplifier import simplify_tool_schemas
+                allowed_tools = simplify_tool_schemas(allowed_tools)
+
+            if constraints.max_tools and len(allowed_tools) > constraints.max_tools:
+                essential_names = {"send_message"}
+                essential = [t for t in allowed_tools if t.get("name") in essential_names]
+                non_essential = [t for t in allowed_tools if t.get("name") not in essential_names]
+                remaining = constraints.max_tools - len(essential)
+                if remaining > 0:
+                    allowed_tools = essential + non_essential[:remaining]
+                else:
+                    allowed_tools = essential
+                self.logger.info(
+                    f"max_tools={constraints.max_tools}: kept {len(allowed_tools)} of "
+                    f"{len(essential) + len(non_essential)} tools"
+                )
+
         terminal_tool_names = {rule.tool_name for rule in self.tool_rules_solver.terminal_tool_rules}
         allowed_tools = runtime_override_tool_json_schema(
             tool_list=allowed_tools,

@@ -36,7 +36,7 @@ TOKEN_ESTIMATE_CORRECTION: dict[str, float | None] = {
     # caller falls back to DEFAULT_TOKEN_CORRECTION.
     "qwen": None,       # placeholder — measured by benchmark
     "llama": None,      # placeholder — measured by benchmark
-    "mistral": None,     # placeholder — measured by benchmark
+    "mistral": 0.86,     # measured by scripts/measure_token_correction.py against mistral:7b
     "phi": None,         # placeholder — measured by benchmark
     "gemma": None,       # placeholder — measured by benchmark
     "deepseek": None,    # placeholder — measured by benchmark

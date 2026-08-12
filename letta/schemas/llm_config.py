@@ -67,6 +67,19 @@ class ModelConstraints(BaseModel):
         "'basic' = existing repair strategies, 'aggressive' = regex extraction + fuzzy matching.",
     )
 
+    # Tool schema complexity
+    max_tools: Optional[int] = Field(
+        None,
+        description="Maximum number of tools to send to the model. When exceeded, "
+        "non-essential tools are dropped (base tools first, then memory tools). "
+        "None = unlimited.",
+    )
+    simplify_tool_schemas: bool = Field(
+        False,
+        description="Strip optional parameters, replace enums with string+description, "
+        "and truncate descriptions to reduce schema complexity for small models.",
+    )
+
     def relax_constraints_after_probe(self, resolved_tool_calling_mode: str) -> None:
         """Relax aggressive defaults after probe confirms model capability.
 
@@ -89,6 +102,12 @@ class ModelConstraints(BaseModel):
         # Native tool calling means basic JSON repair is sufficient
         if self.json_repair_level == "aggressive":
             self.json_repair_level = "basic"
+        # Native tool calling — no need for schema simplification
+        if self.simplify_tool_schemas:
+            self.simplify_tool_schemas = False
+        # Native tool calling — no need for tool count limits
+        if self.max_tools is not None:
+            self.max_tools = None
 
 
 class LLMConfig(BaseModel):
@@ -337,6 +356,8 @@ class LLMConfig(BaseModel):
                 disable_structured_output=True,
                 tool_call_retry_count=3,
                 json_repair_level="aggressive",
+                max_tools=15,
+                simplify_tool_schemas=True,
             )
             return self
 
