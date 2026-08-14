@@ -1,0 +1,16 @@
+Letta Local
+Copyright 2026 QFunction, LLC
+
+This product includes software developed by the Letta project
+(https://github.com/letta-ai/letta), Copyright 2023, Letta authors,
+licensed under the Apache License, Version 2.0.
+
+Fork modifications by QFunction, LLC include:
+- Security layer (tool call policies, canary tokens, audit logging)
+- File persistence tools and staging promotion
+- Agent hardening (token budget enforcement, loop detection)
+- Tool schema simplification and runtime override
+- Canary output filtering (streaming and non-streaming)
+- Skill state tracking (RequiredBeforeExitToolRule)
+- Observability (OpenTelemetry trace export)
+- Content and tool output validation (feature-flagged)
