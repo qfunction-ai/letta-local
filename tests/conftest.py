@@ -1,12 +1,36 @@
 import logging
 import os
+import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
 from typing import Generator
 
+# ---------------------------------------------------------------------------
+# Redirect LETTA_DIR to a disposable temp dir BEFORE any letta module that
+# reads it is imported.
+#
+# letta/constants.py hardcodes LETTA_DIR to ~/.letta, which on developer
+# machines belongs to the Letta Code CLI. On macOS, ~/.letta/agents is
+# TCC-protected: os.path.exists() returns False (permission denied is
+# indistinguishable from missing) and os.makedirs() then raises
+# FileExistsError inside LettaConfig.load() — which runs at
+# `import letta.server.server`. Redirecting here keeps server-side imports
+# (e.g. tests/test_policy_validation.py) testable on those machines.
+# ---------------------------------------------------------------------------
+import letta.constants as _letta_constants
+
+_LETTA_DIR_OVERRIDE = os.environ.get("LETTA_TESTS_LETTA_DIR") or tempfile.mkdtemp(prefix="letta-tests-")
+_letta_constants.LETTA_DIR = _LETTA_DIR_OVERRIDE
+# letta.config imports LETTA_DIR by value; patch its copy too if it was
+# already imported by something else.
+if "letta.config" in sys.modules:
+    sys.modules["letta.config"].LETTA_DIR = _LETTA_DIR_OVERRIDE
+
 import pytest
 import requests
+
 from anthropic.types.beta.messages import BetaMessageBatch, BetaMessageBatchRequestCounts
 from dotenv import load_dotenv
 from letta_client import Letta

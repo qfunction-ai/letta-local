@@ -1,0 +1,25 @@
+# Disposable smoke-test environment for LettaLocal release candidates.
+# Spin up, run scripts/smoke/smoke_test.sh, tear down. Nothing persists.
+#
+# Usage:
+#   docker build -t letta-local:smoke .
+#   SMOKE_IMAGE=letta-local:smoke scripts/smoke/smoke_test.sh
+
+name: letta-smoke
+
+services:
+  letta:
+    image: ${SMOKE_IMAGE:-letta-local:smoke}
+    ports:
+      - "${SMOKE_PORT:-8284}:8283"
+    environment:
+      # No LETTA_PG_URI -> SQLite, disposable volume below. No external DB.
+      # Host Ollama for local models (checks 3-4; the rest need no LLM).
+      - LETTA_OLLAMA_BASE_URL=http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - smoke-data:/root/.letta
+
+volumes:
+  smoke-data:

@@ -171,14 +171,21 @@ def _to_policy_rule(req: PolicyRuleRequest) -> PolicyRule:
     """Convert API rule to internal PolicyRule.
 
     Validates regex patterns before construction to give clear API errors.
+    Errors include the rule name so consumers can identify the offending rule.
     """
     from letta.security.policy import validate_regex_pattern
 
     # Validate regex patterns at the API boundary
     if req.pattern is not None:
-        validate_regex_pattern(req.pattern)
+        try:
+            validate_regex_pattern(req.pattern)
+        except ValueError as e:
+            raise ValueError(f"Rule '{req.name}': {e}") from e
     if req.condition.operator == "matches" and isinstance(req.condition.value, str):
-        validate_regex_pattern(req.condition.value)
+        try:
+            validate_regex_pattern(req.condition.value)
+        except ValueError as e:
+            raise ValueError(f"Rule '{req.name}': {e}") from e
 
     return PolicyRule(
         name=req.name,

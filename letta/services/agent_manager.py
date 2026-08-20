@@ -1705,7 +1705,8 @@ class AgentManager:
           3) Optionally rebuilding the system prompt with current memory blocks (for prefix caching optimization).
           4) Optionally adding default initial messages after the system message.
 
-        Note: This only clears messages from the agent's context, it does not delete them from the database.
+        All non-system messages are soft-deleted so that GET /messages reflects
+        the reset. Rows are preserved (soft delete) for audit integrity.
 
         Args:
             agent_id (str): The ID of the agent whose messages will be reset.
@@ -1732,6 +1733,24 @@ class AgentManager:
 
             system_message_id = agent.message_ids[0]
             agent.message_ids = [system_message_id]
+
+            # Soft-delete all non-system messages for this agent so GET /messages
+            # reflects the reset. Scoping by agent_id (not message_ids[1:]) also
+            # removes out-of-context messages (e.g. ingested via /messages/capture,
+            # which never enter agent.message_ids), and eliminates the
+            # capture-before-reassignment ordering hazard entirely.
+            from letta.orm.message import Message as MessageModel
+
+            await session.execute(
+                sa.update(MessageModel)
+                .where(
+                    MessageModel.agent_id == agent_id,
+                    MessageModel.id != system_message_id,
+                    MessageModel.is_deleted == False,
+                )
+                .values(is_deleted=True)
+            )
+
             await agent.update_async(db_session=session, actor=actor)
 
             # Only convert to pydantic if we need to return it or add initial messages or rebuild system prompt
