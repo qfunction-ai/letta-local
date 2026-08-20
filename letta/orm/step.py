@@ -102,5 +102,5 @@ class Step(SqlalchemyBase, ProjectMixin):
         "StepMetrics", back_populates="step", cascade="all, delete-orphan", lazy="noload", uselist=False
     )
     tool_calls: Mapped[List["ToolCall"]] = relationship(
-        "ToolCall", back_populates="step", cascade="all, delete-orphan", lazy="noload"
+        "ToolCall", back_populates="step", cascade="all, delete-orphan", lazy="noload", passive_deletes=True
     )

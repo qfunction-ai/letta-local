@@ -92,7 +92,7 @@ echo "== check 2: create agent =="
 AGENT_ID="$(curl -s -f -X POST "${BASE}/v1/agents/" \
   -H "Content-Type: application/json" \
     -H "User-Agent: letta-client/1.0" \
-  -d "{\"model\": \"${SMOKE_MODEL}\", \"embedding\": \"${SMOKE_EMBEDDING}\", \"model_settings\": {\"provider_type\": \"ollama\", \"temperature\": 0.0}, \"memory_blocks\": [{\"label\": \"persona\", \"value\": \"You are a helpful assistant.\"}, {\"label\": \"human\", \"value\": \"A student.\"}]}" \
+  -d "{\"model\": \"${SMOKE_MODEL}\", \"embedding\": \"${SMOKE_EMBEDDING}\", \"model_settings\": {\"provider_type\": \"ollama\", \"temperature\": 0.0}, \"tool_rules\": [{\"type\": \"run_first\", \"tool_name\": \"memory_insert\"}], \"memory_blocks\": [{\"label\": \"persona\", \"value\": \"You are a helpful assistant.\"}, {\"label\": \"human\", \"value\": \"A student.\"}]}" \
   | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])' 2>/dev/null || true)"
 if [ -n "${AGENT_ID}" ]; then
   ok "2. create agent (${AGENT_ID})"
@@ -132,6 +132,26 @@ if [ "${OLLAMA_UP}" -eq 0 ]; then
     ok "4. streaming message"
   else
     bad "4. streaming message (no data chunks)"
+  fi
+
+  # check 4.5: forced tool call. Plain-text replies create ZERO tool_calls
+  # rows, and message_sent audits carry step_id=null — both step-child FK
+  # cascades are untested without a real tool call (the v0.16.23 rig gap:
+  # 9/9 green while Delta's production deletes failed on tool_calls FKs).
+  # run_first + memory_insert (V3's actual memory-write tool — V1/V2 call
+  # it core_memory_append, which does NOT exist on V3 agents) makes the
+  # call server-enforced, not model-discretion. The assertion matches the
+  # tool_call_message TYPE only — matching the tool name catches the model
+  # merely MENTIONING the tool in text (a false positive that shipped once).
+  echo "== check 4.5: forced tool call (run_first rule) =="
+  R45="$(curl -s -f --max-time 180 -X POST "${BASE}/v1/agents/${AGENT_ID}/messages" \
+    -H "Content-Type: application/json" \
+    -H "User-Agent: letta-client/1.0" \
+    -d '{"messages": [{"role": "user", "content": "Use the memory_insert tool to remember that my favorite number is 42."}], "stream": false}' || true)"
+  if echo "${R45}" | grep -q '"tool_call_message"'; then
+    ok "4.5 forced tool call (tool_calls rows exist for delete cascade)"
+  else
+    bad "4.5 forced tool call (no tool_call_message in response)"
   fi
 else
   echo "== checks 3-4 skipped (no Ollama on localhost:11434) =="

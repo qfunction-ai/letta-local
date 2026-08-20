@@ -30,7 +30,7 @@ class SecurityEvent(SqlalchemyBase):
         String, ForeignKey("organizations.id"), doc="The organization ID."
     )
     step_id: Mapped[Optional[str]] = mapped_column(
-        String, ForeignKey("steps.id"), nullable=True, doc="The step this event occurred during (if applicable)."
+        String, ForeignKey("steps.id", ondelete="CASCADE"), nullable=True, doc="The step this event occurred during (if applicable)."
     )
     run_id: Mapped[Optional[str]] = mapped_column(
         String, nullable=True, doc="The run ID this event occurred during (if applicable)."

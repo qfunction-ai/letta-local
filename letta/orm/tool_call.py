@@ -20,7 +20,7 @@ class ToolCall(SqlalchemyBase):
         String, primary_key=True, default=lambda: f"toolcall-{uuid.uuid4()}"
     )
     step_id: Mapped[str] = mapped_column(
-        String, ForeignKey("steps.id"), index=True, doc="The step this tool call belongs to."
+        String, ForeignKey("steps.id", ondelete="CASCADE"), index=True, doc="The step this tool call belongs to."
     )
     organization_id: Mapped[Optional[str]] = mapped_column(
         String, nullable=True, doc="The organization ID."

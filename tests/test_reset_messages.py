@@ -52,3 +52,27 @@ def test_reset_soft_delete_is_agent_scoped():
         "A message_ids[1:]-scoped delete leaves capture-ingested messages "
         "visible after reset (the v0.16.22 bug)."
     )
+
+
+def test_step_child_fks_cascade():
+    """FKs referencing steps.id must not block agent deletion.
+
+    SQLAlchemy flushes child DELETEs before the parent agent row, so any
+    step-child FK with NO ACTION blocks the steps DELETE while its rows
+    are still live (the v0.16.23 bug: tool_calls, security_events).
+    Complete expected inventory of steps.id FKs:
+      messages  -> SET NULL, step_metrics -> CASCADE,
+      tool_calls -> CASCADE, security_events -> CASCADE.
+    """
+    expectations = {
+        "letta/orm/message.py": ("ForeignKey(\"steps.id\", ondelete=\"SET NULL\")", "message"),
+        "letta/orm/step_metrics.py": ("ForeignKey(\"steps.id\", ondelete=\"CASCADE\")", "step_metrics"),
+        "letta/orm/tool_call.py": ("ForeignKey(\"steps.id\", ondelete=\"CASCADE\")", "tool_calls"),
+        "letta/orm/security_event.py": ("ForeignKey(\"steps.id\", ondelete=\"CASCADE\")", "security_events"),
+    }
+    for path, (expected, table) in expectations.items():
+        source = Path(path).read_text()
+        assert expected in source, (
+            f"{table}.step_id FK must be {expected.split('ondelete=')[1].rstrip(')')} "
+            f"— a NO ACTION step-child FK blocks agent deletion (v0.16.23 bug class)"
+        )
