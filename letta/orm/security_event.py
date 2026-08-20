@@ -24,7 +24,7 @@ class SecurityEvent(SqlalchemyBase):
         String, primary_key=True, default=lambda: f"sevt-{uuid.uuid4()}"
     )
     agent_id: Mapped[str] = mapped_column(
-        String, ForeignKey("agents.id"), index=True, doc="The agent that produced this event."
+        String, ForeignKey("agents.id", ondelete="CASCADE"), index=True, doc="The agent that produced this event."
     )
     organization_id: Mapped[str] = mapped_column(
         String, ForeignKey("organizations.id"), doc="The organization ID."

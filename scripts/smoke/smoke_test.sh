@@ -91,6 +91,7 @@ fi
 echo "== check 2: create agent =="
 AGENT_ID="$(curl -s -f -X POST "${BASE}/v1/agents/" \
   -H "Content-Type: application/json" \
+    -H "User-Agent: letta-client/1.0" \
   -d "{\"model\": \"${SMOKE_MODEL}\", \"embedding\": \"${SMOKE_EMBEDDING}\", \"model_settings\": {\"provider_type\": \"ollama\", \"temperature\": 0.0}, \"memory_blocks\": [{\"label\": \"persona\", \"value\": \"You are a helpful assistant.\"}, {\"label\": \"human\", \"value\": \"A student.\"}]}" \
   | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])' 2>/dev/null || true)"
 if [ -n "${AGENT_ID}" ]; then
@@ -112,6 +113,7 @@ if [ "${OLLAMA_UP}" -eq 0 ]; then
   echo "== check 3: non-streaming message =="
   R3="$(curl -s -f --max-time 120 -X POST "${BASE}/v1/agents/${AGENT_ID}/messages" \
     -H "Content-Type: application/json" \
+    -H "User-Agent: letta-client/1.0" \
     -d '{"messages": [{"role": "user", "content": "Say the word apple"}], "stream": false}' || true)"
   if echo "${R3}" | grep -q '"assistant_message"'; then
     ok "3. non-streaming message"
@@ -122,6 +124,7 @@ if [ "${OLLAMA_UP}" -eq 0 ]; then
   echo "== check 4: streaming message =="
   R4="$(curl -s -N --max-time 120 -X POST "${BASE}/v1/agents/${AGENT_ID}/messages" \
     -H "Content-Type: application/json" \
+    -H "User-Agent: letta-client/1.0" \
     -d '{"messages": [{"role": "user", "content": "Say the word banana"}], "streaming": true, "stream_tokens": false}' || true)"
   if echo "${R4}" | grep -q "UnboundLocalError\|stopped with unknown error"; then
     bad "4. streaming message (error surfaced in stream)"
@@ -138,10 +141,12 @@ fi
 echo "== check 5: capture -> reset-messages -> GET count =="
 R5C="$(curl -s -o /dev/null -w "%{http_code}" -X POST "${BASE}/v1/agents/${AGENT_ID}/messages/capture" \
   -H "Content-Type: application/json" \
+    -H "User-Agent: letta-client/1.0" \
   -d '{"provider": "smoke", "model": "smoke", "request_messages": [{"role": "user", "content": "seed user message"}], "response_dict": {"content": "seed assistant message"}}')"
 N_BEFORE="$(curl -s -f "${BASE}/v1/agents/${AGENT_ID}/messages?limit=100" | json_count 2>/dev/null || echo -1)"
 R5R="$(curl -s -o /dev/null -w "%{http_code}" -X PATCH "${BASE}/v1/agents/${AGENT_ID}/reset-messages" \
   -H "Content-Type: application/json" \
+    -H "User-Agent: letta-client/1.0" \
   -d '{"add_default_initial_messages": false}')"
 N_AFTER="$(curl -s -f "${BASE}/v1/agents/${AGENT_ID}/messages?limit=100" | json_count 2>/dev/null || echo -1)"
 if [ "${R5C}" = "200" ] && [ "${R5R}" = "200" ] && [ "${N_BEFORE}" -ge 3 ] && [ "${N_AFTER}" -eq 1 ]; then
@@ -154,6 +159,7 @@ fi
 echo "== check 6: policy PUT (valid contains-rule, invalid regex) =="
 R6A="$(curl -s -o /dev/null -w "%{http_code}" -X PUT "${BASE}/v1/agents/${AGENT_ID}/policy" \
   -H "Content-Type: application/json" \
+    -H "User-Agent: letta-client/1.0" \
   -d '{"denied_tools": ["execute_code"], "rules": [{"name": "block-sensitive-file", "condition": {"field": "tool_args.path", "operator": "contains", "value": "confidential"}, "action": "deny", "priority": 90}]}')"
 if [ "${R6A}" = "200" ]; then
   ok "6a. policy PUT with contains operator"
@@ -164,6 +170,7 @@ fi
 ERRFILE="$(mktemp)"
 R6B="$(curl -s -o "${ERRFILE}" -w "%{http_code}" -X PUT "${BASE}/v1/agents/${AGENT_ID}/policy" \
   -H "Content-Type: application/json" \
+    -H "User-Agent: letta-client/1.0" \
   -d '{"rules": [{"name": "block-sensitive-file", "condition": {"field": "tool_args.path", "operator": "matches", "value": "*confidential*"}, "action": "deny", "priority": 90}]}')"
 if [ "${R6B}" = "400" ] && grep -q "block-sensitive-file" "${ERRFILE}"; then
   ok "6b. invalid regex -> 400 naming the rule"
@@ -176,6 +183,7 @@ rm -f "${ERRFILE}"
 echo "== check 7: policy/evaluate denies execute_code =="
 R7="$(curl -s -X POST "${BASE}/v1/agents/${AGENT_ID}/policy/evaluate" \
   -H "Content-Type: application/json" \
+    -H "User-Agent: letta-client/1.0" \
   -d '{"tool_name": "execute_code", "tool_args": {"code": "print(1)"}}')"
 ALLOWED="$(echo "${R7}" | python3 -c 'import sys, json; print(str(json.load(sys.stdin).get("allowed")).lower())' 2>/dev/null || true)"
 if [ "${ALLOWED}" = "false" ]; then

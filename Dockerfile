@@ -39,6 +39,15 @@ RUN uv sync --frozen --no-dev --all-extras --python 3.11
 # Copy the rest of the application code
 COPY . .
 
+# Install the letta package itself into /app/.venv.
+# `uv sync` above ran before the source existed, so the project install it
+# recorded is metadata-only (dist-info, no modules) — the `letta` console
+# script then fails with ModuleNotFoundError unless PYTHONPATH=/app is set
+# externally (which is how Epsilon's compose happened to boot it). Installing
+# from the now-present source makes the image self-contained. --no-deps:
+# dependencies are already synced and cached.
+RUN uv pip install --python /app/.venv/bin/python --no-deps .
+
 # Runtime stage
 FROM pgvector/pgvector:0.8.1-pg15 AS runtime
 

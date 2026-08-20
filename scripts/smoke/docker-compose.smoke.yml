@@ -13,9 +13,14 @@ services:
     ports:
       - "${SMOKE_PORT:-8284}:8283"
     environment:
-      # No LETTA_PG_URI -> SQLite, disposable volume below. No external DB.
+      # No LETTA_PG_URI / LETTA_REDIS_HOST -> the image boots its internal
+      # PostgreSQL + Redis against the disposable volume below. Fully
+      # self-contained, nothing touches the host.
       # Host Ollama for local models (checks 3-4; the rest need no LLM).
-      - LETTA_OLLAMA_BASE_URL=http://host.docker.internal:11434
+      # NOTE: ModelSettings has NO env prefix (env_prefix commented out in
+      # settings.py) — the variable is OLLAMA_BASE_URL, not LETTA_OLLAMA_BASE_URL.
+      # /v1 suffix mirrors Epsilon's compose (OpenAI-compat surface).
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

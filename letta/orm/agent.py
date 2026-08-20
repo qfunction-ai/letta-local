@@ -207,6 +207,8 @@ class Agent(SqlalchemyBase, OrganizationMixin, ProjectMixin, TemplateEntityMixin
         back_populates="agent",
         uselist=False,
         lazy="selectin",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
         doc="Security policy for tool calls.",
     )
 

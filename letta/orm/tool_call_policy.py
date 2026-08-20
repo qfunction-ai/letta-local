@@ -46,7 +46,7 @@ class ToolCallPolicyModel(SqlalchemyBase, OrganizationMixin):
         doc="Primary key.",
     )
     agent_id: Mapped[str] = mapped_column(
-        String, ForeignKey("agents.id"), unique=True,
+        String, ForeignKey("agents.id", ondelete="CASCADE"), unique=True,
         doc="The agent this policy belongs to.",
     )
     policy: Mapped[Optional[dict]] = mapped_column(
