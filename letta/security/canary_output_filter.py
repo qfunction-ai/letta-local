@@ -9,10 +9,12 @@ This is defense-in-depth alongside the tool-call canary check:
 - Layer 1: CanaryChecker blocks tool calls with canary tokens (existing)
 - Layer 2: CanaryOutputFilter redacts canary tokens from assistant messages (this module)
 
-The filter uses exact substring matching on the full canary value
-(e.g., ``CANARY-a7f3b2c1-d4e5-6789-abcd-ef0123456789``). No regex.
-The CANARY- prefix makes false positives negligible since the full UUID
-is astronomically unlikely to appear in normal text.
+Matching is tolerant of token-boundary obfuscation: up to
+``_MAX_GAP`` whitespace or zero-width characters may appear between any
+two canary characters (``CANARY- PROBE- TEST- 2026`` matches). The gap
+is BOUNDED, not ``*``, so the maximum match length stays computable —
+the streaming holdback window depends on it. The CANARY- prefix plus
+the full value keeps false positives negligible.
 
 Fail-open: if the filter crashes, the message passes through unmodified.
 A broken filter must never break the agent loop.
@@ -21,6 +23,8 @@ A broken filter must never break the agent loop.
 from __future__ import annotations
 
 import copy
+import re
+from functools import lru_cache
 from typing import TYPE_CHECKING, Optional
 
 from letta.log import get_logger
@@ -39,17 +43,40 @@ CANARY_WARNING = (
     "The canary token embedded in the system prompt was found in this message.]"
 )
 
+# Whitespace and zero-width characters tolerated between canary characters.
+_GAP_CLASS = r"[\s\u200b\u200c\u200d\ufeff]"
+
+# Maximum number of gap characters tolerated between any two canary
+# characters. Bounded (not `*`) so the maximum match length — and thus
+# the streaming holdback window — stays computable. An unbounded gap
+# ("C A N A R Y ...") cannot be covered by any fixed holdback.
+_MAX_GAP = 4
+
+
+@lru_cache(maxsize=32)
+def _canary_pattern(canary_value: str) -> "re.Pattern[str]":
+    """Compile the whitespace/zero-width-tolerant pattern for a canary value.
+
+    Cached: the streaming filter compiles once per constructor and scan()
+    (which receives the canary per call) reuses the same compiled pattern.
+    """
+    gap = _GAP_CLASS + "{0,%d}" % _MAX_GAP
+    return re.compile(gap.join(re.escape(c) for c in canary_value))
+
 
 class CanaryOutputFilter:
-    """Scans assistant messages for the exact canary token value.
+    """Scans assistant messages for the canary token value (obfuscation-tolerant).
 
     Usage:
         filt = CanaryOutputFilter()
-        filt.scan(message, canary_value="CANARY-abc123...")
+        filt.scan(message, "CANARY-abc123...")
     """
 
     def scan(self, message: "LettaMessageUnion", canary_value: str) -> Optional[str]:
         """Scan a message for the canary value. Returns redacted text or None if clean.
+
+        Detection and redaction tolerate up to _MAX_GAP whitespace/zero-width
+        characters between canary characters.
 
         Args:
             message: The message to scan.
@@ -82,8 +109,9 @@ class CanaryOutputFilter:
         else:
             return None
 
-        if canary_value in text:
-            return text.replace(canary_value, REDACTED_CANARY)
+        pattern = _canary_pattern(canary_value)
+        if pattern.search(text):
+            return pattern.sub(REDACTED_CANARY, text)
 
         return None
 
@@ -128,7 +156,8 @@ class StreamingCanaryFilter:
     The non-streaming ``apply_canary_filter_to_message`` scans complete
     messages. The streaming path yields token-level text deltas. This
     filter buffers incoming deltas to detect canary tokens that may be
-    split across chunks.
+    split across chunks — including chunks that split the canary at ANY
+    character position or interleave obfuscation gaps.
 
     Usage:
         filt = StreamingCanaryFilter(canary_value)
@@ -138,16 +167,22 @@ class StreamingCanaryFilter:
                 await log_canary_output_detected(...)
             yield safe_text
         # On stream end:
-        yield filt.flush()
+        yield filt.flush()  # held-back tail + CANARY_WARNING if detected
 
-    The buffer holds back ``len(canary_value) - 1`` characters to catch
-    a canary token that is split across chunk boundaries. This adds a
-    small delay (one canary-length window) before content is emitted.
+    The buffer holds back ``max_match_len - 1`` characters — the longest
+    possible tolerant match (canary length plus gaps) minus one — so a
+    canary split across (or straddling) chunk boundaries cannot leak.
+    This adds a small delay before content is emitted.
     """
 
     def __init__(self, canary_value: str):
         self.canary_value = canary_value
-        self._holdback = max(len(canary_value) - 1, 0) if canary_value else 0
+        self._pattern = _canary_pattern(canary_value) if canary_value else None
+        # Max tolerant match length: L canary chars + (L-1) gaps of up to
+        # _MAX_GAP each. Hold back everything but the last char of a
+        # potential match.
+        L = len(canary_value) if canary_value else 0
+        self._holdback = max(L + (L - 1) * _MAX_GAP - 1, 0)
         self._buffer: str = ""
         self._warning_appended = False
 
@@ -161,14 +196,13 @@ class StreamingCanaryFilter:
         if not text or not self.canary_value:
             # No canary configured — pass through everything immediately
             return text, False
-            return "", False
 
         self._buffer += text
         detected = False
 
-        # Check for canary in the buffer
-        if self.canary_value in self._buffer:
-            self._buffer = self._buffer.replace(self.canary_value, REDACTED_CANARY)
+        # Check for the canary (obfuscation-tolerant) in the buffer
+        if self._pattern.search(self._buffer):
+            self._buffer = self._pattern.sub(REDACTED_CANARY, self._buffer)
             detected = True
 
         # Emit all but the holdback (might be start of a split canary)
@@ -183,11 +217,15 @@ class StreamingCanaryFilter:
         """Flush remaining buffer content. Call once when the stream ends.
 
         Appends the security warning if a canary was detected at any point.
+        Idempotent: a second call returns "".
         """
         remaining = self._buffer
         self._buffer = ""
-        if self._warning_appended or remaining == "":
-            return remaining
+        if self._warning_appended:
+            self._warning_appended = False
+            if remaining:
+                return remaining + CANARY_WARNING
+            return CANARY_WARNING
         return remaining
 
     def mark_warning(self) -> None:
