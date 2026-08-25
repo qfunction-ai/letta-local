@@ -592,12 +592,23 @@ class LettaAgentV3(LettaAgentV2):
             parse_and_strip_skill_state(self.in_context_messages, self.tool_rules_solver)
             credit_task = None
 
+            # Security: load policy + canary BEFORE constructing the streaming
+            # filter below. The per-step loads in _step() are too late for the
+            # filter — it is built once, before the first step, from
+            # canary_checker's value (None until load_canary runs). Loads are
+            # idempotent (a second call sees the block exists).
+            # MUST run after apply_isolated_blocks_to_agent_state (above) so
+            # the conversation-scoped agent state is what gets read.
+            await _sec.load_tool_call_policy(self)
+            await _sec.load_canary(self)
+
             # Security: initialize streaming canary filter if canary is configured.
             # The non-streaming step() path filters via apply_output_filters().
             # The streaming path has a known gap — chunks are yielded before
             # the filter runs. This rolling buffer catches canary tokens split
             # across chunk boundaries before they reach the client.
             _canary_filter = None
+            _last_assistant_step_id = None
             _canary_value = getattr(self.canary_checker, "canary_value", None) if hasattr(self, "canary_checker") else None
             if _canary_value:
                 from letta.security.canary_output_filter import StreamingCanaryFilter
@@ -652,6 +663,8 @@ class LettaAgentV3(LettaAgentV2):
                     if _canary_filter and isinstance(chunk, LettaMessage):
                         from letta.schemas.letta_message import MessageType
                         if chunk.message_type == MessageType.assistant_message:
+                            if chunk.step_id:
+                                _last_assistant_step_id = chunk.step_id
                             chunk_content = str(chunk.content) if chunk.content else ""
                             safe_text, detected = _canary_filter.feed(chunk_content)
                             if detected:
@@ -684,6 +697,28 @@ class LettaAgentV3(LettaAgentV2):
 
                 if i == max_steps - 1 and self.stop_reason is None:
                     self.stop_reason = LettaStopReason(stop_reason=StopReasonType.max_steps.value)
+
+            # Security: flush the streaming canary filter. Emits the held-back
+            # tail (the filter delays content by the holdback window) and, if a
+            # canary was detected, the security warning — as a final synthesized
+            # assistant_message chunk. Empty flush (no canary configured, or
+            # nothing held and no warning) emits nothing, keeping streams from
+            # non-canary agents byte-identical. Precedent for synthesized
+            # non-LLM chunks with generated ids: the ping chunk. The stored
+            # response is handled separately by apply_output_filters below.
+            if _canary_filter is not None:
+                flush_tail = _canary_filter.flush()
+                if flush_tail:
+                    from letta.helpers.datetime_helpers import get_utc_time as _now
+                    from letta.schemas.letta_message import AssistantMessage as _FlushMsg
+
+                    flush_chunk = _FlushMsg(
+                        id=f"message-{uuid.uuid4()}",
+                        content=flush_tail,
+                        date=_now(),
+                        step_id=_last_assistant_step_id,
+                    )
+                    yield f"data: {flush_chunk.model_dump_json()}\n\n"
 
             ## Rebuild context window after stepping (safety net)
             # if not self.agent_state.message_buffer_autoclear:
