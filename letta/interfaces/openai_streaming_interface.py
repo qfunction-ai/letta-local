@@ -218,55 +218,12 @@ class OpenAIStreamingInterface:
                 function=FunctionCall(arguments=self._get_current_function_arguments(), name=function_name),
             )
 
-        # Prompt-based tool calling: parse text content as a JSON tool call
-        if self.tool_calling_mode == "prompt":
-            from letta.agents.helpers import _safe_load_tool_call_str
-            from letta.utils import get_tool_call_id
-
-            # Concatenate all content messages into a single string
-            text_content = "".join(self.content_buffer).strip()
-
-            if text_content:
-                parsed = _safe_load_tool_call_str(text_content)
-                if parsed and parsed.get("function"):
-                    # Successfully parsed a tool call from text
-                    import json
-                    func_name = parsed["function"]
-                    func_params = parsed.get("params", {})
-                    logger.info(
-                        f"Prompt-based tool calling (streaming): parsed tool call "
-                        f"{func_name}({list(func_params.keys())}) from text output"
-                    )
-                    return ToolCall(
-                        id=get_tool_call_id(),
-                        function=FunctionCall(
-                            name=func_name,
-                            arguments=json.dumps(func_params),
-                        ),
-                    )
-                else:
-                    # No tool call found — fall back to send_message if available
-                    import json
-                    valid_tool_names = getattr(self.llm_config, "valid_tool_names", None) or set()
-                    if "send_message" in valid_tool_names:
-                        logger.info(
-                            "Prompt-based tool calling (streaming): no tool call found "
-                            "in text, falling back to send_message"
-                        )
-                        return ToolCall(
-                            id=get_tool_call_id(),
-                            function=FunctionCall(
-                                name="send_message",
-                                arguments=json.dumps({"message": text_content}),
-                            ),
-                        )
-                    else:
-                        logger.info(
-                            "Prompt-based tool calling (streaming): no tool call found "
-                            "in text, and send_message not in tool list. "
-                            "Returning text as assistant message."
-                        )
-                        raise ValueError("No tool call found in stream")
+        # NOTE: prompt-based tool calling was never supported on this legacy
+        # interface — the old prompt branch read self.content_buffer, which is
+        # never appended to anywhere (dead code that always parsed ""). The
+        # live prompt-mode streaming path is SimpleOpenAIStreamingInterface.
+        # (Related latent issue, out of scope: voice_agent.py reads the same
+        # never-filled buffer.)
 
         raise ValueError("No tool call found in stream")
 
@@ -708,6 +665,12 @@ class SimpleOpenAIStreamingInterface:
         # Prompt-based tool calling mode: when "prompt", tool calls are
         # expected in text content rather than native tool_call deltas.
         self.tool_calling_mode = tool_calling_mode
+        # Set by get_tool_call_objects when the prompt-mode text was consumed
+        # as a tool call — get_content() then drops the TextContent so the
+        # parsed text is not ALSO persisted/rendered as an assistant message
+        # (the dual-emission bug). Only set on the real {function: ...} parse,
+        # never on the send_message fallback (the text is that call's argument).
+        self._prompt_text_consumed = False
 
     def get_content(self) -> list[TextContent | OmittedReasoningContent | ReasoningContent]:
         shown_omitted = False
@@ -726,6 +689,12 @@ class SimpleOpenAIStreamingInterface:
                     concat_content_parts.append("".join([c.text for c in msg.content]))
                 else:
                     concat_content_parts.append(msg.content)
+
+        # Dual-emission fix: when the prompt-mode text was consumed as a tool
+        # call, it must not flow out as TextContent (it would attach to the
+        # persisted assistant Message and render as an assistant message).
+        if self._prompt_text_consumed:
+            concat_content_parts = []
 
         if reasoning_content:
             combined_reasoning = "".join(reasoning_content)
@@ -779,7 +748,10 @@ class SimpleOpenAIStreamingInterface:
             text_content = "".join(text_parts).strip()
 
             if text_content:
-                parsed = _safe_load_tool_call_str(text_content)
+                # llm_config passed for parity with the non-streaming path
+                # (json_repair_level repair behavior) and with the stream-end
+                # decision in process() — same parser, same input, same result.
+                parsed = _safe_load_tool_call_str(text_content, llm_config=self.llm_config)
                 if parsed and parsed.get("function"):
                     import json
                     func_name = parsed["function"]
@@ -788,6 +760,11 @@ class SimpleOpenAIStreamingInterface:
                         f"Prompt-based tool calling (streaming): parsed tool call "
                         f"{func_name}({list(func_params.keys())}) from text output"
                     )
+                    # Dual-emission fix: the text was consumed as the tool call.
+                    # get_content() drops it so it is not also persisted/rendered
+                    # as an assistant message. (NOT set on the send_message
+                    # fallback below — there the text is the call's argument.)
+                    self._prompt_text_consumed = True
                     return [ToolCall(
                         id=get_tool_call_id(),
                         function=FunctionCall(
@@ -813,9 +790,8 @@ class SimpleOpenAIStreamingInterface:
                         )]
                     else:
                         logger.info(
-                            "Prompt-based tool calling (streaming): no tool call found "
-                            "in text, and send_message not in tool list. "
-                            "Returning text as assistant message."
+                            "Prompt-based tool calling (streaming): no tool call in text "
+                            "— treating as final answer (content-only response)."
                         )
                         return []
 
@@ -933,6 +909,43 @@ class SimpleOpenAIStreamingInterface:
                     f"last event: {self.last_event_type}"
                 )
 
+                # Prompt-based tool calling: held-back content decision.
+                # In prompt mode, content deltas were buffered (not yielded) in
+                # _process_chunk because the text may BE the tool call JSON.
+                # Decide now, at stream end, with the same parser get_tool_call_objects
+                # uses (and the same llm_config for json_repair_level parity with the
+                # non-streaming path) so the stream-side and persist-side decisions
+                # cannot diverge:
+                #   - parsed as a tool call -> emit nothing (the ToolCallMessage covers it)
+                #   - otherwise             -> emit ONE complete AssistantMessage
+                # Reasoning-only streams (no content) emit nothing.
+                if self.tool_calling_mode == "prompt":
+                    text_parts = []
+                    for msg in self.content_messages:
+                        if isinstance(msg, AssistantMessage):
+                            if isinstance(msg.content, list):
+                                text_parts.append("".join([c.text for c in msg.content if hasattr(c, "text")]))
+                            else:
+                                text_parts.append(msg.content)
+                    text = "".join(text_parts).strip()
+                    if text:
+                        from letta.agents.helpers import _safe_load_tool_call_str
+
+                        parsed = _safe_load_tool_call_str(text, llm_config=self.llm_config)
+                        if not (parsed and parsed.get("function")):
+                            if prev_message_type and prev_message_type != "assistant_message":
+                                message_index += 1
+                            final_msg = AssistantMessage(
+                                id=self.letta_message_id,
+                                content=text,
+                                date=datetime.now(timezone.utc).isoformat(),
+                                otid=Message.generate_otid_from_id(self.letta_message_id, message_index),
+                                run_id=self.run_id,
+                                step_id=self.step_id,
+                            )
+                            prev_message_type = final_msg.message_type
+                            yield final_msg
+
         except Exception as e:
             import traceback
 
@@ -1044,8 +1057,20 @@ class SimpleOpenAIStreamingInterface:
                     step_id=self.step_id,
                 )
                 self.content_messages.append(assistant_msg)
-                prev_message_type = assistant_msg.message_type
-                yield assistant_msg
+                if self.tool_calling_mode == "prompt":
+                    # Prompt-based tool calling: the text content may BE the tool
+                    # call JSON. Yielding it immediately (TTFT) dual-emits — the
+                    # client sees raw JSON as an assistant message while the same
+                    # text is being accumulated for parsing. Hold back; the
+                    # stream-end decision in process() either suppresses it
+                    # (parsed as tool call) or emits it as one complete message.
+                    # content_messages still accumulates — get_tool_call_objects
+                    # parses from it, and consumers that never call it
+                    # (e.g. summarization) see unchanged get_content() behavior.
+                    pass
+                else:
+                    prev_message_type = assistant_msg.message_type
+                    yield assistant_msg
 
             if message_delta.tool_calls is not None and len(message_delta.tool_calls) > 0:
                 # Accumulate per-index tool call fragments and emit deltas
