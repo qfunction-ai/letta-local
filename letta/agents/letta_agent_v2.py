@@ -799,6 +799,13 @@ class LettaAgentV2(BaseAgentV2):
         self.job_update_metadata = None
         self.last_function_response = None
         self.response_messages = []
+        # v0.16.27 prompt-mode empty-step handling (V3, but initialized here
+        # in shared _initialize_state next to response_messages so any
+        # instance-reusing path (WS adapter, batch, future eval runners)
+        # cannot leak a set nudge flag or a stale notice marker across turns):
+        self._empty_step_nudged = False
+        self._pending_notice_text = None
+        self._pending_notice_step_id = None
         self.override_system: str | None = None
         self._budget_exceeded: bool = False
 

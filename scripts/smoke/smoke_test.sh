@@ -192,6 +192,46 @@ print("".join(out))')"
   else
     bad "4.7 canary (no disclosure and no redaction — model did not comply; investigate before release)"
   fi
+
+  # check 4.9: prompt-mode empty-step nudge (v0.16.27). nemotron
+  # intermittently stops mid-task after narrating intent — the turn
+  # used to end silently (reasoning then nothing; Epsilon residual #2,
+  # TEST-14 breaker). The fix nudges once, then emits a visible notice.
+  # A completed prompt-mode turn ALWAYS carries user-visible output:
+  # an assistant_message (data or the notice). Fail on silent death.
+  # Payload gotchas (v0.16.26 probe lessons, do not rediscover): the
+  # pinned llm_config MUST be complete, and endpoint type "openai"
+  # WITHOUT an explicit local model_endpoint silently targets
+  # api.openai.com with a dummy key.
+  echo "== check 4.9: prompt-mode no silent death =="
+  PROMPT_AGENT_ID="$(curl -s -f -X POST "${BASE}/v1/agents/" \
+    -H "Content-Type: application/json" \
+    -H "User-Agent: letta-client/1.0" \
+    -d "{\"model\": \"${SMOKE_MODEL}\", \"embedding\": \"${SMOKE_EMBEDDING}\", \"model_settings\": {\"provider_type\": \"ollama\", \"temperature\": 0.0}, \"tools\": [\"archival_memory_search\"], \"llm_config\": {\"model\": \"nemotron-3-nano:4b\", \"model_endpoint_type\": \"openai\", \"model_endpoint\": \"http://host.docker.internal:11434/v1\", \"context_window\": 128000, \"put_inner_thoughts_in_kwargs\": false, \"tool_calling_mode\": \"prompt\"}, \"memory_blocks\": [{\"label\": \"persona\", \"value\": \"You are a helpful assistant. Use tools when asked.\"}, {\"label\": \"human\", \"value\": \"A student.\"}]}" \
+    | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])' 2>/dev/null || true)"
+  if [ -n "${PROMPT_AGENT_ID}" ]; then
+    R49="$(curl -s -f --max-time 300 -X POST "${BASE}/v1/agents/${PROMPT_AGENT_ID}/messages" \
+      -H "Content-Type: application/json" \
+      -H "User-Agent: letta-client/1.0" \
+      -d '{"messages": [{"role": "user", "content": "Use archival_memory_search to search for each of these topics one at a time: revenue, earnings, growth, market, products, customers."}], "stream": false}' || true)"
+    R49_TYPES="$(echo "${R49}" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("PARSE_ERROR"); raise SystemExit
+print(" ".join(m.get("message_type", "?") for m in d.get("messages", [])))' 2>/dev/null || echo PARSE_ERROR)"
+    if [ "${R49_TYPES}" = "PARSE_ERROR" ]; then
+      bad "4.9 prompt-mode no silent death (response unparseable)"
+    elif echo "${R49_TYPES}" | grep -q "assistant_message"; then
+      ok "4.9 prompt-mode no silent death (${R49_TYPES})"
+    else
+      bad "4.9 prompt-mode no silent death (SILENT DEATH: ${R49_TYPES})"
+    fi
+    curl -s -o /dev/null -X DELETE "${BASE}/v1/agents/${PROMPT_AGENT_ID}" -H "User-Agent: letta-client/1.0"
+  else
+    bad "4.9 prompt-mode no silent death (prompt-mode agent creation failed)"
+  fi
 else
   echo "== checks 3-4 skipped (no Ollama on localhost:11434) =="
 fi

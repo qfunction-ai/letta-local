@@ -44,7 +44,7 @@ from letta.llm_api import tool_call_repair as _tcr
 from letta.observability import step_recorder_integration as _sri
 from letta.otel.tracing import trace_method
 from letta.schemas.agent import AgentState
-from letta.schemas.enums import LLMCallType
+from letta.schemas.enums import LLMCallType, MessageRole
 from letta.schemas.letta_message import (
     ApprovalReturn,
     CompactionStats,
@@ -83,6 +83,15 @@ from letta.services.summarizer.thresholds import get_compaction_trigger_threshol
 from letta.settings import settings, summarizer_settings
 from letta.system import package_function_response
 from letta.utils import safe_create_task_with_return, validate_function_response
+
+# Visible notice emitted when a prompt-mode turn ends empty after the
+# bounded continuation nudge (model produced reasoning but no tool call
+# and no message output). Persisted AND streamed so clients get
+# something instead of silent nothing (Epsilon residual #2).
+EMPTY_RESPONSE_NOTICE = (
+    "[No response: the model produced reasoning but no tool call or "
+    "message output. Re-run the turn or rephrase.]"
+)
 
 
 def extract_compaction_stats_from_message(message: Message) -> CompactionStats | None:
@@ -719,6 +728,28 @@ class LettaAgentV3(LettaAgentV2):
                         step_id=_last_assistant_step_id,
                     )
                     yield f"data: {flush_chunk.model_dump_json()}\n\n"
+
+            # Empty-step notice (v0.16.27): if the turn ended empty after the
+            # bounded continuation nudge, _handle_ai_response set the pending
+            # notice marker. Stream it as a synthesized final assistant chunk
+            # (same construction as the canary-flush chunk above) so
+            # token-streaming clients get something instead of silent nothing.
+            # Non-token streaming and non-streaming paths already surface the
+            # notice via the non-user filter / response body. Marker is
+            # consumed here — cleared whether or not the yield happens.
+            if self._pending_notice_text is not None:
+                from letta.helpers.datetime_helpers import get_utc_time as _now
+                from letta.schemas.letta_message import AssistantMessage as _NoticeMsg
+
+                notice_chunk = _NoticeMsg(
+                    id=f"message-{uuid.uuid4()}",
+                    content=self._pending_notice_text,
+                    date=_now(),
+                    step_id=self._pending_notice_step_id,
+                )
+                self._pending_notice_text = None
+                self._pending_notice_step_id = None
+                yield f"data: {notice_chunk.model_dump_json()}\n\n"
 
             ## Rebuild context window after stepping (safety net)
             # if not self.agent_state.message_buffer_autoclear:
@@ -1813,13 +1844,114 @@ class LettaAgentV3(LettaAgentV2):
                     messages_to_persist = (initial_messages or []) + [heartbeat_msg]
                     continue_stepping, stop_reason = True, None
                 else:
-                    # No required tools remaining, end turn without persisting no-op
-                    continue_stepping = False
-                    stop_reason = LettaStopReason(stop_reason=StopReasonType.end_turn.value)
-                    messages_to_persist = initial_messages or []
+                    # Prompt-mode empty-step handling (v0.16.27): nemotron
+                    # intermittently emits narration-only completions mid-task
+                    # ("Now search for growth.") and stops — no content, no
+                    # tool-call envelope in either channel. Ending silently
+                    # here broke turns with only reasoning and nothing else
+                    # (Epsilon residual #2). In prompt mode, a reasoning-only
+                    # MID-TURN completion is never a legitimate final answer
+                    # (answers travel in content): nudge ONCE with a
+                    # continuation heartbeat; if the model stops again, end
+                    # with a visible notice — persisted AND streamed.
+                    # Mode precedence per resolve_tool_calling_mode's contract
+                    # (tool_capability_probe.py): pinned override wins FIRST,
+                    # then the pre-resolved cache.
+                    _mode = getattr(active_llm_config, "tool_calling_mode", None) or getattr(
+                        active_llm_config, "resolved_tool_calling_mode", None
+                    )
+                    _mid_turn = any(getattr(m, "role", None) == "tool" for m in self.response_messages)
+                    if _mode == "prompt" and _mid_turn and not self._empty_step_nudged:
+                        self._empty_step_nudged = True
+                        heartbeat_reason = (
+                            f"{NON_USER_MSG_PREFIX}The previous step produced only reasoning with no "
+                            f"tool call and no message. Continue the task: emit the tool call JSON or "
+                            f"a final answer."
+                        )
+                        from letta.server.rest_api.utils import create_heartbeat_system_message
+
+                        nudge_msg = create_heartbeat_system_message(
+                            agent_id=self.agent_state.id,
+                            model=self.agent_state.llm_config.model,
+                            function_call_success=True,
+                            timezone=self.agent_state.timezone,
+                            heartbeat_reason=heartbeat_reason,
+                            run_id=run_id,
+                        )
+                        messages_to_persist = (initial_messages or []) + [nudge_msg]
+                        continue_stepping, stop_reason = True, None
+                    elif _mode == "prompt" and _mid_turn:
+                        # Already nudged once and still empty: visible notice.
+                        self._pending_notice_text = EMPTY_RESPONSE_NOTICE
+                        self._pending_notice_step_id = step_id
+                        notice_msg = Message(
+                            role=MessageRole.assistant,
+                            content=[TextContent(text=EMPTY_RESPONSE_NOTICE)],
+                            agent_id=self.agent_state.id,
+                            model=self.agent_state.llm_config.model,
+                            created_at=get_utc_time(),
+                            run_id=run_id,
+                            step_id=step_id,
+                        )
+                        messages_to_persist = (initial_messages or []) + [notice_msg]
+                        continue_stepping, stop_reason = False, LettaStopReason(stop_reason=StopReasonType.end_turn.value)
+                    else:
+                        # No required tools remaining, end turn without persisting no-op
+                        # (first-step reasoning-only, native mode, no tool history — unchanged)
+                        continue_stepping = False
+                        stop_reason = LettaStopReason(stop_reason=StopReasonType.end_turn.value)
+                        messages_to_persist = initial_messages or []
 
             # Case 1b: No tool call but has content
             else:
+                # Prompt-mode empty-step handling (v0.16.27), Case 1b variant:
+                # the reasoning-only completion produces content=[ReasoningContent]
+                # with NO TextContent — non-empty, so Case 1a's gate never fires,
+                # and persisting it renders as a bare reasoning message: the same
+                # silent death from the client's view. Same gate, same nudge,
+                # same notice. Only fires when there is no user-visible text
+                # (TextContent absent) — genuine final answers are untouched.
+                _mode = getattr(active_llm_config, "tool_calling_mode", None) or getattr(
+                    active_llm_config, "resolved_tool_calling_mode", None
+                )
+                _mid_turn = any(getattr(m, "role", None) == "tool" for m in self.response_messages)
+                _has_text = any(isinstance(part, TextContent) for part in (content or []))
+                if _mode == "prompt" and _mid_turn and not _has_text:
+                    if not self._empty_step_nudged:
+                        self._empty_step_nudged = True
+                        heartbeat_reason = (
+                            f"{NON_USER_MSG_PREFIX}The previous step produced only reasoning with no "
+                            f"tool call and no message. Continue the task: emit the tool call JSON or "
+                            f"a final answer."
+                        )
+                        from letta.server.rest_api.utils import create_heartbeat_system_message
+
+                        nudge_msg = create_heartbeat_system_message(
+                            agent_id=self.agent_state.id,
+                            model=self.agent_state.llm_config.model,
+                            function_call_success=True,
+                            timezone=self.agent_state.timezone,
+                            heartbeat_reason=heartbeat_reason,
+                            run_id=run_id,
+                        )
+                        messages_to_persist = (initial_messages or []) + [nudge_msg]
+                        return messages_to_persist, True, None
+                    else:
+                        # Already nudged once and still reasoning-only: visible notice.
+                        self._pending_notice_text = EMPTY_RESPONSE_NOTICE
+                        self._pending_notice_step_id = step_id
+                        notice_msg = Message(
+                            role=MessageRole.assistant,
+                            content=[TextContent(text=EMPTY_RESPONSE_NOTICE)],
+                            agent_id=self.agent_state.id,
+                            model=self.agent_state.llm_config.model,
+                            created_at=get_utc_time(),
+                            run_id=run_id,
+                            step_id=step_id,
+                        )
+                        messages_to_persist = (initial_messages or []) + [notice_msg]
+                        return messages_to_persist, False, LettaStopReason(stop_reason=StopReasonType.end_turn.value)
+
                 continue_stepping, heartbeat_reason, stop_reason = self._decide_continuation(
                     agent_state=self.agent_state,
                     tool_call_name=None,
