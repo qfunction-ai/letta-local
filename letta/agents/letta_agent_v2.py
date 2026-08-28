@@ -33,6 +33,7 @@ from letta.security import agent_security as _sec
 from letta.security import audit_helpers as _ah
 from letta.security import output_filter as _outf
 from letta.observability import step_recorder_integration as _sri
+from letta.orm.errors import NoResultFound
 from letta.otel.tracing import log_event, trace_method, tracer
 from letta.prompts.prompt_generator import PromptGenerator
 from letta.schemas.agent import AgentState, UpdateAgent
@@ -787,8 +788,15 @@ class LettaAgentV2(BaseAgentV2):
                         step_metrics=step_metrics,
                         run_id=run_id,
                     )
+            except NoResultFound:
+                # Expected shape after an abandoned run — one clean line, no traceback.
+                self.logger.info(
+                    f"Skipping post-completion step tracking: step/run rows absent (abandoned run?) run_id={run_id}"
+                )
             except Exception as e:
-                self.logger.error(f"Error during post-completion step tracking: {e}")
+                # Normalized from ERROR to WARNING: an expected-condition handler
+                # logging at error level is part of the noise problem.
+                self.logger.warning(f"Error during post-completion step tracking: {e}")
 
     def _initialize_state(self):
         self._initialize_security()

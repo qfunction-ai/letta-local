@@ -42,6 +42,7 @@ from letta.security import audit_helpers as _ah_audit
 from letta.security import output_filter as _outf
 from letta.llm_api import tool_call_repair as _tcr
 from letta.observability import step_recorder_integration as _sri
+from letta.orm.errors import NoResultFound
 from letta.otel.tracing import trace_method
 from letta.schemas.agent import AgentState
 from letta.schemas.enums import LLMCallType, MessageRole
@@ -1790,6 +1791,13 @@ class LettaAgentV3(LettaAgentV2):
                         step_metrics=step_metrics,
                         run_id=run_id,
                     )
+            except NoResultFound:
+                # Expected shape after an abandoned run: the client disconnected,
+                # rows were never persisted (or already cleaned) — one clean line,
+                # no traceback (the old WARNING-per-abandonment noise misled triage).
+                self.logger.info(
+                    f"Skipping post-completion step tracking: step/run rows absent (abandoned run?) run_id={run_id}"
+                )
             except Exception as e:
                 self.logger.warning(f"Error during post-completion step tracking: {e}")
 

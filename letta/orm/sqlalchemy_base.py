@@ -513,9 +513,12 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
         if identifiers:
             if len(identifiers) == 1:
                 query = query.where(cls.id == identifiers[0])
+                query_conditions.append(f"id='{identifiers[0]}'")
             else:
                 query = query.where(cls.id.in_(identifiers))
-            query_conditions.append(f"id='{identifiers}'")
+                # Message-only formatting (error reporting): previously the LIST
+                # was f-stringed whole, rendering id='['run-...']' in not-found errors.
+                query_conditions.append("id IN (" + ", ".join(repr(i) for i in identifiers) + ")")
         elif not kwargs:
             logger.debug(f"No identifiers provided for {cls.__name__}, returning empty list")
             return None, query_conditions

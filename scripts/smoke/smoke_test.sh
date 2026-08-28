@@ -278,6 +278,33 @@ else
 fi
 rm -f "${ERRFILE}"
 
+# check 6c: loop_detection API round-trip + unknown-key rejection (v0.16.28).
+# LLM-free, deterministic. Functional firing proof lives in the unit
+# tests (PolicyChecker is pure); this pins PUT/GET symmetry and the
+# window_size -> 422 boundary (the Epsilon silent-mismatch burn).
+echo "== check 6c: loop_detection round-trip + window_size 422 =="
+R6C="$(curl -s -o /dev/null -w "%{http_code}" -X PUT "${BASE}/v1/agents/${AGENT_ID}/policy" \
+  -H "Content-Type: application/json" \
+  -H "User-Agent: letta-client/1.0" \
+  -d '{"denied_tools": ["execute_code"], "loop_detection": {"enabled": true, "window": 4, "threshold": 2}}')"
+R6C_GET="$(curl -s -f "${BASE}/v1/agents/${AGENT_ID}/policy" -H "User-Agent: letta-client/1.0")"
+LOOP_OK="$(echo "${R6C_GET}" | python3 -c '
+import sys, json
+try:
+    ld = json.load(sys.stdin).get("loop_detection") or {}
+except Exception:
+    print("no"); raise SystemExit
+print("yes" if (ld.get("enabled") is True and ld.get("window") == 4 and ld.get("threshold") == 2) else "no")' 2>/dev/null || echo no)"
+R6C_BAD="$(curl -s -o /dev/null -w "%{http_code}" -X PUT "${BASE}/v1/agents/${AGENT_ID}/policy" \
+  -H "Content-Type: application/json" \
+  -H "User-Agent: letta-client/1.0" \
+  -d '{"loop_detection": {"window_size": 5}}')"
+if [ "${R6C}" = "200" ] && [ "${LOOP_OK}" = "yes" ] && [ "${R6C_BAD}" = "422" ]; then
+  ok "6c. loop_detection round-trip + window_size 422"
+else
+  bad "6c. loop_detection (put=${R6C} roundtrip=${LOOP_OK} window_size=${R6C_BAD})"
+fi
+
 # ---------------------------------------------------------------- check 7
 echo "== check 7: policy/evaluate denies execute_code =="
 R7="$(curl -s -X POST "${BASE}/v1/agents/${AGENT_ID}/policy/evaluate" \
