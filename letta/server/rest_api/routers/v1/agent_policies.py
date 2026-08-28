@@ -17,9 +17,10 @@ endpoint dry-runs a tool call against the current policy.
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from letta.security.policy import (
+    LoopDetectionConfig,
     PolicyAction,
     PolicyCondition,
     PolicyDefaults,
@@ -69,6 +70,21 @@ class PolicyDefaultsRequest(BaseModel):
     timeout_seconds: Optional[int] = Field(default=None, description="Timeout limit (future)")
 
 
+class LoopDetectionRequest(BaseModel):
+    """API schema for loop detection configuration.
+
+    enabled defaults to True at the API layer: PUTting a loop_detection
+    block means you want it ON. The internal default stays False for the
+    no-config case — an API default of False would re-ship the silently
+    decorative control.
+    """
+
+    enabled: bool = Field(default=True, description="Enable tool loop detection.")
+    window: int = Field(default=5, ge=2, description="Number of recent tool calls to examine.")
+    threshold: int = Field(default=3, ge=2, description="Identical calls within the window that triggers a denial.")
+    model_config = ConfigDict(extra="forbid")  # window_size -> loud 422, not silent ignore
+
+
 class ToolCallPolicyRequest(BaseModel):
     """Request body for creating or replacing a tool call policy."""
 
@@ -77,6 +93,9 @@ class ToolCallPolicyRequest(BaseModel):
     rules: list[PolicyRuleRequest] = Field(default_factory=list, description="Ordered list of policy rules.")
     max_calls_per_tool: dict[str, int] = Field(default_factory=dict, description="Per-tool per-run call limit.")
     defaults: Optional[PolicyDefaultsRequest] = Field(default=None, description="Default policy settings.")
+    loop_detection: Optional[LoopDetectionRequest] = Field(
+        default=None, description="Tool loop detection configuration (same tool + same args repeated)."
+    )
 
 
 class ToolCallPolicyPatchRequest(BaseModel):
@@ -92,6 +111,9 @@ class ToolCallPolicyPatchRequest(BaseModel):
     rules: Optional[list[PolicyRuleRequest]] = Field(default=None, description="Policy rules. None = no change.")
     max_calls_per_tool: Optional[dict[str, int]] = Field(default=None, description="Per-tool per-run call limit. None = no change.")
     defaults: Optional[PolicyDefaultsRequest] = Field(default=None, description="Default policy settings. None = no change.")
+    loop_detection: Optional[LoopDetectionRequest] = Field(
+        default=None, description="Tool loop detection configuration. None = no change."
+    )
 
 
 class EvaluateRequest(BaseModel):
@@ -133,6 +155,14 @@ class PolicyDefaultsResponse(BaseModel):
     timeout_seconds: Optional[int] = None
 
 
+class LoopDetectionResponse(BaseModel):
+    """API response schema for loop detection configuration."""
+
+    enabled: bool
+    window: int
+    threshold: int
+
+
 class ToolCallPolicyResponse(BaseModel):
     """Response body for tool call policy endpoints."""
 
@@ -142,6 +172,7 @@ class ToolCallPolicyResponse(BaseModel):
     rules: list[PolicyRuleResponse] = Field(default_factory=list, description="Policy rules")
     max_calls_per_tool: dict[str, int] = Field(default_factory=dict, description="Per-tool per-run call limit")
     defaults: Optional[PolicyDefaultsResponse] = Field(default=None, description="Default policy settings")
+    loop_detection: Optional[LoopDetectionResponse] = Field(default=None, description="Tool loop detection configuration")
 
 
 class PolicyDecisionResponse(BaseModel):
@@ -207,6 +238,13 @@ def _to_policy_defaults(req: PolicyDefaultsRequest) -> PolicyDefaults:
     )
 
 
+def _to_loop_detection(req: Optional[LoopDetectionRequest]) -> Optional[LoopDetectionConfig]:
+    """Convert API loop detection config to the internal model (all three fields)."""
+    if req is None:
+        return None
+    return LoopDetectionConfig(enabled=req.enabled, window=req.window, threshold=req.threshold)
+
+
 def _to_policy(request: ToolCallPolicyRequest) -> ToolCallPolicy:
     """Convert a full API request to an internal ToolCallPolicy."""
     return ToolCallPolicy(
@@ -215,6 +253,7 @@ def _to_policy(request: ToolCallPolicyRequest) -> ToolCallPolicy:
         rules=[_to_policy_rule(r) for r in request.rules],
         max_calls_per_tool=request.max_calls_per_tool,
         defaults=_to_policy_defaults(request.defaults) if request.defaults else None,
+        loop_detection=_to_loop_detection(request.loop_detection),
     )
 
 
@@ -227,6 +266,14 @@ def _to_response(agent_id: str, policy: ToolCallPolicy) -> ToolCallPolicyRespons
             max_tool_calls=policy.defaults.max_tool_calls,
             max_tokens=policy.defaults.max_tokens,
             timeout_seconds=policy.defaults.timeout_seconds,
+        )
+
+    loop_resp = None
+    if policy.loop_detection is not None:
+        loop_resp = LoopDetectionResponse(
+            enabled=policy.loop_detection.enabled,
+            window=policy.loop_detection.window,
+            threshold=policy.loop_detection.threshold,
         )
 
     return ToolCallPolicyResponse(
@@ -250,6 +297,7 @@ def _to_response(agent_id: str, policy: ToolCallPolicy) -> ToolCallPolicyRespons
         ],
         max_calls_per_tool=policy.max_calls_per_tool,
         defaults=defaults_resp,
+        loop_detection=loop_resp,
     )
 
 
@@ -394,6 +442,8 @@ async def patch_tool_call_policy(
         existing.max_calls_per_tool = request.max_calls_per_tool
     if request.defaults is not None:
         existing.defaults = _to_policy_defaults(request.defaults)
+    if request.loop_detection is not None:
+        existing.loop_detection = _to_loop_detection(request.loop_detection)
 
     await _save_policy(agent_id, actor, existing)
     return _to_response(agent_id, existing)

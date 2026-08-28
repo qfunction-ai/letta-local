@@ -43,7 +43,7 @@ import hashlib
 import json
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # ---------------------------------------------------------------------------
 # Regex safety — reject patterns that cause catastrophic backtracking
@@ -165,6 +165,9 @@ class PolicyDefaults(BaseModel):
     max_tokens: Optional[int] = Field(default=None, description="Token limit (future)")
     timeout_seconds: Optional[int] = Field(default=None, description="Timeout limit (future)")
 
+    # Unknown keys must fail loudly (same rationale as LoopDetectionConfig).
+    model_config = ConfigDict(extra="forbid")
+
 
 class LoopDetectionConfig(BaseModel):
     """Configuration for tool loop detection.
@@ -178,6 +181,10 @@ class LoopDetectionConfig(BaseModel):
     enabled: bool = Field(default=False, description="Enable tool loop detection.")
     window: int = Field(default=5, ge=2, description="Number of recent calls to examine.")
     threshold: int = Field(default=3, ge=2, description="Number of identical calls within the window that triggers a denial.")
+
+    # Unknown keys (e.g. window_size) must fail loudly, not silently
+    # match nothing - a silent mismatch here burned an Epsilon audit cycle.
+    model_config = ConfigDict(extra="forbid")
 
 
 class ToolCallPolicy(BaseModel):
