@@ -457,6 +457,7 @@ class LettaAgentV3(LettaAgentV2):
             usage=self.usage,
             logprobs=self.logprobs,
             turns=self.turns if self.return_token_ids and self.turns else None,
+            run_id=run_id,
         )
         # Security: output filter runs before return (before audit log reflects redacted content)
         result = await _outf.apply_output_filters(self, result)
@@ -834,6 +835,7 @@ class LettaAgentV3(LettaAgentV2):
                     usage=self.usage,
                     logprobs=self.logprobs,
                     turns=self.turns if self.return_token_ids and self.turns else None,
+                    run_id=run_id,
                 )
                 # Security: apply output filters to the final response (same as non-streaming path).
                 # This ensures persisted/audited messages are filtered even when the streaming

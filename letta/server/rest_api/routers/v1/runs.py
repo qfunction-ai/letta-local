@@ -12,7 +12,7 @@ from letta.schemas.letta_message import LettaMessageUnion
 from letta.schemas.letta_request import RetrieveStreamRequest
 from letta.schemas.letta_stop_reason import StopReasonType
 from letta.schemas.openai.chat_completion_response import UsageStatistics
-from letta.schemas.run import Run
+from letta.schemas.run import Run, RunUpdate
 from letta.schemas.run_metrics import RunMetrics
 from letta.schemas.step import Step
 from letta.server.rest_api.dependencies import HeaderParams, get_headers, get_letta_server
@@ -409,3 +409,75 @@ async def retrieve_stream_for_run(
         stream,
         media_type="text/event-stream",
     )
+
+
+# Terminal notice persisted when a run is aborted. Distinct from
+# EMPTY_RESPONSE_NOTICE (different cause class: client-requested abort
+# vs model produced nothing). Persisted OUT OF CONTEXT (capture-endpoint
+# pattern): visible in GET /messages history, never injected into the
+# aborted loop's in-context message_ids.
+RUN_ABORTED_NOTICE = "[Run aborted: cancelled by client request before completion.]"
+
+
+@router.post("/{run_id}/abort", response_model=Run, operation_id="abort_run")
+async def abort_run(
+    run_id: str,
+    headers: HeaderParams = Depends(get_headers),
+    server: "SyncServer" = Depends(get_letta_server),
+):
+    """
+    Abort an in-flight run.
+
+    Takes effect at the next step boundary (the step loops poll run status
+    via _check_run_cancellation); token-streaming and step-chunk streams
+    additionally interrupt mid-generation via the per-run cancellation
+    event. A terminal notice is persisted to the agent's message history.
+
+    Idempotent: aborting a run already in a terminal state
+    (completed/failed/cancelled) is a no-op returning the current state.
+    """
+    actor = await server.user_manager.get_actor_or_default_async(actor_id=headers.actor_id)
+    runs_manager = RunManager()
+
+    run = await runs_manager.get_run_by_id(run_id=run_id, actor=actor)  # 404 if absent
+
+    if run.status in (RunStatus.completed, RunStatus.failed, RunStatus.cancelled):
+        return run  # idempotent no-op
+
+    # 1. Persist terminal state FIRST — the step-boundary check reads the DB.
+    #    (Completed-run race accepted+documented in the plan: millisecond window,
+    #    worst case a cosmetically wrong final status.)
+    run = await runs_manager.update_run_by_id_async(
+        run_id=run_id,
+        update=RunUpdate(status=RunStatus.cancelled),
+        actor=actor,
+    )
+
+    # 2. Set the in-process cancellation event directly — mid-generation
+    #    interrupt on streaming paths without waiting for the wrapper's
+    #    polling interval.
+    from letta.server.rest_api.streaming_response import get_cancellation_event_for_run
+
+    get_cancellation_event_for_run(run_id).set()
+
+    # 3. Persist a visible terminal notice, out-of-context (capture pattern):
+    #    history shows WHY there is no answer; in-context state stays owned
+    #    by the aborted loop.
+    from letta.schemas.enums import MessageRole
+    from letta.schemas.message import Message
+    from letta.schemas.letta_message_content import TextContent
+
+    await server.message_manager.create_many_messages_async(
+        [
+            Message(
+                role=MessageRole.assistant,
+                content=[TextContent(text=RUN_ABORTED_NOTICE)],
+                agent_id=run.agent_id,
+                created_at=get_utc_time(),
+                run_id=run_id,
+            )
+        ],
+        actor=actor,
+    )
+
+    return run

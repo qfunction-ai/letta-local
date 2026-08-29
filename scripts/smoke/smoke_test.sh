@@ -319,6 +319,46 @@ else
 fi
 
 # ---------------------------------------------------------------- check 8
+# check 7b: run-abort API (v0.16.29). Stream the multi-topic prompt (long
+# multi-step run), capture run_id from the first ping, abort mid-flight.
+# Assert: stream ends with stop_reason cancelled (may arrive from BOTH the
+# foreground wrapper and the loop's finish chunks — duplicates expected),
+# notice lands in history, agent remains usable, second abort is a no-op.
+# This is Epsilon's acceptance criteria 1-3 against the real machinery.
+echo "== check 7b: run-abort (cancel in-flight run) =="
+R7B_RUN_FILE="$(mktemp)"
+curl -s -N --max-time 120 -X POST "${BASE}/v1/agents/${AGENT_ID}/messages" \
+  -H "Content-Type: application/json" \
+  -H "User-Agent: letta-client/1.0" \
+  -d '{"messages": [{"role": "user", "content": "Use archival_memory_search to search for each of these topics one at a time: alpha, beta, gamma, delta, epsilon, zeta."}], "streaming": true, "stream_tokens": false, "include_pings": true}' \
+  > "${R7B_RUN_FILE}" &
+CURL_PID=$!
+# Wait for the first ping (carries run_id), then abort
+R7B_RUN_ID=""
+for _ in $(seq 1 60); do
+  R7B_RUN_ID="$(grep -m1 '"message_type": *"ping"' "${R7B_RUN_FILE}" 2>/dev/null | python3 -c 'import sys,json; print(json.loads(sys.stdin.read().strip()[5:].strip()).get("run_id") or "")' 2>/dev/null || true)"
+  [ -n "${R7B_RUN_ID}" ] && break
+  sleep 1
+done
+if [ -z "${R7B_RUN_ID}" ]; then
+  bad "7b. run-abort (no ping/run_id captured)"
+  kill $CURL_PID 2>/dev/null || true
+else
+  R7B_ABORT1="$(curl -s -o /dev/null -w "%{http_code}" -X POST "${BASE}/v1/runs/${R7B_RUN_ID}/abort" -H "User-Agent: letta-client/1.0")"
+  wait $CURL_PID 2>/dev/null || true
+  R7B_STOPS="$(grep -o '"stop_reason": *"cancelled"' "${R7B_RUN_FILE}" | head -1)"
+  R7B_NOTICE="$(curl -s -f "${BASE}/v1/agents/${AGENT_ID}/messages?limit=100" -H "User-Agent: letta-client/1.0" | grep -c "Run aborted" || true)"
+  R7B_ABORT2="$(curl -s -o /dev/null -w "%{http_code}" -X POST "${BASE}/v1/runs/${R7B_RUN_ID}/abort" -H "User-Agent: letta-client/1.0")"
+  # Follow-up: agent still usable
+  R7B_FOLLOWUP="$(curl -s -f --max-time 120 -X POST "${BASE}/v1/agents/${AGENT_ID}/messages" -H "Content-Type: application/json" -H "User-Agent: letta-client/1.0" -d '{"messages": [{"role": "user", "content": "Say the word done"}], "stream": false}' | grep -c '"assistant_message"' || true)"
+  if [ "${R7B_ABORT1}" = "200" ] && [ -n "${R7B_STOPS}" ] && [ "${R7B_NOTICE}" -ge 1 ] && [ "${R7B_ABORT2}" = "200" ] && [ "${R7B_FOLLOWUP}" -ge 1 ]; then
+    ok "7b. run-abort (cancelled, notice persisted, agent usable, idempotent)"
+  else
+    bad "7b. run-abort (abort1=${R7B_ABORT1} cancelled=${R7B_STOPS:+yes} notice=${R7B_NOTICE} abort2=${R7B_ABORT2} followup=${R7B_FOLLOWUP})"
+  fi
+fi
+rm -f "${R7B_RUN_FILE}"
+
 echo "== check 8: delete agent =="
 R8="$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "${BASE}/v1/agents/${AGENT_ID}")"
 if [ "${R8}" = "200" ] || [ "${R8}" = "204" ]; then

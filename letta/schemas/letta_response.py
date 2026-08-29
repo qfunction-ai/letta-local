@@ -86,6 +86,12 @@ class LettaResponse(BaseModel):
         "Includes token IDs and logprobs for each assistant turn, plus tool result content. "
         "Only present if return_token_ids was enabled. Used for RL training with loss masking.",
     )
+    run_id: Optional[str] = Field(
+        None,
+        description="The ID of the run that produced this response. Present when run "
+        "tracking is enabled — callers use it to abort the run via "
+        "POST /runs/{run_id}/abort if they give up on the request.",
+    )
 
     def __str__(self):
         return json_dumps(
