@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import traceback
 from datetime import datetime, timezone
 from logging.config import dictConfig
@@ -191,6 +192,16 @@ def _setup_logfile() -> "Path":
     return logfile
 
 
+# Sandboxed tool-execution children (Landlock sandbox et al.) must not
+# configure the FILE logging handler: `import letta` inside the sandbox runs
+# dictConfig at module import, and opening /root/.letta/logs/Letta.log under
+# Landlock (writes denied outside the exec dir) raises PermissionError,
+# killing the import BEFORE any tool code runs ("Unable to configure handler
+# 'file'"). Tool subprocess stdout/stderr is captured via markers anyway —
+# a sandboxed tool has no business writing the server's log file.
+_SANDBOXED_TOOL_EXECUTION = os.environ.get("LETTA_SANDBOXED_TOOL_EXECUTION", "").lower() in ("1", "true", "yes")
+
+
 # Determine which formatter to use based on configuration
 def _get_console_formatter() -> str:
     """Determine the appropriate console formatter based on settings."""
@@ -245,19 +256,10 @@ DEVELOPMENT_LOGGING = {
             "formatter": _get_console_formatter(),
             "filters": (["datadog_env"] if telemetry_settings.enable_datadog and not log_settings.json_logging else []) + ["log_context"],
         },
-        "file": {
-            "level": "DEBUG",
-            "class": "logging.handlers.RotatingFileHandler",
-            "filename": _setup_logfile(),
-            "maxBytes": 1024**2 * 10,  # 10 MB per file
-            "backupCount": 3,  # Keep 3 backup files
-            "formatter": _get_file_formatter(),
-            "filters": (["datadog_env"] if telemetry_settings.enable_datadog and not log_settings.json_logging else []) + ["log_context"],
-        },
     },
     "root": {  # Root logger handles all logs
         "level": logging.DEBUG if settings.debug else logging.INFO,
-        "handlers": ["console", "file"],
+        "handlers": ["console"] + ([] if _SANDBOXED_TOOL_EXECUTION else ["file"]),
     },
     "loggers": {
         "Letta": {
@@ -276,6 +278,22 @@ DEVELOPMENT_LOGGING = {
         },
     },
 }
+
+# File handler: server processes only. Sandboxed tool-execution children
+# (LETTA_SANDBOXED_TOOL_EXECUTION=1) get console-only logging — opening the
+# logfile under Landlock raises PermissionError at import time (see the
+# comment above _SANDBOXED_TOOL_EXECUTION), and tool stdout/stderr is
+# captured via markers anyway.
+if not _SANDBOXED_TOOL_EXECUTION:
+    DEVELOPMENT_LOGGING["handlers"]["file"] = {
+        "level": "DEBUG",
+        "class": "logging.handlers.RotatingFileHandler",
+        "filename": _setup_logfile(),
+        "maxBytes": 1024**2 * 10,  # 10 MB per file
+        "backupCount": 3,  # Keep 3 backup files
+        "formatter": _get_file_formatter(),
+        "filters": (["datadog_env"] if telemetry_settings.enable_datadog and not log_settings.json_logging else []) + ["log_context"],
+    }
 
 # Configure logging once at module initialization to avoid performance overhead
 dictConfig(DEVELOPMENT_LOGGING)

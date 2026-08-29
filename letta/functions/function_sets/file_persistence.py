@@ -40,6 +40,15 @@ def _get_limits():
 
 def _agent_file_dir(agent_state) -> Path:
     """Return the per-agent file directory, creating it if needed."""
+    # Inside sandboxed tool execution the sandbox sets LETTA_AGENT_FILES_DIR
+    # to the exact server-computed path (the child may compute a different
+    # ~/.letta under a different env). Prefer it when present.
+    env_dir = os.environ.get("LETTA_AGENT_FILES_DIR")
+    if env_dir:
+        agent_dir = Path(env_dir)
+        # Directory is created (and Landlock-read-granted) by the sandbox
+        # spawn side; do not attempt mkdir here (write-denied in-sandbox).
+        return agent_dir
     try:
         from letta.settings import file_persistence_settings, settings
 
@@ -49,6 +58,20 @@ def _agent_file_dir(agent_state) -> Path:
     agent_dir = base / agent_state.id
     agent_dir.mkdir(parents=True, exist_ok=True)
     return agent_dir
+
+
+def _write_base_dir(agent_state) -> Path:
+    """Return the base directory WRITES should target.
+
+    Under the Landlock sandbox, only <agent_dir>/.staging is write-granted;
+    the sandbox executor promotes staged files into the agent dir (with
+    size/path validation) after each tool call. Outside the sandbox,
+    writes go directly to the agent dir.
+    """
+    staging = os.environ.get("LETTA_STAGING_DIR")
+    if staging:
+        return Path(staging)
+    return _agent_file_dir(agent_state)
 
 
 def _validate_path(base_dir: Path, path: str) -> Path:
@@ -93,7 +116,7 @@ def file_write(agent_state, path: str, content: str) -> str:
     Returns:
         str: Confirmation message with the file path and size
     """
-    base_dir = _agent_file_dir(agent_state)
+    base_dir = _write_base_dir(agent_state)
     file_path = _validate_path(base_dir, path)
 
     max_file_size, max_total_size = _get_limits()
@@ -107,11 +130,13 @@ def file_write(agent_state, path: str, content: str) -> str:
             f"Write a smaller file or split the content."
         )
 
-    # Per-agent total size check
+    # Per-agent total size check (accounting against the persistent agent
+    # dir — staged writes get re-validated during promotion)
+    persistent_dir = _agent_file_dir(agent_state)
     total_size = 0
-    if base_dir.exists():
-        for f in base_dir.rglob("*"):
-            if f.is_file():
+    if persistent_dir.exists():
+        for f in persistent_dir.rglob("*"):
+            if f.is_file() and ".staging" not in f.parts:
                 total_size += f.stat().st_size
 
     # If overwriting an existing file, subtract its current size

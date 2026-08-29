@@ -148,12 +148,18 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                     "NO_COLOR": "1",
                     "TERM": "dumb",
                     "PYTHONUNBUFFERED": "1",
+                    # The sandboxed child must not configure file logging:
+                    # letta.log's import-time dictConfig opens the logfile,
+                    # which Landlock denies (writes outside the exec dir) —
+                    # killing `import letta` before any tool code runs.
+                    "LETTA_SANDBOXED_TOOL_EXECUTION": "1",
                 }
             )
 
             # Build wrapper config
             # Compute staging directory for file persistence (agent files)
             staging_write_paths = []
+            agent_read_paths = []
             if self.agent_id:
                 try:
                     from letta.settings import file_persistence_settings, settings
@@ -164,9 +170,13 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                 # Ensure staging dir exists so Landlock can grant write access
                 os.makedirs(staging_dir, exist_ok=True)
                 staging_write_paths = [staging_dir]
+                # file_read/file_list need READ access to the agent's promoted
+                # files dir (without this, Path.exists() swallows the Landlock
+                # EACCES as False and the tools silently return empty/missing)
+                agent_read_paths = [os.path.join(base, self.agent_id)]
 
             wrapper_config = {
-                "allowed_read_paths": landlock_config.allowed_read_paths + [sandbox_dir],
+                "allowed_read_paths": landlock_config.allowed_read_paths + [sandbox_dir] + agent_read_paths,
                 "allowed_write_paths": landlock_config.allowed_write_paths + [sandbox_dir] + staging_write_paths,
                 "allowed_execute_paths": landlock_config.allowed_execute_paths,
                 "allow_tcp_connect": landlock_config.allow_tcp_connect,

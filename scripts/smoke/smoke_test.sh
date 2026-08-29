@@ -232,6 +232,46 @@ print(" ".join(m.get("message_type", "?") for m in d.get("messages", [])))' 2>/d
   else
     bad "4.9 prompt-mode no silent death (prompt-mode agent creation failed)"
   fi
+
+  # check 4.95: sandboxed file tools under Landlock (v0.16.30). The linuxkit
+  # 7.0.12 kernel started enforcing Landlock, exposing three failure layers:
+  # import-time log config writing the server logfile (killed EVERY tool that
+  # imports letta), file_write targeting the write-denied agent dir (staging
+  # was granted but the tool never used it), and silent read emptiness
+  # (Path.exists() swallows EACCES as False). run_first on file_write forces
+  # the call deterministically; assert the tool executes WITHOUT the
+  # import-crash class (status success = import survived + write+promotion
+  # worked — the full chain).
+  echo "== check 4.95: file tools under Landlock sandbox =="
+  FILE_AGENT_ID="$(curl -s -f -X POST "${BASE}/v1/agents/" \
+    -H "Content-Type: application/json" \
+    -H "User-Agent: letta-client/1.0" \
+    -d "{\"model\": \"${SMOKE_MODEL}\", \"embedding\": \"${SMOKE_EMBEDDING}\", \"model_settings\": {\"provider_type\": \"ollama\", \"temperature\": 0.0}, \"tools\": [\"file_write\", \"file_read\", \"file_list\"], \"tool_rules\": [{\"type\": \"run_first\", \"tool_name\": \"file_write\"}], \"memory_blocks\": [{\"label\": \"persona\", \"value\": \"You are a helpful assistant. Use the file tools when asked.\"}, {\"label\": \"human\", \"value\": \"A student.\"}]}" \
+    | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])' 2>/dev/null || true)"
+  if [ -n "${FILE_AGENT_ID}" ]; then
+    R495="$(curl -s -f --max-time 240 -X POST "${BASE}/v1/agents/${FILE_AGENT_ID}/messages" \
+      -H "Content-Type: application/json" \
+      -H "User-Agent: letta-client/1.0" \
+      -d '{"messages": [{"role": "user", "content": "Use file_write to save the text smoke-check to notes.txt."}], "stream": false}' || true)"
+    R495_STATUS="$(echo "${R495}" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("PARSE_ERROR"); raise SystemExit
+for m in d.get("messages", []):
+    if m.get("message_type") == "tool_return_message" and m.get("name") == "file_write":
+        print(m.get("status")); raise SystemExit
+print("no_file_write_return")' 2>/dev/null || echo PARSE_ERROR)"
+    if [ "${R495_STATUS}" = "success" ]; then
+      ok "4.95 file tools under Landlock (write staged + promoted)"
+    else
+      bad "4.95 file tools under Landlock (file_write status: ${R495_STATUS})"
+    fi
+    curl -s -o /dev/null -X DELETE "${BASE}/v1/agents/${FILE_AGENT_ID}" -H "User-Agent: letta-client/1.0"
+  else
+    bad "4.95 file tools under Landlock (agent creation failed)"
+  fi
 else
   echo "== checks 3-4 skipped (no Ollama on localhost:11434) =="
 fi
