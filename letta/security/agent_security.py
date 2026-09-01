@@ -179,7 +179,22 @@ async def load_canary(agent) -> None:
 
     Works with both BaseAgent (pass agent_state) and BaseAgentV2
     (uses self.agent_state).
+
+    Canary opt-out (LETTA_CANARY_ENABLED=false): returns before any
+    arming — no block creation, no value loading, and the fail-closed
+    except path below (which arms a fresh in-memory canary on failure)
+    is unreachable. Pre-existing __canary__ blocks remain as inert
+    system-prompt text; all consumers (output_filter, streaming filter
+    gate, CanaryChecker.check) are already inert on an unset value.
     """
+    # MUST precede the try/except: the except path generates and arms a
+    # fresh canary (fail-closed), so a guard inside the try would not
+    # fully disable the subsystem.
+    from letta.settings import settings
+
+    if not settings.canary_enabled:
+        return
+
     from letta.security.canary import CanaryChecker
 
     try:

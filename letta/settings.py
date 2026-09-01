@@ -330,6 +330,26 @@ class Settings(BaseSettings):
     # SSE Streaming cancellation settings
     enable_cancellation_aware_streaming: bool = Field(True, description="Enable cancellation aware streaming")
 
+    # Exfiltration canary opt-out (security-adjacent server setting).
+    # Default True: the canary stays armed for all consumers. Single-user,
+    # zero-injection-surface deployments may opt out — semantics documented
+    # in the field description (pre-existing __canary__ blocks stay as
+    # inert prompt text; all other security subsystems unconditional).
+    canary_enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable the exfiltration canary subsystem (canary token block, "
+            "output filtering, tool-arg checks). Default True. Set False for "
+            "deployments with no injection surface (e.g. zero-tool single-user "
+            "supervisors) to avoid the streaming holdback latency. When False: "
+            "no canary blocks are created or loaded and no filtering runs; "
+            "PRE-EXISTING __canary__ blocks remain as inert system-prompt text. "
+            "A canary-off deployment knowingly forgoes this one defense — all "
+            "other security subsystems (policy engine, audit log, secret "
+            "scanner, tool validators) remain unconditional."
+        ),
+    )
+
     # default handles
     default_llm_handle: Optional[str] = None
     default_embedding_handle: Optional[str] = None
