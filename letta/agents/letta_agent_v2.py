@@ -814,6 +814,10 @@ class LettaAgentV2(BaseAgentV2):
         self._empty_step_nudged = False
         self._pending_notice_text = None
         self._pending_notice_step_id = None
+        # v0.16.32 security-flag propagation: the single accumulated
+        # source; SSE event, assistant-message metadata, and run-metadata
+        # summary all DERIVE from this list (single-source discipline).
+        self._security_flags: list = []
         self.override_system: str | None = None
         self._budget_exceeded: bool = False
 

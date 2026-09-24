@@ -99,6 +99,11 @@ class LettaMessage(BaseModel):
     is_err: bool | None = None
     seq_id: int | None = None
     run_id: str | None = None
+    # v0.16.32 security-flag propagation: populated on LIVE responses
+    # only (attached at response build), NOT persisted per-message — the
+    # durable surface is Run metadata (security_flags key). None = no
+    # flagged tool output was consumed this run.
+    security_flags: Optional[list] = None
 
     @field_serializer("date")
     def serialize_datetime(self, dt: datetime, _info):
@@ -746,3 +751,24 @@ class LegacyInternalMonologue(LettaMessage):
 
 
 LegacyLettaMessage = Union[LegacyInternalMonologue, AssistantMessage, LegacyFunctionCallMessage, LegacyFunctionReturn]
+
+
+class SecurityFlagMessage(BaseModel):
+    """Out-of-band security flag event (v0.16.32).
+
+    Emitted mid-stream at detection time (tool-return time) when a tool
+    output triggers the injection scanner. NOT a chat message: clients
+    must not render it as message content — it is a signal for badge/UI
+    rendering. Flows through the stream loop exactly like LettaStopReason
+    (pydantic model, non-LettaMessage; excluded from LettaResponse builds).
+
+    Binding shape per Epsilon Addendum A: `message_type` is the
+    discriminator key (matches consumer dispatch vocabulary); one flag
+    per event; multi-tool turns emit multiple events.
+    """
+
+    message_type: Literal["security_flag"] = Field("security_flag", description="The type of the message.")
+    flag: str = Field(..., description="The detection class label (e.g. 'instruction_override').")
+    tool_name: str = Field(..., description="The tool whose output was flagged.")
+    step_id: Optional[str] = Field(None, description="The step in which detection fired.")
+    run_id: Optional[str] = Field(None, description="The run consuming the flagged output.")

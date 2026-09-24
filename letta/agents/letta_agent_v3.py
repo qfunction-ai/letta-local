@@ -47,6 +47,7 @@ from letta.otel.tracing import trace_method
 from letta.schemas.agent import AgentState
 from letta.schemas.enums import LLMCallType, MessageRole
 from letta.schemas.letta_message import (
+    SecurityFlagMessage,
     ApprovalReturn,
     CompactionStats,
     EventMessage,
@@ -451,6 +452,13 @@ class LettaAgentV3(LettaAgentV2):
             response_letta_messages = [m for m in response_letta_messages if m.message_type in include_return_message_types]
         # Set context_tokens to expose actual context window usage (vs accumulated prompt_tokens)
         self.usage.context_tokens = self.context_token_estimate
+        # v0.16.32: attach accumulated security flags to the final assistant
+        # message (live-response surface; derived from the single source).
+        if self._security_flags:
+            for _m in reversed(response_letta_messages):
+                if getattr(_m, "message_type", None) == "assistant_message":
+                    _m.security_flags = list(self._security_flags)
+                    break
         result = LettaResponse(
             messages=response_letta_messages,
             stop_reason=self.stop_reason,
@@ -828,7 +836,17 @@ class LettaAgentV3(LettaAgentV2):
 
             if run_id:
                 # Filter out LettaStopReason from messages (only valid in LettaStreamingResponse, not LettaResponse)
-                filtered_messages = [m for m in response_letta_messages if not isinstance(m, LettaStopReason)]
+                filtered_messages = [
+                    m for m in response_letta_messages
+                    if not isinstance(m, (LettaStopReason, SecurityFlagMessage))
+                ]
+                # v0.16.32: attach accumulated security flags to the final
+                # assistant message in the job-metadata result too.
+                if self._security_flags:
+                    for _m in reversed(filtered_messages):
+                        if getattr(_m, "message_type", None) == "assistant_message":
+                            _m.security_flags = list(self._security_flags)
+                            break
                 result = LettaResponse(
                     messages=filtered_messages,
                     stop_reason=self.stop_reason,
@@ -1612,6 +1630,22 @@ class LettaAgentV3(LettaAgentV2):
                 in_context_messages=messages,  # update the in-context messages
             )
 
+            # v0.16.32: emit security-flag events for THIS step before the
+            # token/step branch point — covers both adapter modes (Epsilon
+            # review finding 3). Detection already fired during execution
+            # (flags accumulated at the validator call site above). Flows
+            # through stream()'s loop like LettaStopReason (pydantic model,
+            # out-of-band; excluded from LettaResponse builds).
+            from letta.schemas.letta_message import SecurityFlagMessage
+
+            for _flag in [f for f in self._security_flags if f.get("step_id") == step_id]:
+                yield SecurityFlagMessage(
+                    flag=_flag["flag"],
+                    tool_name=_flag["tool_name"],
+                    step_id=_flag.get("step_id"),
+                    run_id=_flag.get("run_id"),
+                )
+
             # yield back generated messages
             if llm_adapter.supports_token_streaming():
                 if tool_calls:
@@ -2181,7 +2215,7 @@ class LettaAgentV3(LettaAgentV2):
             # Security: validate tool output for prompt injection (opt-in, fail-open)
             if getattr(self, "tool_output_validation_enabled", False):
                 from letta.security.tool_output_validator import validate_tool_output
-                _tool_output_warning = await validate_tool_output(
+                _tool_output_warning, _flag_label = await validate_tool_output(
                     spec["name"], str(res.func_return) if res.func_return else "", self,
                 )
                 if _tool_output_warning:
@@ -2189,6 +2223,15 @@ class LettaAgentV3(LettaAgentV2):
                         (str(res.func_return) if res.func_return else "")
                         + _tool_output_warning
                     )
+                    # v0.16.32 flag propagation: accumulate the signal (the
+                    # single source — SSE event, message metadata, and run
+                    # summary all derive from this list).
+                    self._security_flags.append({
+                        "flag": _flag_label,
+                        "tool_name": spec["name"],
+                        "step_id": step_id,
+                        "run_id": run_id,
+                    })
             # Security: append audit warning from policy engine (e.g., secret detected)
             if policy_decision.audit_warning:
                 res.func_return = (

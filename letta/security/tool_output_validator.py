@@ -31,7 +31,7 @@ async def validate_tool_output(
     tool_name: str,
     tool_result: str,
     agent: "BaseAgentV2",
-) -> Optional[str]:
+) -> tuple[Optional[str], Optional[str]]:
     """Scan a tool result for prompt injection patterns. Fail-open.
 
     Returns a warning string if injection is detected, None if clean.
@@ -44,13 +44,15 @@ async def validate_tool_output(
         agent: The agent instance (for feature flag and audit logger).
 
     Returns:
-        Warning string if injection detected, None if clean or disabled.
+        Tuple of (warning_string, label). Both None if clean or disabled.
+        The label is the detection class (e.g. "instruction_override") —
+        consumed by the security-flag propagation layer (v0.16.32).
     """
     try:
         # Feature flag — default off (Delta unaffected)
         enabled = getattr(agent, "tool_output_validation_enabled", False)
         if not enabled:
-            return None
+            return None, None
 
         from letta.security.content_validator import ContentValidator
 
@@ -67,10 +69,10 @@ async def validate_tool_output(
                 getattr(agent, "_current_step_id", None),
                 getattr(agent, "_current_run_id", None),
             )
-            return f"\n\n[SECURITY WARNING: Potential prompt injection detected in tool output ({label})]"
+            return f"\n\n[SECURITY WARNING: Potential prompt injection detected in tool output ({label})]", label
 
-        return None
+        return None, None
 
     except Exception as e:
         logger.warning(f"Tool output validation failed (fail-open): {e}")
-        return None
+        return None, None

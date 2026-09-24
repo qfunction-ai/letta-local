@@ -1815,6 +1815,12 @@ async def send_message(
             else:
                 # NOTE: we could also consider this an error?
                 stop_reason = None
+            # v0.16.32: durable flag surface — merge accumulated security
+            # flags into the run metadata (all finalization paths).
+            if getattr(agent_loop, "_security_flags", None):
+                md = dict(run_update_metadata or {})
+                md["security_flags"] = agent_loop._security_flags
+                run_update_metadata = md
             await server.run_manager.update_run_by_id_async(
                 run_id=run.id,
                 update=RunUpdate(
@@ -2114,6 +2120,17 @@ async def _process_message_background(
         from letta.schemas.enums import RunStatus
         from letta.schemas.letta_stop_reason import StopReasonType
 
+        def _merge_security_flags(update: RunUpdate) -> RunUpdate:
+            # v0.16.32: durable flag surface — a poisoned run that then
+            # fails or is cancelled is the forensically important case;
+            # flags must survive every finalization path.
+            flags = getattr(agent_loop, "_security_flags", None)
+            if flags:
+                md = dict(update.metadata or {})
+                md["security_flags"] = flags
+                update.metadata = md
+            return update
+
         # Handle cases where stop_reason might be None (defensive)
         if result.stop_reason and result.stop_reason.stop_reason == "cancelled":
             run_status = RunStatus.cancelled
@@ -2129,7 +2146,7 @@ async def _process_message_background(
 
         await runs_manager.update_run_by_id_async(
             run_id=run_id,
-            update=RunUpdate(status=run_status, stop_reason=stop_reason),
+            update=_merge_security_flags(RunUpdate(status=run_status, stop_reason=stop_reason)),
             actor=actor,
         )
 
@@ -2141,7 +2158,9 @@ async def _process_message_background(
 
         await runs_manager.update_run_by_id_async(
             run_id=run_id,
-            update=RunUpdate(status=RunStatus.failed, stop_reason=StopReasonType.error, metadata={"error": str(e)}),
+            update=_merge_security_flags(
+                RunUpdate(status=RunStatus.failed, stop_reason=StopReasonType.error, metadata={"error": str(e)})
+            ),
             actor=actor,
         )
     except Exception as e:
@@ -2152,7 +2171,9 @@ async def _process_message_background(
 
         await runs_manager.update_run_by_id_async(
             run_id=run_id,
-            update=RunUpdate(status=RunStatus.failed, stop_reason=StopReasonType.error, metadata={"error": str(e)}),
+            update=_merge_security_flags(
+                RunUpdate(status=RunStatus.failed, stop_reason=StopReasonType.error, metadata={"error": str(e)})
+            ),
             actor=actor,
         )
     finally:
@@ -2301,9 +2322,13 @@ async def send_message_async(
                 from letta.schemas.enums import RunStatus
                 from letta.schemas.letta_stop_reason import StopReasonType
 
+                _md = {"error": error_str}
+                _flags = getattr(agent_loop, "_security_flags", None)
+                if _flags:
+                    _md["security_flags"] = _flags
                 await runs_manager.update_run_by_id_async(
                     run_id=run.id,
-                    update=RunUpdate(status=RunStatus.failed, stop_reason=StopReasonType.error, metadata={"error": error_str}),
+                    update=RunUpdate(status=RunStatus.failed, stop_reason=StopReasonType.error, metadata=_md),
                     actor=actor,
                 )
 
