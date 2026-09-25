@@ -214,6 +214,17 @@ async def load_canary(agent) -> None:
 
         if canary_block and canary_block.value:
             agent.canary_checker.update_canary(canary_block.value)
+            # v0.16.33: __canary__ is framework-managed by construction — no
+            # legitimate consumer reason for writability. Consumers that pass
+            # canary blocks through the CreateAgent payload get read_only=False
+            # (schema default), silently disarming BlockGuard. Upgrade at load
+            # time catches every creation path regardless of what was sent.
+            if not getattr(canary_block, "read_only", False):
+                canary_block.read_only = True  # in-memory (arms THIS request's guards)
+                try:
+                    await _persist_canary_read_only(canary_block)
+                except Exception as e:
+                    agent.logger.warning(f"Failed to persist canary read_only upgrade (in-memory upgrade stands): {e}")
         else:
             # Lazy creation: create the canary block in DB and in-memory
             canary_value = CanaryChecker.generate_canary_value()
@@ -227,6 +238,27 @@ async def load_canary(agent) -> None:
         # can do without DB access).
         if not agent.canary_checker.canary_value:
             agent.canary_checker.update_canary(CanaryChecker.generate_canary_value())
+
+
+async def _persist_canary_read_only(block) -> None:
+    """Persist the read_only upgrade for a __canary__ block (short session).
+
+    Flush-inside-async-with — the established _create_canary_block pattern
+    (context exit commits; the lazy-mint path's persistence proves it).
+    Failure is caught by the caller: the in-memory upgrade stands (arms the
+    tool-executor guard layer for the request); the DB write is for
+    persistence only.
+    """
+    from letta.orm.block import Block as BlockModel
+    from letta.server.db import db_registry
+    from sqlalchemy import select
+
+    async with db_registry.async_session() as session:
+        stmt = select(BlockModel).where(BlockModel.id == block.id)
+        row = (await session.execute(stmt)).scalar_one_or_none()
+        if row is not None and not row.read_only:
+            row.read_only = True
+            await session.flush()
 
 
 async def _create_canary_block(agent, agent_state, canary_value: str) -> None:
@@ -259,6 +291,10 @@ async def _create_canary_block(agent, agent_state, canary_value: str) -> None:
         if existing:
             # Block exists in DB but wasn't in agent_state — load its value
             agent.canary_checker.update_canary(existing.value)
+            # v0.16.33: same read_only upgrade on this path (session already open)
+            if not existing.read_only:
+                existing.read_only = True
+                await session.flush()
             # Add to in-memory state if not already there
             if not any(b.label == CanaryChecker.CANARY_BLOCK_LABEL for b in agent_state.memory.blocks):
                 pydantic_block = existing.to_pydantic()

@@ -21,17 +21,20 @@ from letta.settings import settings
 
 
 def _agent(blocks):
-    """Minimal agent stand-in for load_canary (SimpleNamespace precedent)."""
+    """Minimal agent stand-in for load_canary (SimpleNamespace precedent).
+    v0.16.33: logger required (read_only upgrade warns on persist failure);
+    blocks need .id for the persist helper."""
     return SimpleNamespace(
         agent_state=SimpleNamespace(memory=SimpleNamespace(blocks=list(blocks))),
         canary_checker=CanaryChecker(),
         agent_id="agent-test",
         actor=SimpleNamespace(organization_id="org-test"),
+        logger=SimpleNamespace(warning=lambda *_: None),
     )
 
 
-def _canary_block(value="CANARY-11111111-2222-3333-4444-555555555555"):
-    return SimpleNamespace(label="__canary__", value=value)
+def _canary_block(value="CANARY-11111111-2222-3333-4444-555555555555", read_only=False):
+    return SimpleNamespace(label="__canary__", value=value, read_only=read_only, id="block-test-canary")
 
 
 class TestFlagOff:
