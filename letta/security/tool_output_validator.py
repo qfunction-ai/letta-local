@@ -31,6 +31,8 @@ async def validate_tool_output(
     tool_name: str,
     tool_result: str,
     agent: "BaseAgentV2",
+    step_id: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """Scan a tool result for prompt injection patterns. Fail-open.
 
@@ -42,6 +44,9 @@ async def validate_tool_output(
         tool_name: Name of the tool that produced the result.
         tool_result: The tool's return value as a string.
         agent: The agent instance (for feature flag and audit logger).
+        step_id: Step context for the audit event (explicit at the call
+            site — the tool_executed-logger pattern; v0.16.33).
+        run_id: Run context for the audit event (same pattern).
 
     Returns:
         Tuple of (warning_string, label). Both None if clean or disabled.
@@ -66,8 +71,8 @@ async def validate_tool_output(
                 agent.actor,
                 tool_name,
                 label,
-                getattr(agent, "_current_step_id", None),
-                getattr(agent, "_current_run_id", None),
+                step_id,
+                run_id,
             )
             return f"\n\n[SECURITY WARNING: Potential prompt injection detected in tool output ({label})]", label
 

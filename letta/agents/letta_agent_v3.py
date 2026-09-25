@@ -2217,6 +2217,7 @@ class LettaAgentV3(LettaAgentV2):
                 from letta.security.tool_output_validator import validate_tool_output
                 _tool_output_warning, _flag_label = await validate_tool_output(
                     spec["name"], str(res.func_return) if res.func_return else "", self,
+                    step_id=step_id, run_id=run_id,
                 )
                 if _tool_output_warning:
                     res.func_return = (
