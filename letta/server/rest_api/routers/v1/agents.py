@@ -1815,12 +1815,12 @@ async def send_message(
             else:
                 # NOTE: we could also consider this an error?
                 stop_reason = None
-            # v0.16.32: durable flag surface — merge accumulated security
-            # flags into the run metadata (all finalization paths).
-            if getattr(agent_loop, "_security_flags", None):
-                md = dict(run_update_metadata or {})
-                md["security_flags"] = agent_loop._security_flags
-                run_update_metadata = md
+            # v0.16.33: merged via the shared helper (all finalization paths).
+            from letta.services.streaming_service import _merge_security_flags as _msf_streaming
+
+            _dummy_update = RunUpdate(status=run_status, metadata=run_update_metadata)
+            _msf_streaming(_dummy_update, agent_loop)
+            run_update_metadata = _dummy_update.metadata
             await server.run_manager.update_run_by_id_async(
                 run_id=run.id,
                 update=RunUpdate(
@@ -2120,16 +2120,9 @@ async def _process_message_background(
         from letta.schemas.enums import RunStatus
         from letta.schemas.letta_stop_reason import StopReasonType
 
-        def _merge_security_flags(update: RunUpdate) -> RunUpdate:
-            # v0.16.32: durable flag surface — a poisoned run that then
-            # fails or is cancelled is the forensically important case;
-            # flags must survive every finalization path.
-            flags = getattr(agent_loop, "_security_flags", None)
-            if flags:
-                md = dict(update.metadata or {})
-                md["security_flags"] = flags
-                update.metadata = md
-            return update
+        # v0.16.33: the ONE module-level definition (streaming_service);
+        # the v0.16.32 local closure is replaced by the import.
+        from letta.services.streaming_service import _merge_security_flags
 
         # Handle cases where stop_reason might be None (defensive)
         if result.stop_reason and result.stop_reason.stop_reason == "cancelled":
@@ -2146,7 +2139,7 @@ async def _process_message_background(
 
         await runs_manager.update_run_by_id_async(
             run_id=run_id,
-            update=_merge_security_flags(RunUpdate(status=run_status, stop_reason=stop_reason)),
+            update=_merge_security_flags(RunUpdate(status=run_status, stop_reason=stop_reason), agent_loop),
             actor=actor,
         )
 
@@ -2159,7 +2152,8 @@ async def _process_message_background(
         await runs_manager.update_run_by_id_async(
             run_id=run_id,
             update=_merge_security_flags(
-                RunUpdate(status=RunStatus.failed, stop_reason=StopReasonType.error, metadata={"error": str(e)})
+                RunUpdate(status=RunStatus.failed, stop_reason=StopReasonType.error, metadata={"error": str(e)}),
+                agent_loop,
             ),
             actor=actor,
         )
@@ -2172,7 +2166,8 @@ async def _process_message_background(
         await runs_manager.update_run_by_id_async(
             run_id=run_id,
             update=_merge_security_flags(
-                RunUpdate(status=RunStatus.failed, stop_reason=StopReasonType.error, metadata={"error": str(e)})
+                RunUpdate(status=RunStatus.failed, stop_reason=StopReasonType.error, metadata={"error": str(e)}),
+                agent_loop,
             ),
             actor=actor,
         )
@@ -2322,10 +2317,12 @@ async def send_message_async(
                 from letta.schemas.enums import RunStatus
                 from letta.schemas.letta_stop_reason import StopReasonType
 
+                from letta.services.streaming_service import _merge_security_flags as _msf_bg
+
                 _md = {"error": error_str}
-                _flags = getattr(agent_loop, "_security_flags", None)
-                if _flags:
-                    _md["security_flags"] = _flags
+                _bg_update = RunUpdate(metadata=_md)
+                _msf_bg(_bg_update, agent_loop)
+                _md = _bg_update.metadata
                 await runs_manager.update_run_by_id_async(
                     run_id=run.id,
                     update=RunUpdate(status=RunStatus.failed, stop_reason=StopReasonType.error, metadata=_md),

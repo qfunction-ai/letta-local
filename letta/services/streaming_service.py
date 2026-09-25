@@ -61,6 +61,20 @@ from letta.utils import safe_create_task
 logger = get_logger(__name__)
 
 
+def _merge_security_flags(update: RunUpdate, agent_loop) -> RunUpdate:
+    """v0.16.33: durable flag surface — merge accumulated security flags
+    into run metadata at EVERY finalization path (a poisoned run that
+    then fails or is cancelled is the forensically important case).
+    THE one definition (agents.py imports this; the v0.16.32 local
+    closures there are replaced)."""
+    flags = getattr(agent_loop, "_security_flags", None)
+    if flags:
+        md = dict(update.metadata or {})
+        md["security_flags"] = flags
+        update.metadata = md
+    return update
+
+
 def derive_request_token(otids: list[str]) -> str:
     """
     Derive a request token from all message otids for deduplication.
@@ -318,6 +332,10 @@ class StreamingService:
                         await asyncio.sleep(0.25 * (2**_attempt))  # 250ms, 500ms, 1s
                 raise await enrich_conversation_busy_error(redis_client, e)
             finally:
+                # v0.16.33 path-first enumeration: this finally is METRIC-ONLY
+                # (admission-wait histogram) — NOT a run-finalization site;
+                # no RunUpdate exists here, documented-skip for the security-
+                # flag merge (Epsilon review finding).
                 admission_wait_ms = (get_utc_timestamp_ns() - admission_wait_start_ns) / 1_000_000
                 MetricRegistry().request_admission_wait_ms_histogram.record(
                     admission_wait_ms,
@@ -464,7 +482,7 @@ class StreamingService:
                 await self.server.run_manager.update_run_by_id_async(
                     run_id=run.id,
                     conversation_id=lock_key,  # Use lock_key for lock release
-                    update=RunUpdate(status=run_status, metadata=run_update_metadata),
+                    update=_merge_security_flags(RunUpdate(status=run_status, metadata=run_update_metadata), agent_loop),
                     actor=actor,
                 )
 
@@ -799,13 +817,19 @@ class StreamingService:
                         }
 
                 # always update run status, whether success or failure
+                # NOTE (v0.16.33): this finally runs AFTER GeneratorExit (client
+                # disconnect may have fired) — the flags list is COMPLETE at this
+                # point (detection fires during streaming, never after). Do not
+                # move finalization before stream completion.
                 if run_id and self.runs_manager and run_status:
                     # Extract stop_reason enum value from LettaStopReason object
                     stop_reason_value = stop_reason.stop_reason if stop_reason else StopReasonType.error.value
                     await self.runs_manager.update_run_by_id_async(
                         run_id=run_id,
                         conversation_id=lock_key,  # Use lock_key for lock release
-                        update=RunUpdate(status=run_status, stop_reason=stop_reason_value, metadata=error_data),
+                        update=_merge_security_flags(
+                            RunUpdate(status=run_status, stop_reason=stop_reason_value, metadata=error_data), agent_loop
+                        ),
                         actor=actor,
                     )
 
@@ -952,12 +976,13 @@ class StreamingService:
         error: Optional[str] = None,
         stop_reason: Optional[str] = None,
         conversation_id: Optional[str] = None,
+        agent_loop=None,  # v0.16.33: for _merge_security_flags (helper currently has zero callers — the merge is inert-until-wired)
     ):
         """Update the status of a run."""
         if not self.runs_manager:
             return
 
-        update = RunUpdate(status=status)
+        update = _merge_security_flags(RunUpdate(status=status), agent_loop) if agent_loop else RunUpdate(status=status)
         if error:
             update.metadata = {"error": error}
         if stop_reason:

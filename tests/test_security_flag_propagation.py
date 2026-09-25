@@ -138,10 +138,15 @@ class TestSourceGuard:
 
     def test_agents_router_all_finalization_paths(self):
         src = Path("letta/server/rest_api/routers/v1/agents.py").read_text()
-        # helper + success path + both error paths + streaming finally + background
-        assert "_merge_security_flags" in src
-        assert src.count("_merge_security_flags(") >= 3  # def + 3 call sites
-        assert src.count('md["security_flags"] = ') >= 2  # streaming finally + background
+        # v0.16.33: consolidated onto the ONE module-level helper
+        # (streaming_service) — imported, no local closure definition,
+        # no inline md["security_flags"] merges left behind.
+        assert "from letta.services.streaming_service import _merge_security_flags" in src
+        assert src.count("_merge_security_flags(") >= 3  # import + call sites
+        # the closure definition is GONE (no local def)
+        assert "def _merge_security_flags" not in src
+        # no inline merge pattern remains
+        assert 'md["security_flags"]' not in src
 
     def test_letta_message_field(self):
         src = Path("letta/schemas/letta_message.py").read_text()
