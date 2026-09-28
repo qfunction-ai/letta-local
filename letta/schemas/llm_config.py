@@ -174,7 +174,14 @@ class LLMConfig(BaseModel):
     )
     max_tokens: Optional[int] = Field(
         None,
-        description="The maximum number of tokens to generate. If not set, the model will use its default value.",
+        description=(
+            "The maximum number of tokens to generate. If not set, the model will use its default value. "
+            "NOTE: this doubles as wedged-generation protection — a capped generation COMPLETES "
+            "(finish_reason=length), re-engaging every existing bound (budgets, max_steps, loop "
+            "detection). An uncapped degenerate generation never completes its call, so no "
+            "post-completion bound can act. Recommended for small local models: 8192-16384 "
+            "(far above healthy deliberation, far below collapse scale)."
+        ),
     )
     enable_reasoner: bool = Field(
         True, description="Whether or not the model should use extended thinking if it is a 'reasoning' style model"

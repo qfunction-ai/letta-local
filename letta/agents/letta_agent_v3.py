@@ -561,6 +561,9 @@ class LettaAgentV3(LettaAgentV2):
                 billing_context=billing_context,
                 use_openai_responses_websocket=openai_responses_websocket,
             )
+            # v0.16.35: thread the reasoning watchdog to the adapter
+            # (adapter reads it at interface construction).
+            llm_adapter.reasoning_watchdog = getattr(self, "reasoning_watchdog", False)
         elif use_sglang_native:
             # Use SGLang native adapter for multi-turn RL training
             llm_adapter = SGLangNativeAdapter(

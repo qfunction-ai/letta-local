@@ -597,6 +597,19 @@ class OpenAIStreamingInterface:
                                     self._function_id_parts = []
 
 
+# v0.16.35: degenerate-generation watchdog constants.
+# Signature: consecutive identical reasoning deltas >= _WATCHDOG_RUN_LIMIT
+# (incident-2 class: token-level repetition collapse, thousands deep).
+# Cost asymmetry (the safety argument — Delta review): a FALSE POSITIVE costs
+# a gracefully-truncated turn (partial reasoning, normal end); a MISS costs a
+# wedged run only the Stop button ends. The design absorbs its own
+# false-positive class. Named false-positive class: punctuation-run dividers
+# drawn token-by-token (24+ identical single-char deltas) may trip — rare,
+# reasoning-scoped, cheap if it fires. A trip is NOT proof of collapse; it is
+# a graceful truncation.
+_WATCHDOG_RUN_LIMIT = 24
+
+
 class SimpleOpenAIStreamingInterface:
     """
     Encapsulates the logic for streaming responses from OpenAI.
@@ -616,10 +629,17 @@ class SimpleOpenAIStreamingInterface:
         cancellation_event: Optional["asyncio.Event"] = None,
         tool_calling_mode: str | None = None,
         llm_config: Optional["LLMConfig"] = None,
+        reasoning_watchdog: bool = False,
     ):
         self.run_id = run_id
         self.step_id = step_id
         self.cancellation_event = cancellation_event
+        # v0.16.35: degenerate-generation watchdog state (reset in process()'s
+        # finally — the v0.16.27 instance-reuse lesson).
+        self._watchdog_on = reasoning_watchdog
+        self._watchdog_run_token = None
+        self._watchdog_run_len = 0
+        self._watchdog_tripped = False
         self.llm_config = llm_config
         # Premake IDs for database writes
         self.letta_message_id = Message.generate_id()
@@ -871,6 +891,20 @@ class SimpleOpenAIStreamingInterface:
                     yield hidden_message
 
                 async for chunk in stream:
+                    # v0.16.35: degenerate-generation watchdog. Trip-check BEFORE
+                    # processing (mirrors the cancellation-event structure): on
+                    # trip, stop consuming — the async-with close releases the
+                    # stream; the step completes with what streamed (nudge or
+                    # end_turn downstream). One extra chunk may be read post-trip
+                    # before this check; discarded, harmless.
+                    if self._watchdog_tripped:
+                        logger.warning(
+                            "Reasoning watchdog tripped: %d identical consecutive reasoning deltas "
+                            "(run_id=%s step_id=%s) — terminating generation (graceful truncation; "
+                            "NOT proof of collapse — see _WATCHDOG_RUN_LIMIT notes)",
+                            self._watchdog_run_len, self.run_id, self.step_id,
+                        )
+                        break
                     try:
                         async for message in self._process_chunk(chunk, ttft_span, prev_message_type, message_index):
                             new_message_type = message.message_type
@@ -970,6 +1004,11 @@ class SimpleOpenAIStreamingInterface:
             if self.cancellation_event and self.cancellation_event.is_set():
                 self.stream_was_cancelled = True
 
+            # v0.16.35: watchdog state reset (instance-reuse — the v0.16.27 lesson)
+            self._watchdog_run_token = None
+            self._watchdog_run_len = 0
+            self._watchdog_tripped = False
+
             logger.info(
                 f"SimpleOpenAIStreamingInterface: Stream processing complete. "
                 f"Received {self.total_events_received} events, "
@@ -1029,6 +1068,20 @@ class SimpleOpenAIStreamingInterface:
                 # Check for reasoning_content (standard) or reasoning (OpenRouter)
                 reasoning_content = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
                 if reasoning_content is not None and reasoning_content != "":
+                    # v0.16.35: degenerate-generation watchdog. Counts CONSECUTIVE
+                    # IDENTICAL deltas (equivalent to consecutive identical tokens
+                    # for the single-token repetition class — see module constant
+                    # notes). Delta-granularity contract pinned by test.
+                    if self._watchdog_on:
+                        _tok = reasoning_content.strip() or reasoning_content
+                        if _tok == self._watchdog_run_token:
+                            self._watchdog_run_len += 1
+                        else:
+                            self._watchdog_run_token = _tok
+                            self._watchdog_run_len = 1
+                        if self._watchdog_run_len >= _WATCHDOG_RUN_LIMIT:
+                            self._watchdog_tripped = True
+                            return  # discard this delta; process()'s loop breaks on the flag
                     if prev_message_type and prev_message_type != "reasoning_message":
                         message_index += 1
                     reasoning_msg = ReasoningMessage(

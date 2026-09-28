@@ -71,6 +71,8 @@ def init_agent_attributes(agent: "BaseAgent") -> None:
     agent.tool_arg_validation_enabled = False
     # v0.16.34: action on flagged tool output (see init_security read)
     agent.tool_output_action = "warn"
+    # v0.16.35: degenerate-generation watchdog (default off)
+    agent.reasoning_watchdog = False
 
 
 def init_security(agent: "BaseAgentV2") -> None:
@@ -103,6 +105,10 @@ def init_security(agent: "BaseAgentV2") -> None:
     # behavior); "strip" replaces content with a minimal stub; "error"
     # returns an error-status result naming the detection. In
     # strip/error, flagged text never enters the model's context.
+    # v0.16.35: reasoning-generation watchdog — terminates degenerate
+    # reasoning streams (consecutive-identical-token collapse). Opt-in.
+    agent.reasoning_watchdog = metadata.get("reasoning_watchdog", "off") == "on"
+
     _action = metadata.get("tool_output_action", "warn")
     if _action not in ("warn", "strip", "error"):
         import logging as _logging

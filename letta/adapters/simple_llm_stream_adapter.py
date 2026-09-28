@@ -31,6 +31,11 @@ class SimpleLLMStreamAdapter(LettaLLMStreamAdapter):
     specific streaming formats.
     """
 
+    def _reasoning_watchdog_enabled(self) -> bool:
+        """v0.16.35: watchdog flag threaded from the agent loop (set at
+        adapter construction; the adapter has no agent reference)."""
+        return bool(getattr(self, "reasoning_watchdog", False))
+
     def _extract_tool_calls(self) -> list:
         """extract tool calls from interface, trying parallel API first then single API"""
         # try multi-call api if available
@@ -143,6 +148,7 @@ class SimpleLLMStreamAdapter(LettaLLMStreamAdapter):
                     cancellation_event=cancellation_event,
                     tool_calling_mode=tool_calling_mode,
                     llm_config=self.llm_config,
+                    reasoning_watchdog=self._reasoning_watchdog_enabled(),
                 )
         elif self.llm_config.model_endpoint_type in [ProviderType.google_ai, ProviderType.google_vertex]:
             self.interface = SimpleGeminiStreamingInterface(
