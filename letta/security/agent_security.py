@@ -69,6 +69,8 @@ def init_agent_attributes(agent: "BaseAgent") -> None:
     # Tool validation (default off — opt-in)
     agent.tool_output_validation_enabled = False
     agent.tool_arg_validation_enabled = False
+    # v0.16.34: action on flagged tool output (see init_security read)
+    agent.tool_output_action = "warn"
 
 
 def init_security(agent: "BaseAgentV2") -> None:
@@ -96,6 +98,20 @@ def init_security(agent: "BaseAgentV2") -> None:
         metadata = getattr(agent.agent_state, "metadata", {}) or {}
     cv_enabled = metadata.get("enable_content_validation", False)
     agent.tool_output_validation_enabled = cv_enabled
+    # v0.16.34: action on flagged tool output. "warn" (default) appends
+    # the [SECURITY WARNING] and passes content through (today's
+    # behavior); "strip" replaces content with a minimal stub; "error"
+    # returns an error-status result naming the detection. In
+    # strip/error, flagged text never enters the model's context.
+    _action = metadata.get("tool_output_action", "warn")
+    if _action not in ("warn", "strip", "error"):
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            f"Unknown tool_output_action {(_action)!r}, falling back to 'warn'"
+        )
+        _action = "warn"
+    agent.tool_output_action = _action
     agent.tool_arg_validation_enabled = cv_enabled
 
 

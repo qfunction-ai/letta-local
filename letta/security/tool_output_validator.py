@@ -26,6 +26,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# v0.16.34 tool-output action texts.
+# strip mode: generic, declarative, MINIMAL narrativization surface
+# (Epsilon review note 1: naming the detection category is the same
+# category-level info the warning carried in the motivating trace —
+# the model quoted it, then attributed authority anyway. Stub-length
+# is a gauntlet variable; this is deliberately minimal.)
+QUARANTINE_STUB = "[Tool output withheld by security policy.]"
+
+# error mode: names the detection (the honest, useful shape — the
+# model can tell the user what happened; teaches the vocabulary)
+QUARANTINE_ERROR = (
+    "Tool call blocked by security policy: potential prompt injection "
+    "detected in tool output ({label}). Content not delivered."
+)
+
 
 async def validate_tool_output(
     tool_name: str,

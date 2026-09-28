@@ -2220,10 +2220,25 @@ class LettaAgentV3(LettaAgentV2):
                     step_id=step_id, run_id=run_id,
                 )
                 if _tool_output_warning:
-                    res.func_return = (
-                        (str(res.func_return) if res.func_return else "")
-                        + _tool_output_warning
-                    )
+                    _action = getattr(self, "tool_output_action", "warn")
+                    if _action == "strip":
+                        # v0.16.34: flagged content does NOT enter the model's
+                        # context in raw form — whole return replaced (scanner
+                        # emits labels, not spans). Minimal stub (ruling 3).
+                        from letta.security.tool_output_validator import QUARANTINE_STUB
+
+                        res.func_return = QUARANTINE_STUB
+                    elif _action == "error":
+                        from letta.security.tool_output_validator import QUARANTINE_ERROR
+
+                        res.status = "error"
+                        res.func_return = QUARANTINE_ERROR.format(label=_flag_label)
+                    else:
+                        # warn — today's behavior, byte-identical
+                        res.func_return = (
+                            (str(res.func_return) if res.func_return else "")
+                            + _tool_output_warning
+                        )
                     # v0.16.32 flag propagation: accumulate the signal (the
                     # single source — SSE event, message metadata, and run
                     # summary all derive from this list).
