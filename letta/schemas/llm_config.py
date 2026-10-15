@@ -179,8 +179,12 @@ class LLMConfig(BaseModel):
             "NOTE: this doubles as wedged-generation protection — a capped generation COMPLETES "
             "(finish_reason=length), re-engaging every existing bound (budgets, max_steps, loop "
             "detection). An uncapped degenerate generation never completes its call, so no "
-            "post-completion bound can act. Recommended for small local models: 8192-16384 "
-            "(far above healthy deliberation, far below collapse scale)."
+            "post-completion bound can act. On local servers the cap reaches the wire via the LEGACY "
+            "max_tokens param (v0.16.36 — max_completion_tokens was silently ignored by Ollama 0.40.4, "
+            "live-verified; OpenAI rejects both-params-set, hence the local-only branch). The budget is "
+            "JOINT on Ollama (reasoning+content share it). Recommended for small local models: 8192-16384 "
+            "(healthy 4B deliberation measured at 160-425 completion tokens — 40-100x headroom); local "
+            "providers default to 16384 via slot insurance when unset."
         ),
     )
     enable_reasoner: bool = Field(
@@ -338,6 +342,23 @@ class LLMConfig(BaseModel):
         #     values["put_inner_thoughts_in_kwargs"] = False
         return values
 
+    @property
+    def is_local_inference_endpoint(self) -> bool:
+        """v0.16.36: True when this endpoint is a local inference server.
+
+        THE one definition (consumed by apply_default_constraints AND the
+        openai_client request builder — the v0.16.20 copy-divergence lesson;
+        source-guard-pinned). Shape matches the original v0.16.20 detection:
+        local provider types, or openai-type pointing at a non-api.openai.com
+        endpoint (Ollama /v1, vLLM, LM Studio proxies).
+        """
+        endpoint_type = (self.model_endpoint_type or "").lower()
+        endpoint = self.model_endpoint or ""
+        local_provider_types = {"ollama", "vllm", "localai", "llamacpp", "llamafile", "mlx", "openai_compatible", "bitnet"}
+        if endpoint_type in local_provider_types:
+            return True
+        return endpoint_type == "openai" and endpoint != "" and "api.openai.com" not in endpoint
+
     @model_validator(mode="after")
     def apply_default_constraints(self):
         """Auto-apply ModelConstraints for models with known limitations.
@@ -350,26 +371,31 @@ class LLMConfig(BaseModel):
         if self.constraints is not None:
             return self
 
-        # Providers that need prompt-based tool calling by default
-        local_provider_types = {"ollama", "vllm", "localai", "llamacpp", "llamafile", "mlx", "openai_compatible", "bitnet"}
-        endpoint_type = (self.model_endpoint_type or "").lower()
-        endpoint = self.model_endpoint or ""
-
-        # Detect local OpenAI-compatible proxies (Ollama /v1, vLLM, LM Studio, etc.)
-        # These use model_endpoint_type="openai" for client routing but still need
-        # local model constraints (max_tools, simplify_tool_schemas, etc.).
-        is_local_proxy = (
-            endpoint_type == "openai"
-            and "api.openai.com" not in endpoint
-            and endpoint != ""
-        )
-
-        if endpoint_type in local_provider_types or is_local_proxy:
-            reason = "local proxy endpoint" if is_local_proxy else f"provider_type={endpoint_type}"
+        # v0.16.36: detection via the shared helper (one definition, two consumers)
+        if self.is_local_inference_endpoint:
+            reason = "local inference endpoint"
             logger.info(
                 f"Auto-applying tool calling constraints for {self.model} "
                 f"({reason})"
             )
+            # v0.16.36 slot insurance: local single-slot servers (Ollama -np 1
+            # default) have bounded abandoned-generation spin ONLY if the token
+            # cap actually reaches the server (made real this release: legacy
+            # max_tokens — see openai_client; max_completion_tokens was silently
+            # ignored by Ollama 0.40.4, live A/B verified). Also the ONLY current
+            # bound on the paragraph-cycling deliberation class (LLM07 addendum:
+            # the v0.16.35 watchdog's token-run signature cannot see varied-token
+            # cycling; the cap terminates it deterministically at the limit).
+            # Joint budget (gate 1b: reasoning+content share it); healthy 4B runs
+            # measured 160-425 completion tokens — 16k is 40-100x headroom.
+            # Explicit config always wins (the constraints pattern).
+            if self.max_tokens is None:
+                self.max_tokens = 16384
+                logger.info(
+                    f"Slot insurance: defaulting max_tokens=16384 for local "
+                    f"provider {self.model} (bounds abandoned-generation spin and "
+                    f"cycling-class deliberation)"
+                )
             self.constraints = ModelConstraints(
                 tool_calling_mode="auto",
                 disable_structured_output=True,

@@ -748,6 +748,18 @@ class OpenAIClient(LLMClientBase):
                     tool.function.strict = False
         request_data = data.model_dump(exclude_unset=True)
 
+        # v0.16.36: Ollama (and some local servers) ignore max_completion_tokens
+        # on /v1/chat/completions and honor only the legacy max_tokens (live A/B on
+        # 0.40.4: mct=60 -> 3,264 tokens; mt=60 -> exactly 60; non-thinking models
+        # too). OpenAI rejects BOTH params set, so the legacy field is added ONLY
+        # for local endpoints and the modern key is popped — the both-set rejection
+        # is structurally impossible even on misdetection (worst case: a server
+        # honoring only mct sees only legacy and degrades to the prior no-op).
+        # Detection: the shared helper (same definition as apply_default_constraints).
+        if llm_config.is_local_inference_endpoint and llm_config.max_tokens is not None:
+            request_data["max_tokens"] = llm_config.max_tokens
+            request_data.pop("max_completion_tokens", None)
+
         # If Ollama
         # if llm_config.handle.startswith("ollama/") and llm_config.enable_reasoner:
         # Sadly, reasoning via the OpenAI proxy on Ollama only works for Harmony/gpt-oss
