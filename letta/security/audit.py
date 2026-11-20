@@ -44,6 +44,7 @@ class SecurityEventType(str, Enum):
     CANARY_OUTPUT_DETECTED = "canary_output_detected"  # assistant message redaction
     SECRET_DETECTED = "secret_detected"          # secret in tool args (policy AUDIT)
     INJECTION_DETECTED = "injection_detected"    # prompt injection in tool args (policy AUDIT)
+    POLICY_AUDIT_MATCHED = "policy_audit_matched"  # custom AUDIT rule matched (log-and-continue, v0.16.37)
 
     # Agent output events
     MESSAGE_SENT = "message_sent"

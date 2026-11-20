@@ -50,7 +50,7 @@ class TestPolicyAction:
 
 class TestPolicyOperator:
     def test_all_operators(self):
-        expected = ["eq", "ne", "gt", "lt", "gte", "lte", "in", "not_in", "matches", "contains", "contains_secret"]
+        expected = ["eq", "ne", "gt", "lt", "gte", "lte", "in", "not_in", "matches", "contains", "contains_secret", "contains_injection"]
         actual = [op.value for op in PolicyOperator]
         assert sorted(actual) == sorted(expected)
 
@@ -451,9 +451,154 @@ class TestPolicyCheckerRules:
             "tool_name": "archival_memory_insert",
             "tool_args": {},
         })
-        assert decision.allowed is True  # AUDIT = allow + log
-        assert decision.action == "audit"
-        assert decision.matched_rule == "audit-archival"
+        # v0.16.37: AUDIT is log-and-continue — it never terminates
+        # evaluation. No terminal rule matched, so the default (allow)
+        # applies; the audit entry rides along in audit_entries.
+        assert decision.allowed is True
+        assert decision.action == "allow"
+        assert decision.matched_rule is None
+        assert len(decision.audit_entries) == 1
+        assert decision.audit_entries[0]["matched_rule"] == "audit-archival"
+        assert decision.audit_entries[0]["operator"] == "eq"
+
+
+class TestAuditLogAndContinue:
+    """v0.16.37 (review L-5): AUDIT never terminates evaluation.
+
+    Previously the first matching rule won outright, so a priority-90 AUDIT
+    rule (the default secret rule) shadowed every deny rule below it — a
+    deny rule was bypassable by adding a high-entropy string (UUID, hash)
+    to any argument.
+    """
+
+    def _secret_and_deny_rules(self):
+        return [
+            # The default-rule shape: priority 90, AUDIT, matches any tool
+            # whose args contain a secret (simulated with a contains match).
+            PolicyRule(
+                name="secret-in-tool-args",
+                condition=PolicyCondition(field="tool_args.note", operator=PolicyOperator.CONTAINS, value="sk-"),
+                action=PolicyAction.AUDIT,
+                priority=90,
+                message="Tool args contain what appears to be a secret.",
+            ),
+            PolicyRule(
+                name="deny-web",
+                condition=PolicyCondition(field="tool_name", operator=PolicyOperator.EQ, value="web_search"),
+                action=PolicyAction.DENY,
+                priority=50,
+            ),
+        ]
+
+    def test_audit_does_not_shadow_deny(self):
+        """L-5 bypass: UUID/high-entropy arg + deny rule → deny still wins."""
+        checker = PolicyChecker(ToolCallPolicy(rules=self._secret_and_deny_rules()))
+        decision = checker.check("web_search", eval_context={
+            "tool_name": "web_search",
+            "tool_args": {"note": "sk-abc123", "query": "anything"},
+        })
+        assert decision.allowed is False
+        assert decision.matched_rule == "deny-web"
+        # The audit entry is still collected and rides along
+        assert len(decision.audit_entries) == 1
+        assert decision.audit_entries[0]["matched_rule"] == "secret-in-tool-args"
+
+    def test_audit_with_allow_terminal(self):
+        checker = PolicyChecker(ToolCallPolicy(rules=[
+            PolicyRule(
+                name="secret-in-tool-args",
+                condition=PolicyCondition(field="tool_args.note", operator=PolicyOperator.CONTAINS, value="sk-"),
+                action=PolicyAction.AUDIT,
+                priority=90,
+            ),
+            PolicyRule(
+                name="allow-rechat",
+                condition=PolicyCondition(field="tool_name", operator=PolicyOperator.EQ, value="rethink_memory"),
+                action=PolicyAction.ALLOW,
+                priority=50,
+            ),
+        ]))
+        decision = checker.check("rethink_memory", eval_context={
+            "tool_name": "rethink_memory",
+            "tool_args": {"note": "sk-abc123"},
+        })
+        assert decision.allowed is True
+        assert decision.matched_rule == "allow-rechat"
+        assert len(decision.audit_entries) == 1
+
+    def test_multiple_audit_rules_all_collected_in_priority_order(self):
+        checker = PolicyChecker(ToolCallPolicy(rules=[
+            PolicyRule(
+                name="audit-b",
+                condition=PolicyCondition(field="tool_name", operator=PolicyOperator.EQ, value="web_search"),
+                action=PolicyAction.AUDIT,
+                priority=20,
+            ),
+            PolicyRule(
+                name="audit-a",
+                condition=PolicyCondition(field="tool_name", operator=PolicyOperator.EQ, value="web_search"),
+                action=PolicyAction.AUDIT,
+                priority=80,
+            ),
+            PolicyRule(
+                name="deny-web",
+                condition=PolicyCondition(field="tool_name", operator=PolicyOperator.EQ, value="web_search"),
+                action=PolicyAction.DENY,
+                priority=10,
+            ),
+        ]))
+        decision = checker.check("web_search", eval_context={
+            "tool_name": "web_search", "tool_args": {},
+        })
+        assert decision.allowed is False
+        assert [e["matched_rule"] for e in decision.audit_entries] == ["audit-a", "audit-b"]
+
+    def test_no_audit_matches_empty_entries(self):
+        checker = PolicyChecker(ToolCallPolicy(rules=[
+            PolicyRule(
+                name="deny-web",
+                condition=PolicyCondition(field="tool_name", operator=PolicyOperator.EQ, value="web_search"),
+                action=PolicyAction.DENY,
+                priority=50,
+            ),
+        ]))
+        decision = checker.check("web_search", eval_context={
+            "tool_name": "web_search", "tool_args": {},
+        })
+        assert decision.allowed is False
+        assert decision.audit_entries == []
+
+    def test_audit_only_no_terminal_falls_to_default_allow(self):
+        checker = PolicyChecker(ToolCallPolicy(rules=[
+            PolicyRule(
+                name="audit-all",
+                condition=PolicyCondition(field="tool_name", operator=PolicyOperator.EQ, value="web_search"),
+                action=PolicyAction.AUDIT,
+                priority=90,
+            ),
+        ]))
+        decision = checker.check("web_search", eval_context={
+            "tool_name": "web_search", "tool_args": {},
+        })
+        assert decision.allowed is True
+        assert decision.action == "allow"
+        assert len(decision.audit_entries) == 1
+
+    def test_fail_closed_deny_all_unaffected(self):
+        checker = PolicyChecker(ToolCallPolicy(rules=[
+            PolicyRule(
+                name="audit-all",
+                condition=PolicyCondition(field="tool_name", operator=PolicyOperator.EQ, value="web_search"),
+                action=PolicyAction.AUDIT,
+                priority=90,
+            ),
+        ]))
+        checker.deny_all = True
+        decision = checker.check("web_search", eval_context={
+            "tool_name": "web_search", "tool_args": {},
+        })
+        assert decision.allowed is False
+        assert decision.matched_rule == "fail_closed"
 
     def test_priority_ordering(self):
         """Higher priority rules override lower ones."""

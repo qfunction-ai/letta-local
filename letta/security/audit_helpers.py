@@ -146,6 +146,7 @@ async def log_secret_detected(
     label: str,
     step_id: str | None,
     run_id: str | None,
+    matched_rule: str | None = None,
 ) -> None:
     """Log a secret_detected audit event.
 
@@ -153,9 +154,12 @@ async def log_secret_detected(
     arguments. The label identifies the type (e.g., "AWS Access Key ID",
     "High-entropy secret").
     """
+    event_data = {"tool_name": tool_name, "label": label}
+    if matched_rule is not None:
+        event_data["matched_rule"] = matched_rule
     await audit_log(
         audit_logger, agent_id, actor,
-        SecurityEventType.SECRET_DETECTED, {"tool_name": tool_name, "label": label},
+        SecurityEventType.SECRET_DETECTED, event_data,
         step_id, run_id, "secret_detected",
     )
 
@@ -168,6 +172,7 @@ async def log_injection_detected(
     label: str,
     step_id: str | None,
     run_id: str | None,
+    matched_rule: str | None = None,
 ) -> None:
     """Log an injection_detected audit event.
 
@@ -175,8 +180,33 @@ async def log_injection_detected(
     in tool arguments. The label identifies the pattern type (e.g.,
     "instruction_override", "system_marker", "hidden_unicode_zero_width").
     """
+    event_data = {"tool_name": tool_name, "label": label}
+    if matched_rule is not None:
+        event_data["matched_rule"] = matched_rule
     await audit_log(
         audit_logger, agent_id, actor,
-        SecurityEventType.INJECTION_DETECTED, {"tool_name": tool_name, "label": label},
+        SecurityEventType.INJECTION_DETECTED, event_data,
         step_id, run_id, "injection_detected",
+    )
+
+
+async def log_policy_audit_matched(
+    audit_logger: "AuditLogger",
+    agent_id: str,
+    actor: "User | None",
+    tool_name: str,
+    matched_rule: str,
+    step_id: str | None,
+    run_id: str | None,
+) -> None:
+    """Log a policy_audit_matched audit event.
+
+    Fired when a custom AUDIT rule (not contains_secret / contains_injection)
+    matches during policy evaluation. AUDIT is log-and-continue (v0.16.37):
+    these events fire regardless of the terminal decision's outcome.
+    """
+    await audit_log(
+        audit_logger, agent_id, actor,
+        SecurityEventType.POLICY_AUDIT_MATCHED, {"tool_name": tool_name, "matched_rule": matched_rule},
+        step_id, run_id, "policy_audit_matched",
     )

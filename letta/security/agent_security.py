@@ -129,10 +129,14 @@ def init_security(agent: "BaseAgentV2") -> None:
 def _inject_default_secret_rule(agent) -> None:
     """Inject a default CONTAINS_SECRET audit rule if the policy doesn't have one.
 
-    The default rule audits memory-write tool calls that contain secrets.
-    It does NOT block — it logs the event and appends a warning to the
-    tool result so the LLM can inform the user. Strict deployments can
-    change the action to DENY or REQUIRE_APPROVAL.
+    v0.16.37 (review L-5): renamed from "secret-in-memory-write" to
+    "secret-in-tool-args" — the rule's condition is on tool_args, NOT on
+    tool category, so the old name lied about scope. The rule audits ANY
+    tool call whose arguments contain a secret. It does NOT block — AUDIT
+    is log-and-continue in the engine, so it never shadows deny rules
+    below it. The model-facing warning text is gated to memory-write tools
+    (P-7); the event fires for every tool. Strict deployments can change
+    the action to DENY or REQUIRE_APPROVAL.
     """
     from letta.security.policy import PolicyAction, PolicyCondition, PolicyOperator, PolicyRule
 
@@ -143,7 +147,7 @@ def _inject_default_secret_rule(agent) -> None:
                 return  # already has one
 
     rule = PolicyRule(
-        name="secret-in-memory-write",
+        name="secret-in-tool-args",
         condition=PolicyCondition(
             field="tool_args",
             operator=PolicyOperator.CONTAINS_SECRET,
@@ -415,13 +419,19 @@ async def check_policy(agent, tool_name: str, tool_args: dict | None = None, ste
     # Record the call for rate limiting if allowed
     if decision.allowed:
         agent.policy_checker.record_call(tool_name, tool_args)
-    # Handle AUDIT action: log event + set warning for caller to append to tool result
-    if decision.action == PolicyAction.AUDIT:
+
+    # v0.16.37 (review L-5): AUDIT is log-and-continue in the engine, so audit
+    # matches arrive as decision.audit_entries REGARDLESS of the terminal
+    # action (allow, deny, require_approval, or default). Log one event per
+    # collected entry — a secret-bearing call that a deny rule then blocks
+    # produces both the SECRET_DETECTED event and the denial.
+    if decision.audit_entries:
         from letta.security import audit_helpers as _ah
         from letta.security.secret_scanner import SecretPatternChecker
         from letta.security.content_validator import ContentValidator
-        # Determine the label for the audit event
         tool_args = tool_args or {}
+
+        # Determine the label for the audit event
         label = "unknown"
         for value in tool_args.values():
             if isinstance(value, str):
@@ -429,21 +439,49 @@ async def check_policy(agent, tool_name: str, tool_args: dict | None = None, ste
                 if result is not None:
                     label = result
                     break
-        await _ah.log_secret_detected(
-            agent.audit_logger, agent.agent_id, agent.actor,
-            tool_name, label, step_id, run_id,
-        )
-        # Also check for injection patterns
+
+        # Determine the injection label for the audit event
+        injection_label = "unknown"
         for value in tool_args.values():
             if isinstance(value, str):
-                injection_label = ContentValidator.check(value)
-                if injection_label is not None:
-                    await _ah.log_injection_detected(
-                        agent.audit_logger, agent.agent_id, agent.actor,
-                        tool_name, injection_label, step_id, run_id,
-                    )
+                result = ContentValidator.check(value)
+                if result is not None:
+                    injection_label = result
                     break
-        decision.audit_warning = decision.reason
+
+        for entry in decision.audit_entries:
+            matched_rule = entry.get("matched_rule") or "unnamed_audit_rule"
+            operator = entry.get("operator", "")
+            if operator == "contains_secret":
+                await _ah.log_secret_detected(
+                    agent.audit_logger, agent.agent_id, agent.actor,
+                    tool_name, label, step_id, run_id,
+                    matched_rule=matched_rule,
+                )
+            elif operator == "contains_injection":
+                await _ah.log_injection_detected(
+                    agent.audit_logger, agent.agent_id, agent.actor,
+                    tool_name, injection_label, step_id, run_id,
+                    matched_rule=matched_rule,
+                )
+            else:
+                # Custom AUDIT rule — log the match itself
+                await _ah.log_policy_audit_matched(
+                    agent.audit_logger, agent.agent_id, agent.actor,
+                    tool_name, matched_rule, step_id, run_id,
+                )
+
+        # P-7 (review): the model-facing warning text is appended ONLY for
+        # memory-write tools. The event fires for every tool; the warning
+        # fires where it changes behavior. Otherwise every UUID-bearing call
+        # pollutes the model's context with warnings.
+        from letta.security.audit import MEMORY_WRITE_TOOLS
+
+        if tool_name in MEMORY_WRITE_TOOLS:
+            decision.audit_warning = "\n".join(
+                entry.get("reason") or f"Matched rule '{entry.get('matched_rule')}'"
+                for entry in decision.audit_entries
+            )
     return decision
 
 

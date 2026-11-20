@@ -244,6 +244,16 @@ class PolicyDecision(BaseModel):
         default_factory=dict,
         description="Audit metadata: {tool_name, matched_rule, action, reason, tool_category}",
     )
+    audit_entries: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Audit entries for every AUDIT rule that matched during evaluation. "
+            "AUDIT is log-and-continue: it never terminates evaluation and never "
+            "changes the outcome, so these entries ride along on whatever decision "
+            "the terminal rules (or defaults) produced. The consumer logs one event "
+            "per entry regardless of the terminal outcome (v0.16.37, review L-5)."
+        ),
+    )
     audit_warning: Optional[str] = Field(default=None, description="Warning text for AUDIT action — appended to tool result")
 
 
@@ -506,11 +516,21 @@ class PolicyChecker:
                 return loop_decision
 
         # --- Rule evaluation (Agent OS-compatible) ---
+        # v0.16.37 (review L-5): AUDIT is log-and-continue. Only ALLOW, DENY and
+        # REQUIRE_APPROVAL terminate evaluation. Previously the first matching
+        # rule won outright, so a priority-90 AUDIT rule (the default secret
+        # rule) shadowed every deny/approval rule below it — a deny rule was
+        # bypassable by adding a high-entropy string (UUID, hash, signed URL)
+        # to any argument.
+        collected_audit_entries: List[Dict[str, Any]] = []
+
         if eval_context is not None and self.policy.rules:
             # Ensure tool_name is in the context
             eval_context.setdefault("tool_name", tool_name)
 
             # Sort rules by priority (highest first) for first-match semantics
+            # among TERMINAL actions. AUDIT matches never terminate: they are
+            # recorded and evaluation continues to lower-priority rules.
             sorted_rules = sorted(self.policy.rules, key=lambda r: r.priority, reverse=True)
 
             for rule in sorted_rules:
@@ -524,19 +544,30 @@ class PolicyChecker:
                             continue  # condition matched but pattern didn't — skip
 
                     action = rule.action
-                    allowed = action in (PolicyAction.ALLOW, PolicyAction.AUDIT)
+                    entry = {
+                        "tool_name": tool_name,
+                        "matched_rule": rule.name,
+                        "operator": rule.condition.operator.value if hasattr(rule.condition.operator, "value") else str(rule.condition.operator),
+                        "action": action.value,
+                        "reason": rule.message or f"Matched rule '{rule.name}'",
+                    }
+
+                    if action == PolicyAction.AUDIT:
+                        # AUDIT: log-and-continue. The entry rides along on the
+                        # final decision; the consumer emits one event per entry.
+                        collected_audit_entries.append(entry)
+                        continue
+
+                    # Terminal action (ALLOW / DENY / REQUIRE_APPROVAL)
+                    allowed = action == PolicyAction.ALLOW
 
                     return PolicyDecision(
                         allowed=allowed,
                         action=action,
                         matched_rule=rule.name,
                         reason=rule.message or f"Matched rule '{rule.name}'",
-                        audit_entry={
-                            "tool_name": tool_name,
-                            "matched_rule": rule.name,
-                            "action": action.value,
-                            "reason": rule.message or f"Matched rule '{rule.name}'",
-                        },
+                        audit_entry=entry,
+                        audit_entries=collected_audit_entries,
                     )
 
         # --- Default action (no rule matched) ---
@@ -550,6 +581,7 @@ class PolicyChecker:
                 matched_rule=None,
                 reason=f"No rules matched; default action is {default_action.value}",
                 audit_entry={"tool_name": tool_name, "matched_rule": None, "action": default_action.value, "reason": "default action"},
+                audit_entries=collected_audit_entries,
             )
 
         # No rules, no defaults — allow (backwards compatible)
@@ -559,6 +591,7 @@ class PolicyChecker:
             matched_rule=None,
             reason="No rules matched; default action applied",
             audit_entry={"tool_name": tool_name, "matched_rule": None, "action": "allow", "reason": "default"},
+            audit_entries=collected_audit_entries,
         )
 
     def _check_rate_limits(self, tool_name: str) -> Optional[PolicyDecision]:
