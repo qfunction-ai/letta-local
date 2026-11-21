@@ -548,6 +548,11 @@ def handle_circuit_breaker_error(agent, error_type: str) -> Optional[str]:
         ``"auto_compact"`` if the threshold is exceeded, ``None`` otherwise.
     """
     return agent.circuit_breaker.record_error(error_type)
-BLOCKED_ARGS_REDACTION_MARKER = "[Tool call arguments redacted by security policy]"
+# v0.16.37 (A8, P-14): replacement for blocked tool-call arguments at the
+# storage redaction point. MUST be a valid JSON object STRING: the persisted
+# tool_use message is replayed to the provider on the next request, and
+# providers reject non-JSON arguments (rig catch: Ollama 400
+# "invalid tool call arguments" killed the turn after a blocked call).
+BLOCKED_ARGS_REDACTION_MARKER = '{"redacted": "Tool call arguments withheld by security policy."}'
 
 

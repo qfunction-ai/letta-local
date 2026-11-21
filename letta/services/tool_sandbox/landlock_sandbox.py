@@ -305,14 +305,19 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                 "--",
                 # -P (Python 3.11+): the script's directory is NOT prepended
                 # to sys.path. Combined with the per-exec temp dir this
-                # closes the module-hijack hole (L-4): a tool writing
-                # json.py next to its script can no longer shadow the real
-                # module for itself or anyone else. Pre-3.11 interpreters
-                # reject the flag and fail loudly (fail-closed, consistent
-                # with the wrapper's ABI gate). Container Python is 3.11
-                # (Dockerfile: uv --python 3.11).
+                # closes the module-hijack hole (L-4): a tool writing json.py
+                # next to its script can no longer shadow the real module for
+                # itself or anyone else. Pre-3.11 interpreters reject the
+                # flag and fail loudly (fail-closed, consistent with the
+                # wrapper's ABI gate). Container Python is 3.11 (Dockerfile:
+                # uv --python 3.11). NOTE: interpreter flags go AFTER the
+                # executable — the wrapper's argv layout is
+                # `-- <python> <script> [args...]`; a flag in the executable
+                # slot is exec'd as a path (v0.16.37 rig catch: every
+                # sandboxed tool died with FileNotFoundError).
+                python_executable,
                 "-P",
-                python_executable, temp_file_path,
+                temp_file_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,

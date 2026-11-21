@@ -62,6 +62,15 @@ def test_venv_granted_own_path():
 def test_interpreter_dash_p():
     src = SRC.read_text()
     assert '"-P",' in src, "tool interpreter must run with -P (script dir off sys.path)"
+    # ORDER matters: the wrapper's argv layout is `-- <python> <script> [args...]`.
+    # A flag in the executable slot is exec'd as a path — the v0.16.37 rig
+    # caught exactly this (every sandboxed tool died with FileNotFoundError
+    # while the order-blind unit suite stayed green).
+    marker = src.index('"--",')
+    window = src[marker : marker + 1600]
+    assert window.index("python_executable,") < window.index('"-P",'), (
+        "python_executable must precede -P in the exec argv"
+    )
 
 
 def test_exec_dir_removed_in_finally():

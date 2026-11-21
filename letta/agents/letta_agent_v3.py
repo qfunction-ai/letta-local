@@ -2581,7 +2581,12 @@ class LettaAgentV3(LettaAgentV2):
             {
                 "name": s["name"],
                 "arguments": (
-                    _sec.BLOCKED_ARGS_REDACTION_MARKER
+                    # valid JSON string — the tool_use is replayed to the
+                    # provider on the next request; non-JSON args 400 there
+                    # (spec arguments are DICTS here — create_parallel_tool_
+                    # messages json.dumps them — so parse the marker back to
+                    # a dict or it gets double-encoded)
+                    json.loads(_sec.BLOCKED_ARGS_REDACTION_MARKER)
                     if s["id"] in self._security_blocked_tool_call_ids
                     else s["args"]
                 ),

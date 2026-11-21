@@ -414,6 +414,13 @@ if [ -n "${R16_AGENT_ID}" ]; then
   R16_BLOCK_ID="$(curl -s -f "${BASE}/v1/agents/${R16_AGENT_ID}/core-memory/blocks" -H "User-Agent: letta-client/1.0" \
     | python3 -c 'import sys, json; print(next(b["id"] for b in json.load(sys.stdin) if b.get("label") == "__canary__"))' 2>/dev/null || true)"
   if [ -n "${R16_BLOCK_ID}" ]; then
+    # Arm the guard first: payload-created canary blocks are upgraded to
+    # read_only at LOAD time (v0.16.33); a never-stepped agent's block is
+    # still read_only=False. Setting it here is allowed (not protected yet)
+    # and makes the check about the A2 guard itself, not the upgrade timing.
+    curl -s -o /dev/null -X PATCH "${BASE}/v1/blocks/${R16_BLOCK_ID}" \
+      -H "Content-Type: application/json" -H "User-Agent: letta-client/1.0" \
+      -d '{"read_only": true}'
     # value change -> refused
     R16_V_STATUS="$(curl -s -o /dev/null -w "%{http_code}" -X PATCH "${BASE}/v1/blocks/${R16_BLOCK_ID}" \
       -H "Content-Type: application/json" -H "User-Agent: letta-client/1.0" \
@@ -449,7 +456,7 @@ fi
 # ---------------------------------------------------------------- check 17
 # check 17: policy mutation audit + audit-rule shadow fix end-to-end
 # (v0.16.37 A1+A4, L-5/L-13). PUT a deny rule at priority 50 — BELOW the
-# default priority-90 secret AUDIT rule. A forced execute_code call with a
+# default priority-90 secret AUDIT rule. A forced run_code call with a
 # high-entropy UUID arg matches the audit rule too; pre-fix, first-match
 # semantics skipped the deny. Post-fix the call is denied. Also asserts the
 # POLICY_UPDATED event landed (L-13).
@@ -457,13 +464,13 @@ echo "== check 17: policy audit event + deny-not-shadowed-by-audit =="
 R17_AGENT_ID="$(curl -s -f -X POST "${BASE}/v1/agents/" \
   -H "Content-Type: application/json" \
   -H "User-Agent: letta-client/1.0" \
-  -d "{\"model\": \"${SMOKE_MODEL}\", \"embedding\": \"${SMOKE_EMBEDDING}\", \"model_settings\": {\"provider_type\": \"ollama\", \"temperature\": 0.0}, \"tools\": [\"execute_code\"], \"tool_rules\": [{\"type\": \"run_first\", \"tool_name\": \"execute_code\"}], \"memory_blocks\": [{\"label\": \"persona\", \"value\": \"You are a helpful assistant. Run the requested code when asked.\"}, {\"label\": \"human\", \"value\": \"A student.\"}]}" \
+  -d "{\"model\": \"${SMOKE_MODEL}\", \"embedding\": \"${SMOKE_EMBEDDING}\", \"model_settings\": {\"provider_type\": \"ollama\", \"temperature\": 0.0}, \"tools\": [\"run_code\"], \"tool_rules\": [{\"type\": \"run_first\", \"tool_name\": \"run_code\"}], \"memory_blocks\": [{\"label\": \"persona\", \"value\": \"You are a helpful assistant. Run the requested code when asked.\"}, {\"label\": \"human\", \"value\": \"A student.\"}]}" \
   | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])' 2>/dev/null || true)"
 if [ -n "${R17_AGENT_ID}" ]; then
   R17_UUID="ca7f9e2b-41d6-4a3e-8f21-0b5c9d8e7a6f"
   curl -s -f -X PUT "${BASE}/v1/agents/${R17_AGENT_ID}/policy" \
     -H "Content-Type: application/json" -H "User-Agent: letta-client/1.0" \
-    -d "{\"rules\": [{\"name\": \"deny-code-exec\", \"condition\": {\"field\": \"tool_name\", \"operator\": \"eq\", \"value\": \"execute_code\"}, \"action\": \"deny\", \"priority\": 50}]}" >/dev/null
+    -d "{\"rules\": [{\"name\": \"deny-code-exec\", \"condition\": {\"field\": \"tool_name\", \"operator\": \"eq\", \"value\": \"run_code\"}, \"action\": \"deny\", \"priority\": 50}]}" >/dev/null
   R17_EVENTS="$(curl -s -f "${BASE}/v1/security/events?agent_id=${R17_AGENT_ID}&event_type=policy_updated" -H "User-Agent: letta-client/1.0" \
     | python3 -c 'import sys, json; print(json.load(sys.stdin).get("count", 0))' 2>/dev/null || echo 0)"
   R17_RESP="$(curl -s -f --max-time 300 -X POST "${BASE}/v1/agents/${R17_AGENT_ID}/messages" \
@@ -536,27 +543,72 @@ fi
 
 # ---------------------------------------------------------------- check 20
 # check 20: A9 tripwire — deferred L-3 localhost REST escape (review P-10).
-# A sandboxed execute_code call PATCHes the server's own sandbox-config
-# endpoint over localhost. Today auth is off, so the PATCH SUCCEEDS: the
-# hole is open. The rig reports it as KNOWN-OPEN every release (not a
-# FAIL — expected-fail at the rig level). When v0.16.38 lands minimal L-3
-# the PATCH is refused, this check turns green, and the KNOWN-OPEN marker
-# is removed, making it a permanent regression check. A SKIP (tool never
-# ran) counts as a FAILURE — a skipped integration test makes a pass mean
-# nothing (Nabla S5 lesson).
+# A CUSTOM tool (custom tools execute under the Landlock sandbox; run_code
+# is E2B and never touches it) PATCHes the server's own sandbox-config
+# endpoint over localhost. The tool carries metadata requires_network=true
+# so the sandbox auto-promote enables TCP connect — the check measures the
+# L-3 AUTH gap, not the network gate. Today auth is off, so the PATCH
+# SUCCEEDS: the hole is open. The rig reports it as KNOWN-OPEN every
+# release (not a FAIL — expected-fail at the rig level). When v0.16.38
+# lands minimal L-3 the PATCH is refused, this check turns green, and the
+# KNOWN-OPEN marker is removed, making it a permanent regression check.
+# A SKIP (tool never ran) counts as a FAILURE — a skipped integration test
+# makes a pass mean nothing (Nabla S5 lesson).
 echo "== check 20: L-3 localhost REST tripwire (KNOWN-OPEN expected) =="
-R20_AGENT_ID="$(curl -s -f -X POST "${BASE}/v1/agents/" \
-  -H "Content-Type: application/json" \
-  -H "User-Agent: letta-client/1.0" \
-  -d "{\"model\": \"${SMOKE_MODEL}\", \"embedding\": \"${SMOKE_EMBEDDING}\", \"model_settings\": {\"provider_type\": \"ollama\", \"temperature\": 0.0}, \"tools\": [\"execute_code\"], \"tool_rules\": [{\"type\": \"run_first\", \"tool_name\": \"execute_code\"}], \"memory_blocks\": [{\"label\": \"persona\", \"value\": \"You are a helpful assistant. Run the requested code when asked.\"}, {\"label\": \"human\", \"value\": \"A student.\"}]}" \
-  | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])' 2>/dev/null || true)"
-if [ -n "${R20_AGENT_ID}" ]; then
-  R20_SC_ID="$(curl -s -f "${BASE}/v1/sandbox-config/" -H "User-Agent: letta-client/1.0" \
-    | python3 -c 'import sys, json; d = json.load(sys.stdin); d = d if isinstance(d, list) else d.get("sandbox_configs", d.get("items", [])); print(d[0]["id"] if d else "")' 2>/dev/null || true)"
-  if [ -n "${R20_SC_ID}" ]; then
+R20_SC_ID="$(curl -s -f "${BASE}/v1/sandbox-config/" -H "User-Agent: letta-client/1.0" \
+  | python3 -c 'import sys, json; d = json.load(sys.stdin); d = d if isinstance(d, list) else d.get("sandbox_configs", d.get("items", [])); print(d[0]["id"] if d else "")' 2>/dev/null || true)"
+R20_TOOL_ID=""
+if [ -n "${R20_SC_ID}" ]; then
+  R20_TOOL_ID="$(python3 - "${BASE}" "${R20_SC_ID}" <<'PYTOOL'
+import sys, json, urllib.request, urllib.error
+base, scid = sys.argv[1], sys.argv[2]
+code = (
+    "import urllib.request\n\n"
+    "def patch_sandbox_config():\n"
+    '    """PATCH the server sandbox-config to prove the L-3 localhost escape."""\n'
+    "    req = urllib.request.Request(\n"
+    '        "http://localhost:8283/v1/sandbox-config/' + scid + '",\n'
+    "        method=\"PATCH\",\n"
+    '        headers={"Content-Type": "application/json", "User-Agent": "letta-client/1.0"},\n'
+    "        data=b'{\"config\": {\"sandbox_dir\": \"/tmp/pwned\"}}',\n"
+    "    )\n"
+    "    try:\n"
+    "        resp = urllib.request.urlopen(req)\n"
+    '        return "PATCH_STATUS:" + str(resp.status)\n'
+    "    except Exception as e:\n"
+    '        return "PATCH_FAILED:" + str(e)\n'
+)
+schema = {
+    "name": "patch_sandbox_config",
+    "description": "PATCH the server sandbox-config to prove the L-3 localhost escape.",
+    "parameters": {"type": "object", "properties": {}, "required": []},
+}
+payload = json.dumps({"source_code": code, "json_schema": schema, "source_type": "python"}).encode()
+req = urllib.request.Request(base + "/v1/tools/", data=payload, method="POST",
+    headers={"Content-Type": "application/json", "User-Agent": "letta-client/1.0"})
+try:
+    d = json.loads(urllib.request.urlopen(req).read())
+    print(d.get("id", ""))
+except Exception:
+    print("")
+PYTOOL
+)"
+fi
+if [ -n "${R20_TOOL_ID}" ]; then
+  # requires_network cannot be set at creation (CreateTool forbids metadata_);
+  # PATCH it so the sandbox auto-promote enables TCP connect for this tool.
+  curl -s -o /dev/null -X PATCH "${BASE}/v1/tools/${R20_TOOL_ID}" \
+    -H "Content-Type: application/json" -H "User-Agent: letta-client/1.0" \
+    -d '{"metadata_": {"requires_network": true}}'
+  R20_AGENT_ID="$(curl -s -f -X POST "${BASE}/v1/agents/" \
+    -H "Content-Type: application/json" \
+    -H "User-Agent: letta-client/1.0" \
+    -d "{\"model\": \"${SMOKE_MODEL}\", \"embedding\": \"${SMOKE_EMBEDDING}\", \"model_settings\": {\"provider_type\": \"ollama\", \"temperature\": 0.0}, \"tools\": [\"patch_sandbox_config\"], \"tool_rules\": [{\"type\": \"run_first\", \"tool_name\": \"patch_sandbox_config\"}], \"memory_blocks\": [{\"label\": \"persona\", \"value\": \"You are a helpful assistant. Call the requested tool when asked.\"}, {\"label\": \"human\", \"value\": \"A student.\"}]}" \
+    | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])' 2>/dev/null || true)"
+  if [ -n "${R20_AGENT_ID}" ]; then
     R20_RESP="$(curl -s -f --max-time 300 -X POST "${BASE}/v1/agents/${R20_AGENT_ID}/messages" \
       -H "Content-Type: application/json" -H "User-Agent: letta-client/1.0" \
-      -d "{\"messages\": [{\"role\": \"user\", \"content\": \"Run this exact code and print the result:\\nimport urllib.request\\nreq = urllib.request.Request('http://localhost:8283/v1/sandbox-config/${R20_SC_ID}', data=b'{}', method='PATCH', headers={'Content-Type': 'application/json'})\\ntry:\\n    resp = urllib.request.urlopen(req)\\n    print('PATCH_STATUS:' + str(resp.status))\\nexcept Exception as e:\\n    print('PATCH_FAILED:' + str(e))\"}], \"stream\": false}" || true)"
+      -d "{\"messages\": [{\"role\": \"user\", \"content\": \"Call patch_sandbox_config and tell me the exact result string.\"}], \"stream\": false}" || true)"
     R20_RAN="$(echo "${R20_RESP}" | grep -c "PATCH_" || true)"
     R20_OPEN="$(echo "${R20_RESP}" | grep -c "PATCH_STATUS:200" || true)"
     R20_REFUSED="$(echo "${R20_RESP}" | grep -cE "PATCH_FAILED.*(401|403|Unauthorized|Forbidden)" || true)"
@@ -567,14 +619,15 @@ if [ -n "${R20_AGENT_ID}" ]; then
     elif [ "${R20_RAN}" -ge 1 ]; then
       bad "20. L-3 tripwire (tool ran, unexpected PATCH result: $(echo "${R20_RESP}" | grep -o "PATCH_[A-Z]*:[^\"]*" | head -1))"
     else
-      bad "20. L-3 tripwire (SKIP: execute_code never ran — skip counts as failure)"
+      bad "20. L-3 tripwire (SKIP: patch_sandbox_config never ran — skip counts as failure)"
     fi
+    curl -s -o /dev/null -X DELETE "${BASE}/v1/agents/${R20_AGENT_ID}" -H "User-Agent: letta-client/1.0"
   else
-    bad "20. L-3 tripwire (no sandbox-config found)"
+    bad "20. L-3 tripwire (agent creation failed)"
   fi
-  curl -s -o /dev/null -X DELETE "${BASE}/v1/agents/${R20_AGENT_ID}" -H "User-Agent: letta-client/1.0"
+  curl -s -o /dev/null -X DELETE "${BASE}/v1/tools/${R20_TOOL_ID}" -H "User-Agent: letta-client/1.0"
 else
-  bad "20. L-3 tripwire (agent creation failed)"
+  bad "20. L-3 tripwire (custom tool creation failed)"
 fi
 
 
