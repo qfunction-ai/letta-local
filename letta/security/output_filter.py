@@ -8,10 +8,13 @@ Usage in agent files:
     from letta.security import output_filter as _outf
     response = await _outf.apply_output_filters(self, response)
 
-Known gap: The streaming path (AsyncGenerator) is not filtered. Filtering
-each SSE event individually requires buffering, which defeats the purpose
-of streaming. The non-streaming step() path covers eval scenarios and
-normal API usage. Streaming can be addressed later if needed.
+Streaming coverage (v0.16.37 status):
+    Streaming IS filtered — the StreamingCanaryFilter with holdback buffer
+    (v0.16.25) covers the SSE path; this module covers the non-streaming
+    LettaResponse path. Known, deliberate gaps:
+      - reasoning content is unfiltered BY DESIGN on both paths (recorded
+        v0.16.25 decision; reasoning is not shown as the assistant answer)
+      - tool-call chunk holdback is closed by A8 this release (v0.16.37)
 """
 
 from __future__ import annotations
@@ -75,6 +78,25 @@ async def apply_output_filters(agent, response: "LettaResponse") -> "LettaRespon
                     None,  # step_id not available at this point
                     None,  # run_id not available at this point
                 )
+            else:
+                # v0.16.37 Part B: skeleton-tier audit-only scan. Strict was
+                # silent — check for garbled/deleted canary variants and log
+                # a suspected event. Output untouched (fuzzy redaction
+                # false-positives on legitimate transcripts; fuzziness stays
+                # out of the output path).
+                from letta.security import audit_helpers as _ah
+                from letta.security.canary_output_filter import scan_skeleton_message
+
+                _skel = scan_skeleton_message(msg, canary_value)
+                if _skel is not None:
+                    await _ah.log_canary_output_suspected(
+                        agent.audit_logger,
+                        agent.agent_id,
+                        agent.actor,
+                        _skel,
+                        None,  # step_id not available at this point
+                        None,  # run_id not available at this point
+                    )
             filtered_messages.append(filtered)
 
         if modified:

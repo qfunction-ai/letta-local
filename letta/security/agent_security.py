@@ -371,7 +371,14 @@ async def _create_canary_block(agent, agent_state, canary_value: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def check_policy(agent, tool_name: str, tool_args: dict | None = None, step_id: str | None = None, run_id: str | None = None) -> "PolicyDecision":
+async def check_policy(
+    agent,
+    tool_name: str,
+    tool_args: dict | None = None,
+    step_id: str | None = None,
+    run_id: str | None = None,
+    waive_approval: bool = False,
+) -> "PolicyDecision":
     """Check a tool call against the security policy with full context.
 
     Wraps ``agent.policy_checker.check()`` with the evaluation context
@@ -422,7 +429,7 @@ async def check_policy(agent, tool_name: str, tool_args: dict | None = None, ste
         "actor_id": agent.actor.id if agent.actor else None,
         "agent_id": agent.agent_id,
     }
-    decision = agent.policy_checker.check(tool_name, eval_context=eval_context)
+    decision = agent.policy_checker.check(tool_name, eval_context=eval_context, waive_approval=waive_approval)
     # Record the call for rate limiting if allowed
     if decision.allowed:
         agent.policy_checker.record_call(tool_name, tool_args)
@@ -541,3 +548,6 @@ def handle_circuit_breaker_error(agent, error_type: str) -> Optional[str]:
         ``"auto_compact"`` if the threshold is exceeded, ``None`` otherwise.
     """
     return agent.circuit_breaker.record_error(error_type)
+BLOCKED_ARGS_REDACTION_MARKER = "[Tool call arguments redacted by security policy]"
+
+

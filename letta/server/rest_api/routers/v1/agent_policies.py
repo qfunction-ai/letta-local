@@ -323,8 +323,17 @@ async def _load_policy(agent_id: str, actor) -> ToolCallPolicy:
     return ToolCallPolicy()  # default: allow all
 
 
-async def _save_policy(agent_id: str, actor, policy: ToolCallPolicy) -> None:
-    """Save a policy to the DB. Creates or updates."""
+async def _save_policy(agent_id: str, actor, policy: ToolCallPolicy, method: str) -> None:
+    """Save a policy to the DB. Creates or updates.
+
+    v0.16.37 (L-13): every mutation is audited — a policy change is a
+    security-relevant event (a deny rule removed is an attack the old
+    policy would have stopped). The audit event is written AFTER the save
+    commits, in its own session: audit_log is fail-open by design (never
+    raises), and a swallowed flush failure inside the save's transaction
+    would poison the commit and lose the policy itself. Event > no event,
+    but never at the cost of the save.
+    """
     from sqlalchemy import select
 
     from letta.orm.tool_call_policy import ToolCallPolicyModel
@@ -352,6 +361,18 @@ async def _save_policy(agent_id: str, actor, policy: ToolCallPolicy) -> None:
             session.add(policy_model)
 
         await session.flush()
+
+    # Audit the mutation (fail-open; see docstring for ordering rationale)
+    from letta.security.audit import AuditLogger
+    from letta.security.audit_helpers import log_policy_updated
+
+    await log_policy_updated(
+        AuditLogger(),
+        agent_id,
+        actor,
+        policy.model_dump(),
+        method,
+    )
 
 
 async def _verify_agent_access(agent_id: str, server: SyncServer, actor) -> None:
@@ -403,7 +424,7 @@ async def update_tool_call_policy(
     actor = await server.user_manager.get_actor_or_default_async(actor_id=headers.actor_id)
     await _verify_agent_access(agent_id, server, actor)
     policy = _to_policy(request)
-    await _save_policy(agent_id, actor, policy)
+    await _save_policy(agent_id, actor, policy, method="put")
     return _to_response(agent_id, policy)
 
 
@@ -445,7 +466,7 @@ async def patch_tool_call_policy(
     if request.loop_detection is not None:
         existing.loop_detection = _to_loop_detection(request.loop_detection)
 
-    await _save_policy(agent_id, actor, existing)
+    await _save_policy(agent_id, actor, existing, method="patch")
     return _to_response(agent_id, existing)
 
 
@@ -511,6 +532,11 @@ async def delete_tool_call_policy(
     actor = await server.user_manager.get_actor_or_default_async(actor_id=headers.actor_id)
     await _verify_agent_access(agent_id, server, actor)
 
+    # Capture the policy being deleted for the audit trail (v0.16.37, L-13).
+    # The plan asserted no DELETE endpoint existed — it does, and it is the
+    # most dangerous mutation: it silently removes every deny rule.
+    deleted_policy = await _load_policy(agent_id, actor)
+
     _org_id = actor.organization_id
 
     async with db_registry.async_session() as session:
@@ -524,6 +550,18 @@ async def delete_tool_call_policy(
         if policy_model:
             await session.delete(policy_model)
             await session.flush()
+
+    # Audit the reset (fail-open, after commit — same rationale as _save_policy)
+    from letta.security.audit import AuditLogger
+    from letta.security.audit_helpers import log_policy_updated
+
+    await log_policy_updated(
+        AuditLogger(),
+        agent_id,
+        actor,
+        deleted_policy.model_dump(),
+        method="delete",
+    )
 
     # Return the default policy with all 5 fields
     return _to_response(agent_id, ToolCallPolicy())

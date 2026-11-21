@@ -93,8 +93,26 @@ def apply_landlock(config):
 
     abi = detect_landlock_abi()
     if abi < 1:
-        print("Landlock not available (ABI < 1), running unsandboxed", file=sys.stderr)
-        return
+        # v0.16.37 (review L-6): FAIL CLOSED. The old behavior silently ran
+        # tool code unsandboxed — a kernel without Landlock meant every
+        # sandboxed tool escaped its sandbox with no signal. Now the tool
+        # fails loudly through the normal tool-error path unless the
+        # operator explicitly opts in with LETTA_ALLOW_UNSANDBOXED=true
+        # (v0.16.31 flag pattern).
+        if os.environ.get("LETTA_ALLOW_UNSANDBOXED", "").lower() == "true":
+            print(
+                "Landlock not available (ABI < 1); LETTA_ALLOW_UNSANDBOXED=true set, "
+                "running unsandboxed by explicit operator opt-in",
+                file=sys.stderr,
+            )
+            return
+        print(
+            "Landlock not available (ABI < 1) and LETTA_ALLOW_UNSANDBOXED is not set. "
+            "Refusing to run tool code unsandboxed. "
+            "Set LETTA_ALLOW_UNSANDBOXED=true to explicitly opt in to unsandboxed execution.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # CRITICAL: Handle ALL access rights for the detected ABI version.
     # Landlock's design: any access right NOT included in handled_access_fs

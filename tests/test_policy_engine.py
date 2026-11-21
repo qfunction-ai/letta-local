@@ -1012,3 +1012,74 @@ class TestCheckPolicyHelper:
         decision = checker.check("web_search", eval_context=eval_context)
         assert decision.allowed is False
         assert checker.get_call_count("web_search") == 0
+
+
+class TestApprovalWaiver:
+    """v0.16.37 (review P-3): an approval waives ONLY the approval rule.
+
+    On an approved call, REQUIRE_APPROVAL matches are skipped and evaluation
+    continues, so deny rules BELOW the approval rule in priority still fire.
+    """
+
+    def _approval_and_deny_rules(self):
+        return [
+            PolicyRule(
+                name="approval-gate",
+                condition=PolicyCondition(field="tool_name", operator=PolicyOperator.EQ, value="web_search"),
+                action=PolicyAction.REQUIRE_APPROVAL,
+                priority=80,
+            ),
+            PolicyRule(
+                name="deny-web",
+                condition=PolicyCondition(field="tool_name", operator=PolicyOperator.EQ, value="web_search"),
+                action=PolicyAction.DENY,
+                priority=50,
+            ),
+        ]
+
+    def test_require_approval_terminal_without_waiver(self):
+        checker = PolicyChecker(ToolCallPolicy(rules=self._approval_and_deny_rules()))
+        decision = checker.check("web_search", eval_context={"tool_name": "web_search", "tool_args": {}})
+        assert decision.allowed is False
+        assert decision.action == "require_approval"
+        assert decision.matched_rule == "approval-gate"
+
+    def test_waived_approval_lets_lower_deny_rule_fire(self):
+        """The core P-3 condition 3: approval does not waive deny rules."""
+        checker = PolicyChecker(ToolCallPolicy(rules=self._approval_and_deny_rules()))
+        decision = checker.check(
+            "web_search",
+            eval_context={"tool_name": "web_search", "tool_args": {}},
+            waive_approval=True,
+        )
+        assert decision.allowed is False
+        assert decision.action == "deny"
+        assert decision.matched_rule == "deny-web"
+
+    def test_waived_approval_no_deny_below_allows(self):
+        checker = PolicyChecker(ToolCallPolicy(rules=[
+            PolicyRule(
+                name="approval-gate",
+                condition=PolicyCondition(field="tool_name", operator=PolicyOperator.EQ, value="web_search"),
+                action=PolicyAction.REQUIRE_APPROVAL,
+                priority=80,
+            ),
+        ]))
+        decision = checker.check(
+            "web_search",
+            eval_context={"tool_name": "web_search", "tool_args": {}},
+            waive_approval=True,
+        )
+        assert decision.allowed is True
+        assert decision.action == "allow"
+
+    def test_waived_approval_recorded_in_audit_entries(self):
+        checker = PolicyChecker(ToolCallPolicy(rules=self._approval_and_deny_rules()))
+        decision = checker.check(
+            "web_search",
+            eval_context={"tool_name": "web_search", "tool_args": {}},
+            waive_approval=True,
+        )
+        waived = [e for e in decision.audit_entries if e["matched_rule"] == "approval-gate"]
+        assert len(waived) == 1
+        assert "waived" in waived[0]["reason"]

@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import struct
 import sys
 import tempfile
@@ -110,8 +111,18 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                 self._prepare_venv(landlock_config, venv_path, env), label="prepare_venv"
             )
 
-        # Generate and write execution script (always with markers)
+        # v0.16.37 (review L-4/P-4/P-11): per-execution isolation. Every
+        # execution used to share one sandbox_dir — write-granted, cwd, and
+        # sys.path[0] via the script location. One injection writing json.py
+        # there hijacked every later tool run, for every agent, permanently;
+        # concurrent runs could read each other's scripts (which carry
+        # pickled agent state + decrypted secrets). Now: each execution gets
+        # its own mkdtemp dir (0700), the shared sandbox_dir drops out of
+        # BOTH read and write grants, and the interpreter runs with -P so
+        # the script dir never lands on sys.path.
         code = await self.generate_execution_script(agent_state=agent_state, wrap_print_with_markers=True)
+
+        exec_dir = await asyncio.to_thread(tempfile.mkdtemp, dir=sandbox_dir, prefix="exec-")
 
         async def write_temp_file(dir, content):
             def _write():
@@ -122,7 +133,7 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
 
             return await asyncio.to_thread(_write)
 
-        temp_file_path = await write_temp_file(sandbox_dir, code)
+        temp_file_path = await write_temp_file(exec_dir, code)
 
         try:
             # Wait for venv preparation if started
@@ -176,9 +187,26 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                 agent_read_paths = [os.path.join(base, self.agent_id)]
 
             wrapper_config = {
-                "allowed_read_paths": landlock_config.allowed_read_paths + [sandbox_dir] + agent_read_paths,
-                "allowed_write_paths": landlock_config.allowed_write_paths + [sandbox_dir] + staging_write_paths,
-                "allowed_execute_paths": landlock_config.allowed_execute_paths,
+                # P-11: read/write grants go to THIS execution's temp dir
+                # only — the shared sandbox_dir is no longer granted at all,
+                # so concurrent executions cannot read each other's scripts.
+                # The venv gets read+execute on its own path (not the sandbox
+                # root), so tool code can't plant modules in site-packages.
+                "allowed_read_paths": (
+                    landlock_config.allowed_read_paths
+                    + [exec_dir]
+                    + agent_read_paths
+                    + ([venv_path] if use_venv else [])
+                ),
+                "allowed_write_paths": (
+                    landlock_config.allowed_write_paths
+                    + [exec_dir]
+                    + staging_write_paths
+                ),
+                "allowed_execute_paths": (
+                    landlock_config.allowed_execute_paths
+                    + ([venv_path] if use_venv else [])
+                ),
                 "allow_tcp_connect": landlock_config.allow_tcp_connect,
                 "allow_tcp_bind": landlock_config.allow_tcp_bind,
                 "blocked_syscalls": landlock_config.blocked_syscalls,
@@ -200,7 +228,7 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                 wrapper_config=wrapper_config,
                 temp_file_path=temp_file_path,
                 env=exec_env,
-                cwd=sandbox_dir,
+                cwd=exec_dir,
                 timeout=landlock_config.timeout,
             )
 
@@ -213,6 +241,7 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
 
             if not settings.debug:
                 await asyncio.to_thread(os.remove, temp_file_path)
+                await asyncio.to_thread(shutil.rmtree, exec_dir, True)
 
     async def _prepare_venv(self, landlock_config, venv_path: str, env: Dict[str, str]):
         """Prepare virtual environment asynchronously (in a background thread)."""
@@ -274,6 +303,15 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                 wrapper_path,
                 "--config", json.dumps(wrapper_config),
                 "--",
+                # -P (Python 3.11+): the script's directory is NOT prepended
+                # to sys.path. Combined with the per-exec temp dir this
+                # closes the module-hijack hole (L-4): a tool writing
+                # json.py next to its script can no longer shadow the real
+                # module for itself or anyone else. Pre-3.11 interpreters
+                # reject the flag and fail loudly (fail-closed, consistent
+                # with the wrapper's ABI gate). Container Python is 3.11
+                # (Dockerfile: uv --python 3.11).
+                "-P",
                 python_executable, temp_file_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

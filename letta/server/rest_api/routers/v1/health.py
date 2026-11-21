@@ -18,7 +18,17 @@ _UNREADY_STATES = {"degraded", "manual_disable", "warming"}
 @router.get("/health/", response_model=Health, operation_id="check_health")
 async def check_health():
     """Liveness endpoint; returns 200 when process is responsive."""
-    return Health(version=__version__, status="ok")
+    from letta.security.audit import get_audit_write_failures
+    from letta.services.tool_sandbox._landlock_detect import detect_sandbox_health
+
+    sandbox = detect_sandbox_health()
+    return Health(
+        version=__version__,
+        status="ok",
+        landlock_abi=sandbox["landlock_abi"],
+        landlock_net_rules_enforced=sandbox["landlock_net_rules_enforced"],
+        audit_write_failures=get_audit_write_failures(),
+    )
 
 
 @router.get("/ready/", response_model=Health, operation_id="check_readiness")

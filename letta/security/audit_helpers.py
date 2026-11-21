@@ -133,8 +133,39 @@ async def log_canary_output_detected(
     """
     await audit_log(
         audit_logger, agent_id, actor,
-        SecurityEventType.CANARY_OUTPUT_DETECTED, {"agent_id": agent_id},
+        SecurityEventType.CANARY_OUTPUT_DETECTED,
+        {"agent_id": agent_id, "match_type": "strict"},
         step_id, run_id, "canary_output_detected",
+    )
+
+
+async def log_canary_output_suspected(
+    audit_logger: "AuditLogger",
+    agent_id: str,
+    actor: "User | None",
+    match: dict,
+    step_id: str | None,
+    run_id: str | None,
+) -> None:
+    """Log a canary_output_suspected audit event (v0.16.37 Part B).
+
+    Skeleton-tier match: a garbled/deleted variant of the canary appeared in
+    output. AUDIT-ONLY — no redaction, no CANARY_WARNING. The event is the
+    signal; fuzzy redaction would corrupt legitimate output. Distinct event
+    TYPE (not a label): consumers dispatch on event_type, and suspected is
+    not confirmed.
+    """
+    event_data = {
+        "agent_id": agent_id,
+        "match_type": "skeleton",
+        "matched_segments": match.get("matched_segments", []),
+        "matched_ratio": match.get("matched_ratio"),
+        "location": "canary_block",
+    }
+    await audit_log(
+        audit_logger, agent_id, actor,
+        SecurityEventType.CANARY_OUTPUT_SUSPECTED, event_data,
+        step_id, run_id, "canary_output_suspected",
     )
 
 
@@ -209,4 +240,26 @@ async def log_policy_audit_matched(
         audit_logger, agent_id, actor,
         SecurityEventType.POLICY_AUDIT_MATCHED, {"tool_name": tool_name, "matched_rule": matched_rule},
         step_id, run_id, "policy_audit_matched",
+    )
+
+
+async def log_policy_updated(
+    audit_logger: "AuditLogger",
+    agent_id: str,
+    actor: "User | None",
+    policy: dict,
+    method: str,
+) -> None:
+    """Log a policy_updated audit event (v0.16.37, review L-13).
+
+    Fired when a tool call policy is mutated via the REST API (PUT or
+    PATCH). The event_data carries the full new policy — payloads are
+    small, and the prior state is recoverable from the previous event.
+    POST /policy/evaluate is a dry-run and is unlogged BY DESIGN.
+    """
+    await audit_log(
+        audit_logger, agent_id, actor,
+        SecurityEventType.POLICY_UPDATED,
+        {"method": method, "policy": policy},
+        None, None, "policy_updated",
     )

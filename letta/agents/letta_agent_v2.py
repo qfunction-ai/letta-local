@@ -534,6 +534,19 @@ class LettaAgentV2(BaseAgentV2):
             self.agent_state.llm_config.valid_tool_names = {t["name"] for t in valid_tools}
             approval_request, approval_response = _maybe_get_approval_messages(messages)
             if approval_request and approval_response:
+                # v0.16.37 (review P-3, condition 1): exact-call binding. The
+                # approval releases ONLY the tool call it was issued for —
+                # a response whose tool_call_id doesn't match the request is
+                # not an approval at all (treated as no approval; the call
+                # is checked from scratch).
+                requested_call_id = approval_request.tool_calls[0].id if approval_request.tool_calls else None
+                if approval_response.tool_call_id != requested_call_id:
+                    self.logger.warning(
+                        f"Approval response tool_call_id {approval_response.tool_call_id!r} does not match "
+                        f"approval request tool_call_id {requested_call_id!r} — ignoring approval"
+                    )
+                    approval_response = None
+            if approval_request and approval_response:
                 tool_call = approval_request.tool_calls[0]
                 reasoning_content = approval_request.content
                 step_id = approval_request.step_id
@@ -1261,21 +1274,23 @@ class LettaAgentV2(BaseAgentV2):
             request_heartbeat=request_heartbeat,
         )
 
-        # Security: check tool call policy FIRST
-        policy_decision = await _sec.check_policy(self, tool_call_name, tool_args, step_id, run_id)
-        if not policy_decision.allowed:
-            tool_execution_result = ToolExecutionResult(
-                status="error",
-                func_return=f"Tool '{tool_call_name}' is denied by the security policy. {policy_decision.reason}",
-            )
-            # Audit log: tool denied by policy
-            await _ah.log_tool_denied(
-                self.audit_logger, self.agent_id, self.actor,
-                tool_call_name, policy_decision.reason,
-                step_id, run_id,
-                matched_rule=policy_decision.matched_rule,
-            )
-        elif self.canary_checker.check(tool_args):
+        # Security: check tool call policy FIRST.
+        # v0.16.37 (review P-3/P-13): order is load-bearing —
+        #   1. canary check (a canary-bearing call is blocked outright; it
+        #      must NEVER be shown to a human as an approval request)
+        #   2. require_approval (the call shown to the human is the exact
+        #      call that executes; approval waives ONLY the approval rule)
+        #   3. deny (on the approved call, waive_approval lets deny rules
+        #      below the approval rule still fire)
+        #   4. tool-rule approval (RequiresApprovalToolRule)
+        #   5. execute
+        # Previously require_approval was unreachable dead code: the engine
+        # returned allowed=False for it, so the deny branch consumed it (L-12).
+        policy_decision = await _sec.check_policy(
+            self, tool_call_name, tool_args, step_id, run_id,
+            waive_approval=bool(is_approval),
+        )
+        if self.canary_checker.check(tool_args):
             # Security: canary detected in tool arguments — prompt exfiltration attempt
             tool_execution_result = ToolExecutionResult(
                 status="error",
@@ -1306,6 +1321,18 @@ class LettaAgentV2(BaseAgentV2):
                 self.audit_logger, self.agent_id, self.actor,
                 tool_call_name, "policy: approval_required_tools",
                 step_id, run_id,
+            )
+        elif not policy_decision.allowed:
+            tool_execution_result = ToolExecutionResult(
+                status="error",
+                func_return=f"Tool '{tool_call_name}' is denied by the security policy. {policy_decision.reason}",
+            )
+            # Audit log: tool denied by policy
+            await _ah.log_tool_denied(
+                self.audit_logger, self.agent_id, self.actor,
+                tool_call_name, policy_decision.reason,
+                step_id, run_id,
+                matched_rule=policy_decision.matched_rule,
             )
         elif not is_approval and tool_rules_solver.is_requires_approval_tool(tool_call_name):
             tool_args[REQUEST_HEARTBEAT_PARAM] = request_heartbeat

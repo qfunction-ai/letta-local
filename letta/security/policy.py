@@ -457,7 +457,12 @@ class PolicyChecker:
         self._total_calls: int = 0  # total tool calls this run
         self._call_window: list[tuple[str, str]] = []  # (tool_name, args_hash) for loop detection
 
-    def check(self, tool_name: str, eval_context: Optional[Dict[str, Any]] = None) -> PolicyDecision:
+    def check(
+        self,
+        tool_name: str,
+        eval_context: Optional[Dict[str, Any]] = None,
+        waive_approval: bool = False,
+    ) -> PolicyDecision:
         """Check a tool call against the security policy.
 
         Args:
@@ -465,6 +470,11 @@ class PolicyChecker:
             eval_context: Optional evaluation context with tool_args,
                 tool_call_count, actor_id, agent_id, etc. If not
                 provided, only the legacy two-list check is used.
+            waive_approval: (v0.16.37, review P-3) when True, REQUIRE_APPROVAL
+                matches are skipped and evaluation continues, so deny rules
+                BELOW the approval rule in priority still evaluate. An
+                approval waives ONLY the approval rule — never deny rules,
+                the canary check, or argument validation.
 
         Returns:
             PolicyDecision with allowed, matched_rule, action, reason,
@@ -537,8 +547,14 @@ class PolicyChecker:
                 if _evaluate_condition(rule.condition, eval_context, rule):
                     # Condition matched — check pattern if present
                     if rule.pattern is not None and rule._compiled_pattern is not None:
-                        # Pattern matches against the tool's string representation
-                        # For tool calls, this is typically the tool args serialized
+                        # Pattern matches against the tool's string representation.
+                        # For tool calls this is str(tool_args) — the PYTHON REPR,
+                        # not canonical JSON (v0.16.37, review finding —
+                        # documented, deliberately NOT changed — existing
+                        # patterns in the wild are written against the repr
+                        # shape. JSON-serialized matching, if ever added, will
+                        # be a NEW opt-in field, never a semantic change to
+                        # existing patterns.)
                         action_str = str(eval_context.get("tool_args", ""))
                         if not rule._compiled_pattern.search(action_str):
                             continue  # condition matched but pattern didn't — skip
@@ -555,6 +571,14 @@ class PolicyChecker:
                     if action == PolicyAction.AUDIT:
                         # AUDIT: log-and-continue. The entry rides along on the
                         # final decision; the consumer emits one event per entry.
+                        collected_audit_entries.append(entry)
+                        continue
+
+                    if action == PolicyAction.REQUIRE_APPROVAL and waive_approval:
+                        # P-3: approval waives ONLY the approval rule. Skip it
+                        # and keep evaluating so lower-priority deny rules
+                        # still run on the approved call.
+                        entry["reason"] = (entry.get("reason") or "") + " (waived: approved)"
                         collected_audit_entries.append(entry)
                         continue
 

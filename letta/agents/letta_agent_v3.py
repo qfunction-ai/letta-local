@@ -55,6 +55,7 @@ from letta.schemas.letta_message import (
     LettaMessage,
     MessageType,
     SummaryMessage,
+    ToolCallDelta,
     extract_compaction_stats_from_packed_json,
 )
 from letta.schemas.letta_message_content import OmittedReasoningContent, ReasoningContent, RedactedReasoningContent, TextContent
@@ -158,6 +159,52 @@ class LettaAgentV3(LettaAgentV2):
         # Multi-turn token tracking for RL training (accumulated across all LLM calls)
         self.turns: list[TurnTokenData] = []
         self.return_token_ids: bool = False
+        # v0.16.37 (A8, review L-11/P-14): tool call ids blocked by the
+        # security layer (canary or policy deny) in the CURRENT step. Set by
+        # _handle_ai_response; consumed by the streaming tool-call chunk
+        # holdback (redact before yield) and the storage-time arg redaction.
+        self._security_blocked_tool_call_ids: set = set()
+
+    def _redact_tool_call_chunk(self, chunk):
+        """v0.16.37 (A8, review L-11): redact a buffered tool_call chunk before release.
+
+        The chunk was held back during generation; the security verdict is now
+        known (self._security_blocked_tool_call_ids). Returns the chunk to
+        yield, or None to suppress entirely:
+          - complete ToolCall of a blocked call -> args replaced with the
+            redaction marker (name and structure kept)
+          - ToolCallDelta of a blocked call -> suppressed (a delta is a raw
+            args fragment; there is nothing safe to show)
+          - clean calls -> untouched, ordering preserved
+        """
+        blocked = getattr(self, "_security_blocked_tool_call_ids", set())
+        if not blocked:
+            return chunk
+
+        # single tool_call field
+        tc = getattr(chunk, "tool_call", None)
+        if tc is not None:
+            tc_id = getattr(tc, "tool_call_id", None)
+            if tc_id in blocked:
+                if isinstance(tc, ToolCallDelta):
+                    return None
+                tc.arguments = _sec.BLOCKED_ARGS_REDACTION_MARKER
+
+        # tool_calls list field
+        tcs = getattr(chunk, "tool_calls", None)
+        if isinstance(tcs, list):
+            kept = []
+            for t in tcs:
+                if getattr(t, "tool_call_id", None) in blocked:
+                    if isinstance(t, ToolCallDelta):
+                        continue  # suppress delta of blocked call
+                    t.arguments = _sec.BLOCKED_ARGS_REDACTION_MARKER
+                kept.append(t)
+            if not kept:
+                return None
+            chunk.tool_calls = kept
+
+        return chunk
 
     def _compute_tool_return_truncation_chars(self) -> int:
         """Compute a dynamic cap for tool returns in requests.
@@ -730,6 +777,18 @@ class LettaAgentV3(LettaAgentV2):
             # response is handled separately by apply_output_filters below.
             if _canary_filter is not None:
                 flush_tail = _canary_filter.flush()
+                # v0.16.37 Part B (B3): skeleton-tier audit-only detection ran
+                # inside flush() on the accumulated full text. AUDIT event
+                # only — output is untouched, so streams stay byte-identical.
+                if _canary_filter.skeleton_match is not None:
+                    await _ah_audit.log_canary_output_suspected(
+                        self.audit_logger,
+                        self.agent_id,
+                        self.actor,
+                        _canary_filter.skeleton_match,
+                        None,
+                        run_id,
+                    )
                 if flush_tail:
                     from letta.helpers.datetime_helpers import get_utc_time as _now
                     from letta.schemas.letta_message import AssistantMessage as _FlushMsg
@@ -1122,6 +1181,14 @@ class LettaAgentV3(LettaAgentV2):
                     self.logger.info("switching to unconstrained mode (allowing non-tool responses)")
             self._require_tool_call = require_tool_call
 
+            # v0.16.37 (A8, review L-11): buffer for native-mode tool_call
+            # chunks. They are held back during generation (see the invocation
+            # loop) and released after _handle_ai_response, when the
+            # policy/canary verdict is known. Defined unconditionally here so
+            # the release point is safe on every path (approval-response steps
+            # never fill it; cleared per retry attempt).
+            _tool_call_chunks_buffer: list = []
+
             # Refresh messages at the start of each step to scrub inner thoughts.
             # NOTE: We skip system prompt refresh during normal steps to preserve prefix caching.
             # The system prompt is only rebuilt after compaction or message reset.
@@ -1271,6 +1338,7 @@ class LettaAgentV3(LettaAgentV2):
                 force_tool_call = valid_tools[0]["name"] if len(valid_tools) == 1 and self._require_tool_call else None
                 for llm_request_attempt in range(summarizer_settings.max_summarizer_retries + 1):
                     try:
+                        _tool_call_chunks_buffer.clear()
                         request_system_prompt = self.generate_request_system_prompt(
                             client_skills=self.client_skills,
                             current_system_message=messages[0],
@@ -1350,7 +1418,26 @@ class LettaAgentV3(LettaAgentV2):
                         async for chunk in invocation:
                             if llm_adapter.supports_token_streaming():
                                 if include_return_message_types is None or chunk.message_type in include_return_message_types:
-                                    yield chunk
+                                    # v0.16.37 (A8, review L-11): native-mode
+                                    # tool_call chunks are BUFFERED, not yielded.
+                                    # The policy/canary check runs at execution
+                                    # time (after generation) — yielding raw
+                                    # args as they arrive would put the exact
+                                    # canary on the wire before the call is
+                                    # blocked. Buffer now; _handle_ai_response
+                                    # decides; the release point after it
+                                    # yields redacted-or-clean chunks. Same
+                                    # holdback pattern as the v0.16.26
+                                    # prompt-mode fix. TTFT cost applies only
+                                    # to tool-call chunks — text/reasoning
+                                    # deltas still stream live.
+                                    if (
+                                        isinstance(chunk, LettaMessage)
+                                        and chunk.message_type == MessageType.tool_call_message
+                                    ):
+                                        _tool_call_chunks_buffer.append(chunk)
+                                    else:
+                                        yield chunk
                         # Report success to circuit breaker (only for models with fallback routes)
                         routing_client = await get_llm_routing_client()
                         if routing_client.get_fallback_handle(active_llm_config.handle):
@@ -1588,6 +1675,18 @@ class LettaAgentV3(LettaAgentV2):
                 active_llm_config=active_llm_config,
             )
             enforce_budget_override(self)
+
+            # v0.16.37 (A8, review L-11): release the buffered native-mode
+            # tool_call chunks. The policy/canary check has now run inside
+            # _handle_ai_response — blocked call ids are known. Blocked calls'
+            # args are replaced with the redaction marker (complete ToolCall)
+            # or suppressed entirely (deltas of a blocked call); clean calls
+            # release untouched, ordering preserved.
+            for _tc_chunk in _tool_call_chunks_buffer:
+                _released = self._redact_tool_call_chunk(_tc_chunk)
+                if _released is not None:
+                    yield _released
+            _tool_call_chunks_buffer.clear()
 
             # extend trackers with new messages
             self.response_messages.extend(new_messages)
@@ -1868,6 +1967,12 @@ class LettaAgentV3(LettaAgentV2):
         Unified approach: treats single and multi-tool calls uniformly to reduce code duplication.
         """
 
+        # v0.16.37 (A8): per-step blocked-call tracker. Populated by _run_one
+        # (canary / policy deny) and the step-2 approval gate (canary-bearing
+        # approval candidates); consumed by the streaming chunk holdback and
+        # the storage-time args redaction below.
+        self._security_blocked_tool_call_ids = set()
+
         # 1. Handle no-tool cases (content-only or no-op)
         if not tool_calls and not tool_call_denials and not tool_returns:
             # Case 1a: No tool call, no content (LLM no-op)
@@ -2029,22 +2134,90 @@ class LettaAgentV3(LettaAgentV2):
                 messages_to_persist = (initial_messages or []) + assistant_message
             return messages_to_persist, continue_stepping, stop_reason
 
+        # v0.16.37 (A3, review P-3/P-13): policy check runs ONCE per tool call,
+        # BEFORE the approval gate, for three reasons:
+        #   (a) P-13 ordering — a canary-bearing call is excluded from the
+        #       approval request (its args are never shown to a human) and
+        #       blocked in _run_one instead;
+        #   (b) policy require_approval joins the SAME approval request as
+        #       tool-rule approvals (previously V3 treated policy
+        #       REQUIRE_APPROVAL as flat DENY — dead approval machinery);
+        #   (c) on approved calls, waive_approval=True lets deny rules below
+        #       the approval rule still fire (approval waives ONLY the
+        #       approval rule).
+        # Decisions are stashed on the exec specs so _run_one does not
+        # re-check (double audit events) — one check per call, ever.
+        policy_decisions: Dict[str, Any] = {}
+        for tc in tool_calls:
+            _pd_args = _safe_load_tool_call_str(tc.function.arguments, llm_config=active_llm_config)
+            policy_decisions[tc.id] = await _sec.check_policy(
+                self, tc.function.name, _pd_args, step_id, run_id,
+                waive_approval=bool(is_approval_response),
+            )
+
         # 2. Check whether tool call requires approval (includes client-side tools)
         if not is_approval_response:
             # Get names of client-side tools (these are executed by client, not server)
             client_tool_names = {ct.name for ct in self.client_tools} if self.client_tools else set()
 
-            # Tools requiring approval: requires_approval tools OR client-side tools
+            # Canary-bearing calls are NEVER approval candidates (P-13) — they
+            # flow to _run_one where the canary branch blocks them.
+            def _canary_bearing(tc) -> bool:
+                _cb_args = _safe_load_tool_call_str(tc.function.arguments, llm_config=active_llm_config)
+                return self.canary_checker.check(_cb_args)
+
+            # Tools requiring approval: requires_approval tools, client-side
+            # tools, OR policy require_approval matches
             requested_tool_calls = [
                 t
                 for t in tool_calls
-                if tool_rules_solver.is_requires_approval_tool(t.function.name) or t.function.name in client_tool_names
+                if (
+                    tool_rules_solver.is_requires_approval_tool(t.function.name)
+                    or t.function.name in client_tool_names
+                    or (
+                        policy_decisions.get(t.id) is not None
+                        and policy_decisions[t.id].action == "require_approval"
+                    )
+                )
+                and not _canary_bearing(t)
             ]
             allowed_tool_calls = [
                 t
                 for t in tool_calls
-                if not tool_rules_solver.is_requires_approval_tool(t.function.name) and t.function.name not in client_tool_names
+                if not (
+                    tool_rules_solver.is_requires_approval_tool(t.function.name)
+                    or t.function.name in client_tool_names
+                    or (
+                        policy_decisions.get(t.id) is not None
+                        and policy_decisions[t.id].action == "require_approval"
+                    )
+                )
             ]
+            # P-13 mixed case: canary-bearing approval candidates are excluded
+            # from the approval request above. In the mixed-parallel case
+            # (another call DOES need approval) the step returns here, so the
+            # canary-bearing call would silently vanish — never blocked, never
+            # audited. Block it explicitly instead: canary event + denial
+            # return, args never shown to the human.
+            _canary_blocked_approval_candidates = [
+                t
+                for t in tool_calls
+                if (
+                    tool_rules_solver.is_requires_approval_tool(t.function.name)
+                    or t.function.name in client_tool_names
+                    or (
+                        policy_decisions.get(t.id) is not None
+                        and policy_decisions[t.id].action == "require_approval"
+                    )
+                )
+                and _canary_bearing(t)
+            ]
+            for _cb in _canary_blocked_approval_candidates:
+                self._security_blocked_tool_call_ids.add(_cb.id)
+                await _ah_audit.log_canary_detected(
+                    self.audit_logger, self.agent_id, self.actor, _cb.function.name, step_id, run_id
+                )
+
             if requested_tool_calls:
                 approval_messages = create_approval_request_message_from_llm_response(
                     agent_id=self.agent_state.id,
@@ -2057,6 +2230,15 @@ class LettaAgentV3(LettaAgentV2):
                     run_id=run_id,
                 )
                 messages_to_persist = (initial_messages or []) + approval_messages
+                if _canary_blocked_approval_candidates:
+                    messages_to_persist += create_tool_returns_for_denials(
+                        tool_calls=[
+                            ToolCallDenial(**t.model_dump(), reason="Tool call blocked: potential prompt exfiltration detected.")
+                            for t in _canary_blocked_approval_candidates
+                        ],
+                        denial_reason="Tool call blocked: potential prompt exfiltration detected.",
+                        timezone=self.agent_state.timezone,
+                    )
                 return messages_to_persist, False, LettaStopReason(stop_reason=StopReasonType.requires_approval.value)
 
         result_tool_returns = []
@@ -2176,6 +2358,9 @@ class LettaAgentV3(LettaAgentV2):
                     "args": args,
                     "violated": tool_rule_violated,
                     "error": None,
+                    # v0.16.37 (A3): policy decision stashed from the pre-approval
+                    # gate check — one check per call, ever (no double audit).
+                    "policy_decision": policy_decisions.get(tc.id),
                 }
             )
 
@@ -2190,21 +2375,38 @@ class LettaAgentV3(LettaAgentV2):
                 # Audit log: tool rule violation
                 await _ah_audit.log_tool_denied(self.audit_logger, self.agent_id, self.actor, spec["name"], "tool_rule_violation", step_id, run_id)
                 return result, 0
-            # Security: check tool call policy FIRST
-            policy_decision = await _sec.check_policy(self, spec["name"], spec.get("args"), step_id, run_id)
-            if not policy_decision.allowed:
-                # V3 treats REQUIRE_APPROVAL as DENY (fail-closed — no approval wiring in V3)
-                await _ah_audit.log_tool_denied(self.audit_logger, self.agent_id, self.actor, spec["name"], policy_decision.reason, step_id, run_id, matched_rule=policy_decision.matched_rule)
-                return ToolExecutionResult(
-                    status="error",
-                    func_return=f"Tool '{spec['name']}' is denied by the security policy. {policy_decision.reason}",
-                ), 0
-            # Security: canary check on tool arguments
+            # Security: policy decision comes stashed from the pre-approval gate
+            # (v0.16.37 A3) — the check already ran once per call.
+            policy_decision = spec.get("policy_decision")
+            if policy_decision is None:
+                # Defensive fallback for specs built outside the normal loop
+                # (e.g. retry specs): check now.
+                policy_decision = await _sec.check_policy(
+                    self, spec["name"], spec.get("args"), step_id, run_id,
+                    waive_approval=bool(is_approval_response),
+                )
+
+            # Security: canary check on tool arguments — FIRST, before any
+            # approval or denial handling (P-13: a canary-bearing call must
+            # never reach a human approval request; the step-2 gate already
+            # excluded such calls, this is the enforcement point).
             if self.canary_checker.check(spec["args"]):
+                # v0.16.37 (A8): record the blocked id — the streaming holdback
+                # and storage redaction key off this set.
+                self._security_blocked_tool_call_ids.add(spec["id"])
                 await _ah_audit.log_canary_detected(self.audit_logger, self.agent_id, self.actor, spec["name"], step_id, run_id)
                 return ToolExecutionResult(
                     status="error",
                     func_return="Tool call blocked: potential prompt exfiltration detected.",
+                ), 0
+            if not policy_decision.allowed:
+                # Deny (policy REQUIRE_APPROVAL that somehow bypassed the
+                # step-2 gate also lands here — fail-closed)
+                self._security_blocked_tool_call_ids.add(spec["id"])
+                await _ah_audit.log_tool_denied(self.audit_logger, self.agent_id, self.actor, spec["name"], policy_decision.reason, step_id, run_id, matched_rule=policy_decision.matched_rule)
+                return ToolExecutionResult(
+                    status="error",
+                    func_return=f"Tool '{spec['name']}' is denied by the security policy. {policy_decision.reason}",
                 ), 0
             t0 = get_utc_timestamp_ns()
             target_tool = next((x for x in self.agent_state.tools if x.name == spec["name"]), None)
@@ -2369,7 +2571,24 @@ class LettaAgentV3(LettaAgentV2):
             persisted_stop_reasons.append(sr)
 
         # 5f. Create messages using parallel message creation (works for both single and multi)
-        tool_call_specs = [{"name": s["name"], "arguments": s["args"], "id": s["id"]} for s in exec_specs]
+        # v0.16.37 (A8, review P-14): storage-time redaction. Blocked calls'
+        # args are redacted HERE — the single persist point — so every read
+        # path (message list API, Delta's chat-history reload, future context)
+        # sees the marker, never the canary. Raw args are not recoverable
+        # client-readable anywhere, by design; forensics live in the security
+        # event, not the message history.
+        tool_call_specs = [
+            {
+                "name": s["name"],
+                "arguments": (
+                    _sec.BLOCKED_ARGS_REDACTION_MARKER
+                    if s["id"] in self._security_blocked_tool_call_ids
+                    else s["args"]
+                ),
+                "id": s["id"],
+            }
+            for s in exec_specs
+        ]
         tool_execution_results = [res for (res, _) in results]
 
         # Use the parallel message creation function for both single and multiple tools

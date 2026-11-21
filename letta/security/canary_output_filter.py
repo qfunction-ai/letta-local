@@ -64,6 +64,101 @@ def _canary_pattern(canary_value: str) -> "re.Pattern[str]":
     return re.compile(gap.join(re.escape(c) for c in canary_value))
 
 
+# ---------------------------------------------------------------------------
+# Skeleton tier (v0.16.37 Part B, review P-2) — AUDIT-ONLY fuzzy matching.
+#
+# The strict tier is insertion-tolerant only: deletion variants
+# ("CANARY-eps-08-2026" from "CANARY-eps-08-hidden-2026") never fire — no
+# redaction, no event, no forensics. Small models garble transcriptions by
+# DROPPING characters, so the strict tier inherits the model's fidelity
+# limits (design principle from the deletion-bypass ruling).
+#
+# The skeleton tier closes the unlogged-exfiltration gap without touching
+# output: it fires an AUDIT event, never redacts. Fuzzy redaction
+# false-positives on legitimate course transcripts; fuzziness stays out of
+# the output path.
+#
+# Match rule (P-2 distance window): segment the canary on non-alphanumeric
+# separators. A skeleton match requires the marker (segment 0) in the text,
+# at least N-2 of the remaining N-1 segments IN ORDER within a window of
+# <= 2x canary length starting at the marker, and a matched span
+# (marker start -> last matched segment end) covering >= 50% of the canary
+# length. The window kills the paragraph-nine false positive; the span
+# floor kills the marker-plus-trivial-fragments false positive.
+#
+# Canaries with fewer than 4 segments get no skeleton tier (too little
+# signal to match fuzzily).
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=32)
+def _skeleton_segments(canary_value: str) -> Optional[tuple]:
+    """Segment a canary value on non-alphanumeric separators.
+
+    Returns a tuple of segments, or None when the canary is too short for
+    the skeleton tier (fewer than 4 segments).
+    """
+    segs = tuple(s for s in re.split(r"[^A-Za-z0-9]+", canary_value) if s)
+    if len(segs) < 4:
+        return None
+    return segs
+
+
+def scan_skeleton(text: str, canary_value: str) -> Optional[dict]:
+    """Skeleton-tier scan: garbled/deleted canary variants, AUDIT-ONLY.
+
+    Returns None when nothing matched, else:
+        {"match_type": "skeleton", "matched_segments": [...],
+         "matched_ratio": float}
+    The caller logs the event; the output is NEVER modified.
+    """
+    if not text or not canary_value:
+        return None
+
+    segs = _skeleton_segments(canary_value)
+    if segs is None:
+        return None
+
+    marker = segs[0]
+    remaining = segs[1:]
+    window_len = 2 * len(canary_value)
+    min_span = 0.5 * len(canary_value)
+
+    for m in re.finditer(re.escape(marker), text):
+        p = m.start()
+        window = text[p : p + window_len]
+
+        # In-order matching of the remaining segments within the window
+        pos = 0
+        matched = []
+        for seg in remaining:
+            idx = window.find(seg, pos)
+            if idx != -1:
+                matched.append(seg)
+                pos = idx + len(seg)
+
+        if len(matched) < len(remaining) - 2:
+            continue
+
+        # Matched span: marker start -> last matched segment end (in text
+        # coordinates). P-2: ratio measured over the matched span, not the
+        # whole message.
+        if matched:
+            span = pos  # end of last matched segment, window-relative
+        else:
+            span = m.end() - p
+        if span < min_span:
+            continue
+
+        return {
+            "match_type": "skeleton",
+            "matched_segments": [marker] + matched,
+            "matched_ratio": round(span / len(canary_value), 3),
+        }
+
+    return None
+
+
 class CanaryOutputFilter:
     """Scans assistant messages for the canary token value (obfuscation-tolerant).
 
@@ -89,30 +184,45 @@ class CanaryOutputFilter:
         if not canary_value:
             return None
 
-        # Only assistant messages carry user-visible text
-        from letta.schemas.letta_message import MessageType
-
-        if message.message_type != MessageType.assistant_message:
-            return None
-
-        # Extract text content
-        content = message.content
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            # Content is a list of content parts — concatenate text parts
-            parts = []
-            for part in content:
-                if hasattr(part, "text") and isinstance(part.text, str):
-                    parts.append(part.text)
-            text = "".join(parts)
-        else:
+        text = _extract_assistant_text(message)
+        if text is None:
             return None
 
         pattern = _canary_pattern(canary_value)
         if pattern.search(text):
             return pattern.sub(REDACTED_CANARY, text)
 
+        return None
+
+
+def _extract_assistant_text(message: "LettaMessageUnion") -> Optional[str]:
+    """Extract the text of an assistant message, or None for other types."""
+    from letta.schemas.letta_message import MessageType
+
+    if message.message_type != MessageType.assistant_message:
+        return None
+
+    content = message.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if hasattr(part, "text") and isinstance(part.text, str):
+                parts.append(part.text)
+        return "".join(parts)
+    return None
+
+
+def scan_skeleton_message(message: "LettaMessageUnion", canary_value: str) -> Optional[dict]:
+    """Skeleton-tier scan of a complete message (audit-only, no redaction)."""
+    try:
+        text = _extract_assistant_text(message)
+        if text is None:
+            return None
+        return scan_skeleton(text, canary_value)
+    except Exception as e:
+        logger.warning(f"Skeleton message scan failed (fail-open, audit-only): {e}")
         return None
 
 
@@ -185,6 +295,13 @@ class StreamingCanaryFilter:
         self._holdback = max(L + (L - 1) * _MAX_GAP - 1, 0)
         self._buffer: str = ""
         self._warning_appended = False
+        # v0.16.37 Part B (B3): full-text accumulator for the skeleton tier.
+        # The skeleton check runs at flush(), when the full text is known —
+        # it NEVER gates emission, so the v0.16.25 holdback math is untouched
+        # by construction. Raw input is accumulated (pre-redaction): garbled
+        # variants are exactly what strict redaction does NOT catch.
+        self._full_text: str = ""
+        self.skeleton_match: Optional[dict] = None
 
     def feed(self, text: str) -> tuple[str, bool]:
         """Feed a text delta into the buffer. Returns (safe_text, was_detected).
@@ -197,6 +314,7 @@ class StreamingCanaryFilter:
             # No canary configured — pass through everything immediately
             return text, False
 
+        self._full_text += text
         self._buffer += text
         detected = False
 
@@ -219,6 +337,14 @@ class StreamingCanaryFilter:
         Appends the security warning if a canary was detected at any point.
         Idempotent: a second call returns "".
         """
+        # Skeleton tier (B3): audit-only detection on the full text. Runs at
+        # flush so the whole message is available; does not modify output.
+        try:
+            self.skeleton_match = scan_skeleton(self._full_text, self.canary_value)
+        except Exception as e:
+            logger.warning(f"Skeleton scan failed (fail-open, audit-only): {e}")
+            self.skeleton_match = None
+
         remaining = self._buffer
         self._buffer = ""
         if self._warning_appended:

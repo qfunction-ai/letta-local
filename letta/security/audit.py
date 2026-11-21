@@ -42,9 +42,11 @@ class SecurityEventType(str, Enum):
     # Canary events
     CANARY_DETECTED = "canary_detected"          # tool-call interception
     CANARY_OUTPUT_DETECTED = "canary_output_detected"  # assistant message redaction
+    CANARY_OUTPUT_SUSPECTED = "canary_output_suspected"  # skeleton-tier audit-only match (v0.16.37 Part B)
     SECRET_DETECTED = "secret_detected"          # secret in tool args (policy AUDIT)
     INJECTION_DETECTED = "injection_detected"    # prompt injection in tool args (policy AUDIT)
     POLICY_AUDIT_MATCHED = "policy_audit_matched"  # custom AUDIT rule matched (log-and-continue, v0.16.37)
+    POLICY_UPDATED = "policy_updated"           # policy mutated via REST PUT/PATCH (v0.16.37, L-13)
 
     # Agent output events
     MESSAGE_SENT = "message_sent"
@@ -129,6 +131,21 @@ class AuditLogger:
 
 
 # ---------------------------------------------------------------------------
+# Audit write-failure counter (v0.16.37, review L-6/A6.1). audit_log is
+# fail-open by design (never raises, log at warning). The counter makes the
+# failures VISIBLE without changing the fail-open semantics: deployers see
+# a non-zero audit_write_failures in /health and know events are being lost.
+# ---------------------------------------------------------------------------
+
+_audit_write_failures = 0
+
+
+def get_audit_write_failures() -> int:
+    """Total audit events lost to write failures since process start."""
+    return _audit_write_failures
+
+
+# ---------------------------------------------------------------------------
 # Audit helper functions — use these instead of calling audit_logger.log()
 # directly. They handle try/except and event_data construction so callers
 # don't have to repeat the same boilerplate.
@@ -164,6 +181,8 @@ async def audit_log(
         )
     except Exception as e:
         suffix = f" ({label})" if label else ""
+        global _audit_write_failures
+        _audit_write_failures += 1
         logger.warning(f"Failed to write audit log{suffix}: {e}")
 
 
