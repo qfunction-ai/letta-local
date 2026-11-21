@@ -232,11 +232,18 @@ async def load_canary(agent) -> None:
             # available at the call site
             return
 
+        # v0.16.37 (review P-15): prefer the read_only canary when more than
+        # one __canary__ block exists (pre-attach-guard data, or a payload with
+        # two canary blocks). The framework's canary is read_only by
+        # construction; a writable impostor is never preferred for arming.
         canary_block = None
         for block in agent_state.memory.blocks:
             if block.label == CanaryChecker.CANARY_BLOCK_LABEL:
-                canary_block = block
-                break
+                if getattr(block, "read_only", False):
+                    canary_block = block
+                    break
+                if canary_block is None:
+                    canary_block = block  # fallback: first canary, upgraded below
 
         if canary_block and canary_block.value:
             agent.canary_checker.update_canary(canary_block.value)

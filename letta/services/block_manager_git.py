@@ -109,6 +109,20 @@ class GitEnabledBlockManager(BlockManager):
             block = result.scalar_one_or_none()
 
             if block:
+                # v0.16.37 (review P-16 follow-up): git sync is a mutation
+                # route like any other — a git file must not rewrite a
+                # read-only block's value/description, and must NOT flip
+                # read_only to False (a committed file would disarm the
+                # canary protection on the next sync).
+                from letta.security.block_guard import enforce_read_only_mutation
+
+                changes = {"value": value}
+                if description is not None:
+                    changes["description"] = description
+                if read_only is not None:
+                    changes["read_only"] = read_only
+                enforce_read_only_mutation(block, changes)
+
                 # Update existing block
                 block.value = value
                 if description is not None:
@@ -425,6 +439,14 @@ class GitEnabledBlockManager(BlockManager):
                 # yet in the system/ namespace.
                 for block in blocks:
                     if not block.label.startswith("system/"):
+                        # v0.16.37: read-only blocks (canary, protected
+                        # persona) stay OUT of the git namespace — relabeling
+                        # __canary__ to system/__canary__ would disarm the
+                        # canary lookup, and git-syncing a read-only block
+                        # would hand its content to the repo.
+                        if getattr(block, "read_only", False):
+                            logger.info(f"Skipping read-only block '{block.label}' during git backfill for agent {agent_id}")
+                            continue
                         old_label = block.label
                         new_label = f"system/{block.label}"
                         async with db_registry.async_session() as session:
@@ -448,6 +470,11 @@ class GitEnabledBlockManager(BlockManager):
         blocks = await self.get_blocks_by_agent_async(agent_id, actor)
         for block in blocks:
             if not block.label.startswith("system/"):
+                # v0.16.37: same as the backfill loop above — read-only
+                # blocks are excluded from the git namespace.
+                if getattr(block, "read_only", False):
+                    logger.info(f"Skipping read-only block '{block.label}' during git enablement for agent {agent_id}")
+                    continue
                 old_label = block.label
                 new_label = f"system/{block.label}"
                 logger.info(f"Transforming block label '{old_label}' -> '{new_label}' for agent {agent_id}")

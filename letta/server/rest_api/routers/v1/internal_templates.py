@@ -241,7 +241,7 @@ async def delete_deployment(
 
         for block in blocks:
             try:
-                await server.block_manager.delete_block_async(block.id, actor)
+                await server.block_manager.delete_block_async(block.id, actor, teardown=True)
                 deleted_blocks.append(block.id)
             except Exception as e:
                 # Continue deleting other blocks even if one fails

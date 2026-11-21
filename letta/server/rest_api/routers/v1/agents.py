@@ -897,7 +897,7 @@ async def detach_source(
         try:
             source = await server.source_manager.get_source_by_id(source_id=source_id, actor=actor)
             block = await server.agent_manager.get_block_with_label_async(agent_id=agent_state.id, block_label=source.name, actor=actor)
-            await server.block_manager.delete_block_async(block.id, actor)
+            await server.block_manager.delete_block_async(block.id, actor, teardown=True)
         except Exception:
             pass
 
@@ -929,7 +929,7 @@ async def detach_folder_from_agent(
         try:
             source = await server.source_manager.get_source_by_id(source_id=folder_id, actor=actor)
             block = await server.agent_manager.get_block_with_label_async(agent_id=agent_state.id, block_label=source.name, actor=actor)
-            await server.block_manager.delete_block_async(block.id, actor)
+            await server.block_manager.delete_block_async(block.id, actor, teardown=True)
         except Exception:
             pass
 

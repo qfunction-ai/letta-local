@@ -2158,6 +2158,17 @@ class AgentManager:
 
             update_data = block_update.model_dump(to_orm=True, exclude_unset=True, exclude_none=True)
 
+            # v0.16.37 (review P-1): this route writes onto the ORM block via
+            # raw setattr in its own session — it never calls
+            # update_block_async, so it must run the same lowest-common-layer
+            # guards itself. This is the agent-scoped core-memory PATCH route
+            # (PATCH /v1/agents/{id}/core-memory/blocks/{label}) — the most
+            # common client path.
+            from letta.security.block_guard import enforce_canary_label_protection, enforce_read_only_mutation
+
+            enforce_read_only_mutation(matched_block, update_data)
+            enforce_canary_label_protection(matched_block, update_data)
+
             # If a custom block manager is injected (e.g. GitEnabledBlockManager), route
             # through it so git-backed memory semantics apply.
             if self.block_manager.__class__ is not BlockManager:
@@ -2206,6 +2217,20 @@ class AgentManager:
             agent = await AgentModel.read_async(db_session=session, identifier=agent_id, actor=actor)
             block = await BlockModel.read_async(db_session=session, identifier=block_id, actor=actor)
 
+            # v0.16.37 (review P-15): one canary per agent. Attaching a second
+            # __canary__ block (client-minted, known value, possibly ahead of
+            # the framework's in block order) could become the armed canary —
+            # load_canary arms the first __canary__ block it finds.
+            from letta.security.canary import CanaryChecker
+
+            if block.label == CanaryChecker.CANARY_BLOCK_LABEL and any(
+                b.label == CanaryChecker.CANARY_BLOCK_LABEL for b in agent.core_memory
+            ):
+                raise ValueError(
+                    f"Agent '{agent_id}' already has a {CanaryChecker.CANARY_BLOCK_LABEL} block. "
+                    "Attaching a second canary block is not permitted."
+                )
+
             # Attach block to the main agent (skip if already attached)
             if not any(b.id == block_id for b in agent.core_memory):
                 agent.core_memory.append(block)
@@ -2250,6 +2275,17 @@ class AgentManager:
         async with db_registry.async_session() as session:
             agent = await AgentModel.read_async(db_session=session, identifier=agent_id, actor=actor)
             original_length = len(agent.core_memory)
+
+            # v0.16.37 (review P-1): detaching a read-only block silently
+            # removes its protection — for the canary, load_canary would
+            # mint a fresh one (self-recovering), but for a read-only persona
+            # block (e.g. untrusted-content rules) the protection is just
+            # gone. Refuse outside teardown.
+            from letta.security.block_guard import check_read_only_block
+
+            target_block = next((b for b in agent.core_memory if b.id == block_id), None)
+            if target_block is not None:
+                check_read_only_block(target_block, operation="detach")
 
             agent.core_memory = [b for b in agent.core_memory if b.id != block_id]
 

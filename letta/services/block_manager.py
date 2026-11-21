@@ -138,6 +138,20 @@ class BlockManager:
             update_data = BlockUpdate(**block.model_dump(to_orm=True, exclude_none=True))
             return await self.update_block_async(block.id, update_data, actor)
         else:
+            # v0.16.37 (review P-15): the __canary__ label is reserved. Blocks
+            # are born with it (agent-creation payloads via
+            # batch_create_blocks_async, framework minting in agent_security)
+            # or they never get it. The REST create path refuses it — a
+            # client-minted "canary" with a known value would be armed by
+            # load_canary depending on block order.
+            from letta.security.canary import CanaryChecker
+
+            if block.label == CanaryChecker.CANARY_BLOCK_LABEL:
+                raise ValueError(
+                    f"The label '{CanaryChecker.CANARY_BLOCK_LABEL}' is reserved for the framework's "
+                    "exfiltration canary and cannot be created through this endpoint."
+                )
+
             async with db_registry.async_session() as session:
                 data = block.model_dump(to_orm=True, exclude_none=True)
                 # Extract tags before creating the ORM model (tags is not a column)
@@ -214,6 +228,16 @@ class BlockManager:
             block = await BlockModel.read_async(db_session=session, identifier=block_id, actor=actor)
             update_data = block_update.model_dump(to_orm=True, exclude_unset=True, exclude_none=True)
 
+            # v0.16.37 (review P-1/P-6/P-15): lowest-common-layer guards.
+            # Every block-mutating route runs its change set through these
+            # BEFORE applying — value/label/description/read_only changes on
+            # read-only blocks are refused, and relabeling TO __canary__ is
+            # refused for any block.
+            from letta.security.block_guard import enforce_canary_label_protection, enforce_read_only_mutation
+
+            enforce_read_only_mutation(block, update_data)
+            enforce_canary_label_protection(block, update_data)
+
             # Extract tags from update data (it's not a column on the block table)
             new_tags = update_data.pop("tags", None)
 
@@ -272,9 +296,23 @@ class BlockManager:
     @enforce_types
     @raise_on_invalid_id(param_name="block_id", expected_prefix=PrimitiveType.BLOCK)
     @trace_method
-    async def delete_block_async(self, block_id: str, actor: PydanticUser) -> None:
-        """Delete a block by its ID."""
+    async def delete_block_async(self, block_id: str, actor: PydanticUser, teardown: bool = False) -> None:
+        """Delete a block by its ID.
+
+        Args:
+            teardown: True when called from a cascade teardown (agent/folder/
+                template/source deletion). Read-only blocks (canaries,
+                protected persona blocks) refuse standalone deletion but MUST
+                be deletable when their owner is being deleted — otherwise
+                agent deletion breaks on FK leftovers (v0.16.23/24 lesson).
+        """
         async with db_registry.async_session() as session:
+            block = await BlockModel.read_async(db_session=session, identifier=block_id, actor=actor)
+            if not teardown:
+                from letta.security.block_guard import check_read_only_block
+
+                check_read_only_block(block, operation="delete")
+
             # First, delete all references in blocks_agents table
             await session.execute(delete(BlocksAgents).where(BlocksAgents.block_id == block_id))
             # Also delete all tags associated with this block
@@ -282,7 +320,6 @@ class BlockManager:
             await session.flush()
 
             # Then delete the block itself
-            block = await BlockModel.read_async(db_session=session, identifier=block_id, actor=actor)
             await block.hard_delete_async(db_session=session, actor=actor)
 
     @enforce_types
@@ -817,6 +854,15 @@ class BlockManager:
             result = await session.execute(query)
             blocks = result.scalars().all()
 
+            # v0.16.37 (review P-1): validate ALL updates before applying ANY.
+            # A read-only block in the batch refuses the whole transaction —
+            # no partial apply.
+            from letta.security.block_guard import enforce_read_only_mutation
+
+            for block in blocks:
+                if block.id in updates:
+                    enforce_read_only_mutation(block, {"value": updates[block.id]})
+
             found_ids = {b.id for b in blocks}
             missing = set(updates.keys()) - found_ids
             if missing:
@@ -965,6 +1011,13 @@ class BlockManager:
                 else await BlockModel.read_async(db_session=session, identifier=block_id, actor=actor)
             )
 
+            # v0.16.37 (review P-1): undo is refused outright on read-only
+            # blocks. A restored checkpoint could predate the read_only
+            # protection — undoing a canary could put back its old value.
+            from letta.security.block_guard import check_read_only_block
+
+            check_read_only_block(block, operation="undo")
+
             if not block.current_history_entry_id:
                 raise LettaInvalidArgumentError(f"Block {block_id} has no history entry - cannot undo.", argument_name="block_id")
 
@@ -1015,6 +1068,13 @@ class BlockManager:
                 if use_preloaded_block
                 else await BlockModel.read_async(db_session=session, identifier=block_id, actor=actor)
             )
+
+            # v0.16.37 (review P-1): redo is refused outright on read-only
+            # blocks, same as undo — restored checkpoints may predate the
+            # read_only protection.
+            from letta.security.block_guard import check_read_only_block
+
+            check_read_only_block(block, operation="redo")
 
             if not block.current_history_entry_id:
                 raise LettaInvalidArgumentError(f"Block {block_id} has no history entry - cannot redo.", argument_name="block_id")
