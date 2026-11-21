@@ -3,6 +3,8 @@
 **/*.pyc
 **/*.pyo
 **/*.pyd
+.venv
+**/.venv
 .git
 .gitignore
 .env
