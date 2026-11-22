@@ -2,6 +2,8 @@
 
 A fork of [Letta](https://github.com/letta-ai/letta) optimized for **local model inference**.
 
+> **Security posture:** production-ready for trusted tools. Known open: sandboxed tool code can reach the server's own REST API over localhost without authentication and rewrite its own sandbox/policy configuration (L-3, demonstrated live by the release rig). Fix due in v0.16.38 on **2026-12-04**. See [Known security holes](#known-security-holes).
+
 The upstream Letta project is built for cloud models (OpenAI, Anthropic, etc.). This fork makes Letta's stateful agent framework work with local inference servers — Ollama, vLLM, SGLang, LocalAI, llama.cpp, and MLX — without requiring a cloud API key.
 
 ## What this fork does differently
@@ -342,11 +344,36 @@ pytest tests/integration_test_local_model_agent.py -v
 
 ## Known issues
 
+- **Security: see [Known security holes](#known-security-holes) below.**
 - **vLLM on macOS Metal GPU**: OOMs under sustained load. Use `--gpu-memory-utilization 0.7` to reduce KV cache allocation. The token budget enforcer (default `context_window_ratio=0.7`) helps prevent this by stopping the agent before it exceeds the GPU's real capacity.
 - **Non-deterministic tool calling**: Some models (Gemma 4 on vLLM) produce native tool calls sometimes and text other times. The probe tries twice; the agent loop's retry mechanism handles occasional failures. For models that are unreliable at native tool calling, set `tool_calling_mode="prompt"` to skip the probe.
 - **vLLM requires flags**: Native tool calling on vLLM needs `--enable-auto-tool-choice --tool-call-parser hermes`. Without these, all models fall back to prompt mode (which still works).
 - **Correction factor placeholders**: `TOKEN_ESTIMATE_CORRECTION` values for specific model families (qwen, llama, etc.) are placeholders (`None`). They fall back to `DEFAULT_TOKEN_CORRECTION = 2.5` until a benchmark script measures real ratios. Live calibration makes this less critical — the first API response provides the real ratio.
 - **vLLM reasoning models**: vLLM doesn't expose model capability metadata like Ollama's `/api/show`. Reasoning models served via vLLM need `reasoning=True` set explicitly on agent creation. The `enable_reasoner` flag is not auto-detected for vLLM.
+
+## Known security holes
+
+**Affected: every release up to and including v0.16.37, in every deployment, including ones that only run trusted tools if any custom tool code is reachable.**
+
+### L-3 — sandboxed tool code can reach the server's own REST API (demonstrated live)
+
+The server's REST API has no authentication on localhost. Tool code executing in the Landlock sandbox can open a TCP connection to the server and call any endpoint — including rewriting its own sandbox configuration (widen read/write paths, enable network) and its own security policy. This is not a finding read from code: the release smoke rig (check 20) proves it on every release run by having a sandboxed custom tool PATCH the sandbox-config endpoint and receive `200 OK`.
+
+Consequence: any agent that can be steered into calling a tool — including via injected content — can escalate its own sandbox permissions for every later run.
+
+**Fix:** v0.16.38, due **2026-12-04** (14 days after the v0.16.37 tag). Minimal L-3 is its first item. This is a breaking change: consumers must send password headers. Note that password auth alone is not sufficient — v0.16.38 also switches local sandbox environments from a copy of the server's environment to an allowlist, so tool code cannot read the password out of its own environment (L-1).
+
+### Other open holes (tracked for v0.16.38 scoping)
+
+- **L-1 — local sandbox environment inheritance.** Sandboxed tools receive a copy of the server's process environment, including `LETTA_SERVER_PASSWORD`, database URIs, encryption keys, and provider API keys. Fix (allowlist, not denylist) is required in v0.16.38 — without it, L-3's password auth is bypassable by any tool that reads its own environment.
+- **L-2 — `/data/config` readable from the sandbox.**
+- **L-7 — encryption key handling.**
+- **L-8 — Landlock network rules are not enforced on Docker Desktop** (the health endpoint reports this honestly as `landlock_net_rules_enforced: false`); TCP restrictions currently rely on seccomp.
+- **L-9 — seccomp filter coverage.**
+
+### Canary note
+
+Agent creation payloads may include a `__canary__` block with a client-chosen value (intended: consumers like Epsilon set their own canaries). While L-3 is open, anyone who can reach the API can create agents whose canary value they know. This is harmless to existing agents and closes with L-3.
 
 ## Differences from upstream
 

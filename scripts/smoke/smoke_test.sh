@@ -612,14 +612,59 @@ if [ -n "${R20_TOOL_ID}" ]; then
     R20_RAN="$(echo "${R20_RESP}" | grep -c "PATCH_" || true)"
     R20_OPEN="$(echo "${R20_RESP}" | grep -c "PATCH_STATUS:200" || true)"
     R20_REFUSED="$(echo "${R20_RESP}" | grep -cE "PATCH_FAILED.*(401|403|Unauthorized|Forbidden)" || true)"
-    if [ "${R20_RAN}" -ge 1 ] && [ "${R20_OPEN}" -ge 1 ]; then
-      ok "20. L-3 tripwire KNOWN-OPEN (sandboxed tool PATCHed localhost sandbox-config: 200 — closes with v0.16.38)"
-    elif [ "${R20_RAN}" -ge 1 ] && [ "${R20_REFUSED}" -ge 1 ]; then
-      ok "20. L-3 tripwire CLOSED (localhost PATCH refused)"
-    elif [ "${R20_RAN}" -ge 1 ]; then
-      bad "20. L-3 tripwire (tool ran, unexpected PATCH result: $(echo "${R20_RESP}" | grep -o "PATCH_[A-Z]*:[^\"]*" | head -1))"
+    # v0.16.37 review V-2/F1: the acceptable tripwire state is a function of
+    # the version under test, so the check can actually trip — both when L-3
+    # closes (forces the expectation flip) and if the hole reopens (hard
+    # fail; a reopened hole must stop a release). Gate on the CHECKOUT's
+    # target version (a mislabeled/stale image fails the equality assert),
+    # not the server's self-report alone. Strict x.y.z only — non-numeric
+    # suffixes (rc/dev/local) fail loudly rather than comparing wrong.
+    R20_GATE="$(python3 - "${BASE}" <<'PYGATE'
+import json, re, sys, urllib.request
+base = sys.argv[1]
+# target version: the checkout this rig is testing (fallback line, set at bump)
+m = re.search(r'__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"', open("letta/__init__.py").read())
+if not m:
+    print("BAD:target-not-strict-numeric"); raise SystemExit
+target = tuple(int(x) for x in m.group(1).split("."))
+req = urllib.request.Request(base + "/v1/health/", headers={"User-Agent": "letta-client/1.0"})
+server_raw = json.loads(urllib.request.urlopen(req).read()).get("version", "")
+if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", server_raw):
+    print("BAD:server-version-not-strict-numeric:" + server_raw); raise SystemExit
+server = tuple(int(x) for x in server_raw.split("."))
+if server != target:
+    print("BAD:image-version-mismatch:server=%s:target=%s" % (server_raw, ".".join(map(str, target)))); raise SystemExit
+print("PRE_38" if target < (0, 16, 38) else "POST_38")
+PYGATE
+)"
+    if [ "${R20_GATE}" = "BAD:target-not-strict-numeric" ]; then
+      bad "20. L-3 tripwire (checkout version is not strict x.y.z — fix letta/__init__.py before releasing)"
+    elif [ "${R20_GATE}" = "BAD:server-version-not-strict-numeric:"* ]; then
+      bad "20. L-3 tripwire (server reports non-numeric version — ${R20_GATE#BAD:server-version-not-strict-numeric:})"
+    elif [ "${R20_GATE}" = "BAD:image-version-mismatch:"* ]; then
+      bad "20. L-3 tripwire (image version mismatch — ${R20_GATE#BAD:image-version-mismatch:})"
+    elif [ "${R20_GATE}" = "PRE_38" ]; then
+      if [ "${R20_RAN}" -ge 1 ] && [ "${R20_OPEN}" -ge 1 ]; then
+        ok "20. L-3 tripwire KNOWN-OPEN (sandboxed tool PATCHed localhost sandbox-config: 200 — closes with v0.16.38)"
+      elif [ "${R20_RAN}" -ge 1 ] && [ "${R20_REFUSED}" -ge 1 ]; then
+        bad "20. L-3 tripwire (hole CLOSED before v0.16.38 — remove the PRE_38 expectation and verify the fix)"
+      elif [ "${R20_RAN}" -ge 1 ]; then
+        bad "20. L-3 tripwire (tool ran, unexpected PATCH result: $(echo "${R20_RESP}" | grep -o "PATCH_[A-Z]*:[^\"]*" | head -1))"
+      else
+        bad "20. L-3 tripwire (SKIP: patch_sandbox_config never ran — skip counts as failure)"
+      fi
+    elif [ "${R20_GATE}" = "POST_38" ]; then
+      if [ "${R20_RAN}" -ge 1 ] && [ "${R20_REFUSED}" -ge 1 ]; then
+        ok "20. L-3 tripwire CLOSED (localhost PATCH refused)"
+      elif [ "${R20_RAN}" -ge 1 ] && [ "${R20_OPEN}" -ge 1 ]; then
+        bad "20. L-3 tripwire REGRESSION (hole REOPENED after v0.16.38 — sandboxed tool PATCHed localhost sandbox-config: 200)"
+      elif [ "${R20_RAN}" -ge 1 ]; then
+        bad "20. L-3 tripwire (tool ran, unexpected PATCH result: $(echo "${R20_RESP}" | grep -o "PATCH_[A-Z]*:[^\"]*" | head -1))"
+      else
+        bad "20. L-3 tripwire (SKIP: patch_sandbox_config never ran — skip counts as failure)"
+      fi
     else
-      bad "20. L-3 tripwire (SKIP: patch_sandbox_config never ran — skip counts as failure)"
+      bad "20. L-3 tripwire (version gate failed: ${R20_GATE})"
     fi
     curl -s -o /dev/null -X DELETE "${BASE}/v1/agents/${R20_AGENT_ID}" -H "User-Agent: letta-client/1.0"
   else

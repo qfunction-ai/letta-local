@@ -39,6 +39,33 @@ from letta.utils import get_friendly_error_msg, parse_stderr_error_msg, safe_cre
 
 logger = get_logger(__name__)
 
+# v0.16.37 (review Low-3): the sandbox passes -P, which Python < 3.11
+# rejects (fail-closed). A base-image downgrade would otherwise surface as
+# opaque per-tool failures. Log the interpreter version once per distinct
+# interpreter path so the cause is visible in the first log lines.
+_LOGGED_INTERPRETERS: set = set()
+
+
+def _log_interpreter_version_once(python_executable: str) -> None:
+    key = os.path.realpath(python_executable)
+    if key in _LOGGED_INTERPRETERS:
+        return
+    _LOGGED_INTERPRETERS.add(key)
+    try:
+        version_str = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        same_process = os.path.realpath(sys.executable) == key
+        logger.info(
+            f"Landlock sandbox interpreter: {python_executable} "
+            f"(python {version_str}{'' if same_process else ' — venv/specified interpreter, base version unverified'})"
+        )
+        if same_process and (sys.version_info.major, sys.version_info.minor) < (3, 11):
+            logger.error(
+                f"Interpreter {python_executable} is Python {version_str} (< 3.11): "
+                "sandboxed tools will fail (-P flag unsupported). Upgrade the base image."
+            )
+    except Exception:
+        _LOGGED_INTERPRETERS.discard(key)  # never let logging break execution
+
 
 class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
     """Landlock sandbox backend for tool execution.
@@ -145,10 +172,12 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
             if use_venv:
                 venv_path = str(os.path.join(sandbox_dir, landlock_config.venv_name))
                 python_executable = find_python_executable(landlock_config)
+                _log_interpreter_version_once(python_executable)
                 exec_env["VIRTUAL_ENV"] = venv_path
                 exec_env["PATH"] = os.path.join(venv_path, "bin") + ":" + exec_env["PATH"]
             else:
                 python_executable = sys.executable
+                _log_interpreter_version_once(python_executable)
                 if "PYTHONPATH" in os.environ:
                     exec_env["PYTHONPATH"] = os.environ["PYTHONPATH"]
 
