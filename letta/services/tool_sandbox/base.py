@@ -608,13 +608,25 @@ class AsyncToolSandboxBase(ABC):
     ):
         """
         Gather environment variables with proper layering:
-        1. OS environment (for local sandboxes only)
+        1. Allowlisted OS variables (for local sandboxes only) — v0.16.38 (L-1):
+           local sandboxes NO LONGER inherit the server environment. An
+           allowlist, not a denylist: denylists fail open on the next secret
+           someone adds. HOME and TMPDIR are set per-execution at spawn
+           (landlock_sandbox.py), not inherited.
         2. Global sandbox env vars from DB (always included)
         3. Provided sandbox env vars (agent-scoped, override global on key collision)
         4. Agent state env vars
         5. Additional runtime env vars (highest priority)
+
+        After layering, values equal to server credentials (password, PG URI,
+        encryption key) are scrubbed from every channel (v0.16.38 R-1) — an
+        operator putting the password into a sandbox env var reopens L-3
+        otherwise.
         """
-        env = os.environ.copy() if is_local else {}
+        from letta.security.server_credentials import scrub_sensitive_env
+
+        local_allowlist = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR")
+        env = {k: os.environ[k] for k in local_allowlist if k in os.environ} if is_local else {}
 
         # Always fetch and include global sandbox env vars from DB
         global_env_vars = await self.sandbox_config_manager.get_sandbox_env_vars_as_dict_async(
@@ -653,5 +665,8 @@ class AsyncToolSandboxBase(ABC):
 
         # Filter out None values to prevent subprocess errors
         env = {k: v for k, v in env.items() if v is not None}
+
+        # v0.16.38 (R-1): scrub credential-valued variables from every channel
+        env = scrub_sensitive_env(env)
 
         return env

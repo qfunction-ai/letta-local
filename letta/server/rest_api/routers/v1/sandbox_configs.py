@@ -2,7 +2,7 @@ import os
 import shutil
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from letta.errors import LettaInvalidArgumentError
 from letta.log import get_logger
@@ -164,6 +164,13 @@ async def create_sandbox_env_var(
     headers: HeaderParams = Depends(get_headers),
 ):
     actor = await server.user_manager.get_actor_or_default_async(actor_id=headers.actor_id)
+    # v0.16.38 (R-1): a sandbox env var carrying the server password reopens L-3
+    try:
+        from letta.security.server_credentials import validate_env_var_value
+
+        validate_env_var_value(env_var_create.key, env_var_create.value)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return await server.sandbox_config_manager.create_sandbox_env_var_async(env_var_create, sandbox_config_id, actor)
 
 
@@ -175,6 +182,14 @@ async def update_sandbox_env_var(
     headers: HeaderParams = Depends(get_headers),
 ):
     actor = await server.user_manager.get_actor_or_default_async(actor_id=headers.actor_id)
+    # v0.16.38 (R-1): a sandbox env var carrying the server password reopens L-3
+    if env_var_update.value is not None:
+        try:
+            from letta.security.server_credentials import validate_env_var_value
+
+            validate_env_var_value(env_var_update.key or env_var_id, env_var_update.value)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
     return await server.sandbox_config_manager.update_sandbox_env_var_async(env_var_id, env_var_update, actor)
 
 

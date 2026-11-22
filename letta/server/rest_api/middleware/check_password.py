@@ -20,10 +20,11 @@ class CheckPasswordMiddleware(BaseHTTPMiddleware):
         }:
             return await call_next(request)
 
-        if (
-            request.headers.get("X-BARE-PASSWORD") == f"password {self.password}"
-            or request.headers.get("Authorization") == f"Bearer {self.password}"
-        ):
+        import hmac
+
+        if hmac.compare_digest(
+            request.headers.get("X-BARE-PASSWORD") or "", f"password {self.password}"
+        ) or hmac.compare_digest(request.headers.get("Authorization") or "", f"Bearer {self.password}"):
             return await call_next(request)
 
         return JSONResponse(

@@ -165,14 +165,12 @@ def generate_openapi_schema(app: FastAPI):
             pass  # Read-only filesystem — skip schema file write
 
 
-# middleware that only allows requests to pass through if user provides a password thats randomly generated and stored in memory
-def generate_password():
-    import secrets
-
-    return secrets.token_urlsafe(16)
+# v0.16.38 (L-3/R-1): password resolution lives in server_credentials so the
+# scrub/validate layer can compare against it. Registered module-level here.
+from letta.security.server_credentials import resolve_server_password
 
 
-random_password = os.getenv("LETTA_SERVER_PASSWORD") or generate_password()
+random_password = resolve_server_password()
 
 
 @asynccontextmanager
@@ -809,9 +807,32 @@ def create_application() -> "FastAPI":
 
     settings.cors_origins.append("https://app.letta.com")
 
-    if (os.getenv("LETTA_SERVER_SECURE") == "true") or "--secure" in sys.argv:
-        print(f"▶ Using secure mode with password: {random_password}")
+    # v0.16.38 (L-3): secure mode is ON by default. Opt out explicitly with
+    # LETTA_SERVER_SECURE=false (local dev only) — an insecure start logs a
+    # WARNING naming the risk. The password value is NEVER printed (v0.16.38
+    # W4): container logs ship to SIEMs. If the password was generated (env
+    # unset), it is written to ${LETTA_DIR}/server_password (mode 0600) and
+    # only the file path is logged.
+    secure = (os.getenv("LETTA_SERVER_SECURE", "true").lower() != "false") or ("--secure" in sys.argv)
+    if secure:
+        if os.getenv("LETTA_SERVER_PASSWORD"):
+            print("▶ Secure mode ON (password from LETTA_SERVER_PASSWORD).")
+        else:
+            password_file = Path(settings.letta_dir) / "server_password"
+            try:
+                password_file.parent.mkdir(parents=True, exist_ok=True)
+                password_file.write_text(random_password)
+                password_file.chmod(0o600)
+                print(f"▶ Secure mode ON (generated password written to {password_file}).")
+            except OSError:
+                print("▶ Secure mode ON (generated password could NOT be written to disk — set LETTA_SERVER_PASSWORD to authenticate).")
         app.add_middleware(CheckPasswordMiddleware, password=random_password)
+    else:
+        print(
+            "▶ WARNING: insecure mode (LETTA_SERVER_SECURE=false). The REST API is UNAUTHENTICATED — "
+            "any process on this machine, including sandboxed tool code, can call every endpoint "
+            "(known hole L-3, see README). Use only for local development."
+        )
 
     # Add reverse proxy middleware to handle X-Forwarded-* headers
     # app.add_middleware(ReverseProxyMiddleware, base_path=settings.server_base_path)

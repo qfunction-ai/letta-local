@@ -21,6 +21,10 @@ services:
       # settings.py) — the variable is OLLAMA_BASE_URL, not LETTA_OLLAMA_BASE_URL.
       # /v1 suffix mirrors Epsilon's compose (OpenAI-compat surface).
       - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+      # v0.16.38 (L-3): the rig runs the server in secure mode with a known
+      # password. The rig FAILS if the server under test is insecure.
+      - LETTA_SERVER_SECURE=true
+      - LETTA_SERVER_PASSWORD=smoke-test-password
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

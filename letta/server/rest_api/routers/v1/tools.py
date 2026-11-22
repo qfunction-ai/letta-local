@@ -393,6 +393,14 @@ async def run_tool_from_source(
     """
     actor = await server.user_manager.get_actor_or_default_async(actor_id=headers.actor_id)
 
+    # v0.16.38 (R-1): env vars carrying the server password reopen L-3
+    from letta.security.server_credentials import reject_sensitive_env_vars
+
+    try:
+        reject_sensitive_env_vars(request.env_vars)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     return await server.run_tool_from_source(
         tool_source=request.source_code,
         tool_source_type=request.source_type,

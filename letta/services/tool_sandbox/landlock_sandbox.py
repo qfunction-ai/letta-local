@@ -196,6 +196,15 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                 }
             )
 
+            # v0.16.38 (L-1, review W2 ruling): HOME and TMPDIR point at the
+            # per-execution directory instead of the server's — libraries
+            # that write ~/.cache or temp files get a writable location
+            # inside the grant, and the tool never learns the server's home
+            # path.
+            exec_env["HOME"] = exec_dir
+            exec_env["TMPDIR"] = exec_dir
+
+
             # Build wrapper config
             # Compute staging directory for file persistence (agent files)
             staging_write_paths = []

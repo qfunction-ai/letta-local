@@ -4,6 +4,14 @@ from letta.settings import settings
 
 
 def _get_sandbox_client() -> Any:
+    """Build a client for server-to-self calls.
+
+    v0.16.38 (R-2): under secure mode (default) these calls fail with a
+    visible 401 — the server password is deliberately absent from tool
+    environments (L-1/R-1), so agent-aware/multi-agent tools are broken
+    until scoped tool credentials exist (v0.16.39 design item). The 401
+    surfaces as a tool error, never silence.
+    """
     sandbox_client = globals().get("client")
     if sandbox_client is not None:
         return sandbox_client

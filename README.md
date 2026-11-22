@@ -361,14 +361,14 @@ The server's REST API has no authentication on localhost. Tool code executing in
 
 Consequence: any agent that can be steered into calling a tool — including via injected content — can escalate its own sandbox permissions for every later run.
 
-**Fix:** v0.16.38, due **2026-12-04** (14 days after the v0.16.37 tag). Minimal L-3 is its first item. This is a breaking change: consumers must send password headers. Note that password auth alone is not sufficient — v0.16.38 also switches local sandbox environments from a copy of the server's environment to an allowlist, so tool code cannot read the password out of its own environment (L-1).
+**Fix:** v0.16.38, due **2026-12-04** (14 days after the v0.16.37 tag). Minimal L-3 is its first item. This is a breaking change: consumers must send password headers. Password auth alone is not sufficient — v0.16.38 also switches local sandbox environments from a copy of the server's environment to an allowlist, so tool code cannot read the password out of its own environment (L-1), and any env var whose value equals the password is rejected at the API and scrubbed at spawn (R-1). **The server password must never be given to tools.** Tools that need the API need their own scoped credential, which does not exist yet (v0.16.39 design item) — until then, agent-aware and multi-agent tools fail with a visible 401.
 
 ### Other open holes (tracked for v0.16.38 scoping)
 
 - **L-1 — local sandbox environment inheritance.** Sandboxed tools receive a copy of the server's process environment, including `LETTA_SERVER_PASSWORD`, database URIs, encryption keys, and provider API keys. Fix (allowlist, not denylist) is required in v0.16.38 — without it, L-3's password auth is bypassable by any tool that reads its own environment.
 - **L-2 — `/data/config` readable from the sandbox.**
 - **L-7 — encryption key handling.**
-- **L-8 — Landlock network rules are not enforced on Docker Desktop** (the health endpoint reports this honestly as `landlock_net_rules_enforced: false`); TCP restrictions currently rely on seccomp.
+- **L-8 — Landlock network rules are not enforced on Docker Desktop** (the health endpoint reports this honestly as `landlock_net_rules_enforced: false`); TCP restrictions currently rely on seccomp. **Plainly: with L-8 unresolved, sandboxed tools can still CONNECT to the localhost API — after v0.16.38, authentication is the only thing stopping them.**
 - **L-9 — seccomp filter coverage.**
 
 ### Canary note

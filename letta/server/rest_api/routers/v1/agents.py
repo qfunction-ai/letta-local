@@ -397,6 +397,14 @@ def import_agent_legacy(
     """
     Import an agent using the legacy AgentSchema format.
     """
+    # v0.16.38 (R-1): env vars carrying the server password reopen L-3
+    from letta.security.server_credentials import reject_sensitive_env_vars
+
+    try:
+        reject_sensitive_env_vars(env_vars)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     # Validate the JSON against AgentSchema before passing it to deserialize
     agent_schema = AgentSchema.model_validate(agent_json)
 
@@ -429,6 +437,14 @@ async def _import_agent(
     """
     Import an agent using the new AgentFileSchema format.
     """
+    # v0.16.38 (R-1): env vars carrying the server password reopen L-3
+    from letta.security.server_credentials import reject_sensitive_env_vars
+
+    try:
+        reject_sensitive_env_vars(env_vars)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     agent_schema = AgentFileSchema.model_validate(agent_file_json)
 
     if override_embedding_handle:
