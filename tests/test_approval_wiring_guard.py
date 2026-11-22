@@ -65,10 +65,14 @@ class TestV2ApprovalOrder:
         assert _source_segment(V2, fn).count("waive_approval=bool(is_approval)") == 1
 
     def test_approval_binding_check_present(self):
-        """P-3 condition 1: approval response tool_call_id must match the request."""
-        src = V2.read_text()
-        assert "approval_response.tool_call_id != requested_call_id" in src
-        assert "approval_response = None" in src
+        """P-3 condition 1: approval response tool_call_id must match the request.
+        v0.16.38 (F2): the check moved into _approval_response_matches_request;
+        _step must still null the response on mismatch."""
+        step = _find_function(_parse(V2), "_step")
+        assert step is not None
+        src = _source_segment(V2, step)
+        assert "_approval_response_matches_request" in src, "binding check must be called from _step"
+        assert "approval_response = None" in src, "mismatch must null the response (not an approval)"
 
 
 class TestV3ApprovalWiring:
@@ -116,3 +120,47 @@ class TestV3ApprovalWiring:
         deny = [ln for ln, t in _ifs_in_order(fn) if "not policy_decision.allowed" in t]
         assert canary and deny
         assert canary[0] < deny[0], "P-13: canary check must precede the deny branch in _run_one"
+
+
+class TestF2ExtractionWiring:
+    """v0.16.38 (F2): the approval binding logic was extracted to unit-testable
+    helpers (V3 _extract_approval_actions, V2 _approval_response_matches_request).
+    These guards pin that _step actually CALLS the helpers — a refactor cannot
+    silently inline the logic back (or bypass the binding) without breaking
+    these."""
+
+    def test_v3_step_calls_extract_approval_actions(self):
+        step = _find_function(_parse(V3), "_step")
+        assert step is not None, "V3 _step must exist"
+        calls = [
+            ast.unparse(n.func)
+            for n in ast.walk(step)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        ]
+        assert "_extract_approval_actions" in calls, (
+            "V3 _step must route approval extraction through _extract_approval_actions "
+            "(F2 extraction target — behavioral tests in test_approval_binding_behavioral.py)"
+        )
+
+    def test_v2_step_calls_approval_response_matches_request(self):
+        step = _find_function(_parse(V2), "_step")
+        assert step is not None, "V2 _step must exist"
+        calls = [
+            ast.unparse(n.func)
+            for n in ast.walk(step)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        ]
+        assert "_approval_response_matches_request" in calls, (
+            "V2 _step must route the exact-call binding check through "
+            "_approval_response_matches_request (F2 extraction target)"
+        )
+
+    def test_v3_helper_exists_at_module_level(self):
+        tree = _parse(V3)
+        fns = [n.name for n in tree.body if isinstance(n, ast.FunctionDef)]
+        assert "_extract_approval_actions" in fns, "V3 extraction helper must be a module-level function"
+
+    def test_v2_helper_exists_at_module_level(self):
+        tree = _parse(V2)
+        fns = [n.name for n in tree.body if isinstance(n, ast.FunctionDef)]
+        assert "_approval_response_matches_request" in fns, "V2 binding helper must be a module-level function"

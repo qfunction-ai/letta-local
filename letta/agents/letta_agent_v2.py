@@ -81,6 +81,22 @@ from letta.types import JsonDict
 from letta.utils import log_telemetry, safe_create_task, safe_create_task_with_return, united_diff, validate_function_response
 
 
+def _approval_response_matches_request(approval_request: Message, approval_response: Message) -> bool:
+    """v0.16.38 (F2): exact-call binding check for the single-call (legacy)
+    approval flow.
+
+    Extracted verbatim from _step's binding block so it can be unit-tested
+    directly. Pure function — no self state. True only when the response
+    names the exact tool call the request was issued for.
+
+    Note: V2 is the single-call legacy path; V3's multi-call ID-set binding
+    lives in letta_agent_v3._extract_approval_actions. The two are NOT copies
+    and were deliberately not merged (v0.16.37 review).
+    """
+    requested_call_id = approval_request.tool_calls[0].id if approval_request.tool_calls else None
+    return approval_response.tool_call_id == requested_call_id
+
+
 class LettaAgentV2(BaseAgentV2):
     """
     Abstract base class for the Letta agent loop, handling message management,
@@ -539,8 +555,11 @@ class LettaAgentV2(BaseAgentV2):
                 # a response whose tool_call_id doesn't match the request is
                 # not an approval at all (treated as no approval; the call
                 # is checked from scratch).
-                requested_call_id = approval_request.tool_calls[0].id if approval_request.tool_calls else None
-                if approval_response.tool_call_id != requested_call_id:
+                # v0.16.38 (F2): the pure ID check lives in
+                # _approval_response_matches_request so it can be unit-tested
+                # directly; the logging (self state) stays here.
+                if not _approval_response_matches_request(approval_request, approval_response):
+                    requested_call_id = approval_request.tool_calls[0].id if approval_request.tool_calls else None
                     self.logger.warning(
                         f"Approval response tool_call_id {approval_response.tool_call_id!r} does not match "
                         f"approval request tool_call_id {requested_call_id!r} — ignoring approval"

@@ -5,6 +5,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 
 from opentelemetry.trace import Span
 
+from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageFunctionToolCall
 from letta.adapters.letta_llm_adapter import LettaLLMAdapter
 from letta.adapters.sglang_native_adapter import SGLangNativeAdapter
 from letta.adapters.simple_llm_request_adapter import SimpleLLMRequestAdapter
@@ -95,6 +96,60 @@ EMPTY_RESPONSE_NOTICE = (
     "[No response: the model produced reasoning but no tool call or "
     "message output. Re-run the turn or rephrase.]"
 )
+
+
+def _extract_approval_actions(
+    approval_request: Message,
+    approval_response: Message,
+    messages: list[Message],
+) -> tuple[list[ChatCompletionMessageFunctionToolCall], list[ToolCallDenial], list[ToolReturn]]:
+    """v0.16.38 (F2): extract the actions named by an approval response.
+
+    Extracted verbatim from _step's approval branch so it can be unit-tested
+    directly. Pure function of its inputs — no self state. The
+    genuine-approval gate (_maybe_get_approval_messages) and the
+    malformed-response validation (touches self.stop_reason) remain in
+    _step.
+
+    Binding semantics (v0.16.37 review P-3, condition 1):
+      - only calls whose id appears in the response's approvals are released,
+        with the REQUEST's arguments (the response cannot invent args);
+      - unknown ids release nothing (validated by the caller as malformed);
+      - denied calls become ToolCallDenial records carrying the response's
+        reason;
+      - ToolReturn entries are client-side executions, passed through as-is.
+    """
+    # Get tool calls that are pending
+    backfill_tool_call_id = approval_request.tool_calls[0].id  # legacy case
+    if approval_response.approvals:
+        approved_tool_call_ids = {
+            backfill_tool_call_id if a.tool_call_id.startswith("message-") else a.tool_call_id
+            for a in approval_response.approvals
+            if isinstance(a, ApprovalReturn) and a.approve
+        }
+    else:
+        approved_tool_call_ids = {}
+    tool_calls = [tool_call for tool_call in approval_request.tool_calls if tool_call.id in approved_tool_call_ids]
+    pending_tool_call_message = _maybe_get_pending_tool_call_message(messages)
+    if pending_tool_call_message:
+        tool_calls.extend(pending_tool_call_message.tool_calls)
+
+    # Get tool calls that were denied
+    if approval_response.approvals:
+        denies = {d.tool_call_id: d for d in approval_response.approvals if isinstance(d, ApprovalReturn) and not d.approve}
+    else:
+        denies = {}
+    tool_call_denials = [
+        ToolCallDenial(**t.model_dump(), reason=denies.get(t.id).reason) for t in approval_request.tool_calls if t.id in denies
+    ]
+
+    # Get tool calls that were executed client side
+    if approval_response.approvals:
+        tool_returns = [r for r in approval_response.approvals if isinstance(r, ToolReturn)]
+    else:
+        tool_returns = []
+
+    return tool_calls, tool_call_denials, tool_returns
 
 
 def extract_compaction_stats_from_message(message: Message) -> CompactionStats | None:
@@ -1203,33 +1258,14 @@ class LettaAgentV3(LettaAgentV2):
                 # case of handling approval responses
                 content = approval_request.content
 
-                # Get tool calls that are pending
-                backfill_tool_call_id = approval_request.tool_calls[0].id  # legacy case
-                if approval_response.approvals:
-                    approved_tool_call_ids = {
-                        backfill_tool_call_id if a.tool_call_id.startswith("message-") else a.tool_call_id
-                        for a in approval_response.approvals
-                        if isinstance(a, ApprovalReturn) and a.approve
-                    }
-                else:
-                    approved_tool_call_ids = {}
-                tool_calls = [tool_call for tool_call in approval_request.tool_calls if tool_call.id in approved_tool_call_ids]
-                pending_tool_call_message = _maybe_get_pending_tool_call_message(messages)
-                if pending_tool_call_message:
-                    tool_calls.extend(pending_tool_call_message.tool_calls)
-
-                # Get tool calls that were denied
-                if approval_response.approvals:
-                    denies = {d.tool_call_id: d for d in approval_response.approvals if isinstance(d, ApprovalReturn) and not d.approve}
-                else:
-                    denies = {}
-                tool_call_denials = [
-                    ToolCallDenial(**t.model_dump(), reason=denies.get(t.id).reason) for t in approval_request.tool_calls if t.id in denies
-                ]
-
-                # Get tool calls that were executed client side
-                if approval_response.approvals:
-                    tool_returns = [r for r in approval_response.approvals if isinstance(r, ToolReturn)]
+                # v0.16.38 (F2): the pure extraction (approved calls, denials,
+                # client-side returns) lives in _extract_approval_actions so it
+                # can be unit-tested directly; everything below that touches
+                # self state (malformed-response validation, step_id
+                # resolution, checkpoints) stays in _step.
+                tool_calls, tool_call_denials, tool_returns = _extract_approval_actions(
+                    approval_request, approval_response, messages
+                )
 
                 # Validate that the approval response contains meaningful data
                 # If all three lists are empty, this is a malformed approval response
@@ -1253,6 +1289,14 @@ class LettaAgentV3(LettaAgentV2):
                     )
                 else:
                     step_metrics = await self.step_manager.get_step_metrics_async(step_id=step_id, actor=self.actor)
+                # v0.16.38 (F2 rig catch): the approval-response path makes no
+                # LLM call, so the auto-mode resolution in the else branch never
+                # runs — but _handle_ai_response reads active_llm_config
+                # unconditionally. Without this assignment every V3 approval
+                # step died with UnboundLocalError before executing anything
+                # (shipped broken in v0.16.37: the A3 wiring was only ever
+                # covered by source-shape guards, never driven end-to-end).
+                active_llm_config = self.agent_state.llm_config
             else:
                 # Check for job cancellation at the start of each step
                 if run_id and await self._check_run_cancellation(run_id):
