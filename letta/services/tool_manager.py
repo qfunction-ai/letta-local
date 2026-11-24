@@ -118,6 +118,7 @@ def modal_tool_wrapper(tool: PydanticTool, actor: PydanticUser, sandbox_env_vars
 
         if env_vars:
             for key, value in env_vars.items():
+                # sandbox-env-exempt: runs inside the Modal container, not the server process
                 os.environ[key] = str(value)
 
         # TODO: directly instantiate the letta client once we upgrade to 1.0.0+ in core

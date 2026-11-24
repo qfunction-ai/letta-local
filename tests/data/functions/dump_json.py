@@ -1,9 +1,7 @@
 import json
 
-from letta.agent import Agent
 
-
-def dump_json(self: Agent, input: str) -> str:
+def dump_json(self, input: str) -> str:
     """
     Dumps the content to JSON.
 
