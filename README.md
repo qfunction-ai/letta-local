@@ -382,6 +382,8 @@ Agent creation payloads may include a `__canary__` block with a client-chosen va
 
 ## Differences from upstream
 
+Upstream (letta-ai/letta) is unmaintained since 2026-08-05; this table describes the historical divergence point, not a moving target.
+
 | Area | Upstream | This fork |
 |------|----------|-----------|
 | Target | Cloud models (OpenAI, Anthropic) | Local inference servers |
@@ -403,8 +405,8 @@ Agent creation payloads may include a `__canary__` block with a client-chosen va
 
 ## Contributing
 
-Changes land on `main` only through pull requests with required CI checks. The `main` branch is protected. For security issues, use [private vulnerability reporting](https://github.com/qfunction-ai/letta-local/security/advisories/new) — do not open a public issue; see [SECURITY.md](SECURITY.md).
+Changes land through a plan-and-review pipeline, not PR gating: work starts with a written plan, gets reviewer passes, and ships by fast-forwarding a work branch to `main`. Releases are annotated tags carrying full release notes; CI (Test Package Installation + Publish container image) fires on tags. GitHub branch protection with required review approvals is deliberately not used — it would deadlock the plan-review cycle. For security issues, use [private vulnerability reporting](https://github.com/qfunction-ai/letta-local/security/advisories/new) — do not open a public issue; see [SECURITY.md](SECURITY.md).
 
 ## License
 
-Same as upstream Letta — see [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](LICENSE).

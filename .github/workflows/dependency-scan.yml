@@ -73,12 +73,21 @@ jobs:
         # itself and the growth check can never fail. On push, compare against
         # the event's previous SHA. Schedule/dispatch have no "before" — skip
         # the growth check there (the gate itself still runs).
+        # T-1 (re-check): the baseline file does not exist at commits before
+        # its creation (e.g. 7b88fa26, the pre-baseline main that the .39
+        # fast-forward pushes from) — `git show` exits 128 and kills the step
+        # under bash -e. Guard with cat-file -e and skip the growth check on
+        # the creation commit.
         run: |
           GROWTH_ARGS=""
           if [ "$GITHUB_EVENT_NAME" = "push" ] && [ -n "$GITHUB_EVENT_BEFORE" ] && [ "$GITHUB_EVENT_BEFORE" != "0000000000000000000000000000000000000000" ]; then
-            git show "$GITHUB_EVENT_BEFORE:security/dependency-baseline.txt" > /tmp/baseline_head.txt
-            GROWTH_ARGS="--growth-check --head-baseline /tmp/baseline_head.txt"
-            echo "growth check: comparing against $GITHUB_EVENT_BEFORE"
+            if git cat-file -e "$GITHUB_EVENT_BEFORE:security/dependency-baseline.txt" 2>/dev/null; then
+              git show "$GITHUB_EVENT_BEFORE:security/dependency-baseline.txt" > /tmp/baseline_head.txt
+              GROWTH_ARGS="--growth-check --head-baseline /tmp/baseline_head.txt"
+              echo "growth check: comparing against $GITHUB_EVENT_BEFORE"
+            else
+              echo "baseline did not exist at $GITHUB_EVENT_BEFORE (creation push): growth check skipped, gate still runs"
+            fi
           else
             echo "no previous commit (schedule/dispatch/new branch): growth check skipped, gate still runs"
           fi

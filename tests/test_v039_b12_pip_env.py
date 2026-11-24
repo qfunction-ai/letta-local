@@ -215,3 +215,52 @@ def test_source_guard_prepare_venv_never_passes_tool_env_to_pip():
                                     f"{mod_path}: _prepare_venv passes the raw tool env to a subprocess call"
                                 )
         assert found, f"{mod_path}: _prepare_venv not found"
+
+
+# ---------------------------------------------------------------------------
+# T-2 (Part B re-check): build_pip_subprocess_env() used to mkdtemp() per
+# call with no cleanup — one orphaned temp dir per sandboxed tool run once
+# R-1 routed the hot path through it. The pip home is now process-lifetime.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_prepare_venv_hot_path_does_not_leak_pip_homes(monkeypatch, tmp_path):
+    """Drive _prepare_venv TWICE with the poisoned env: the number of
+    letta-pip-home-* directories must grow by at most one (process-lifetime
+    home), not one per run."""
+    from letta.services.tool_sandbox.local_sandbox import AsyncToolSandboxLocal
+
+    captured = _CapturedSubprocess()
+    monkeypatch.setattr(teh.subprocess, "run", captured)
+    monkeypatch.setattr(teh, "run_subprocess", captured)
+    venv_path = tmp_path / "venv"
+    venv_path.mkdir()
+    (venv_path / "bin").mkdir()
+    (venv_path / "bin" / "python3").write_text("#!/bin/sh\n")
+    (venv_path / "bin" / "pip").write_text("#!/bin/sh\n")
+
+    sandbox = AsyncToolSandboxLocal.__new__(AsyncToolSandboxLocal)
+    sandbox.force_recreate_venv = False
+    sandbox.tool = None
+    configs = LocalSandboxConfig(
+        sandbox_dir=str(tmp_path),
+        venv_name="venv",
+        use_venv=True,
+        pip_requirements=[PipRequirement(name="numpy")],
+    )
+
+    import glob
+    import stat as stat_mod
+
+    before = glob.glob(os.path.join(tempfile.gettempdir(), "letta-pip-home-*"))
+    await sandbox._prepare_venv(configs, str(venv_path), dict(POISON_ENV))
+    await sandbox._prepare_venv(configs, str(venv_path), dict(POISON_ENV))
+    after = glob.glob(os.path.join(tempfile.gettempdir(), "letta-pip-home-*"))
+    assert len(after) - len(before) <= 1, (
+        f"pip home leaked: {len(before)} dirs before two runs, {len(after)} after"
+    )
+    if after:
+        mode = stat_mod.S_IMODE(os.stat(after[0]).st_mode)
+        assert mode == 0o700, f"pip home must be 0700, got {oct(mode)}"
+        assert os.path.isdir(os.path.join(after[0], ".cache")), "pip home must carry a reusable cache dir"

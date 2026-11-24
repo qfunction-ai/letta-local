@@ -1,5 +1,7 @@
 import os
 import platform
+import stat
+import threading
 import tempfile
 import subprocess
 import venv
@@ -38,6 +40,28 @@ PIP_ENV_BASE_KEYS = (
     "no_proxy",
 )
 
+# T-2 (Part B re-check): one pip home per SERVER PROCESS, not per call.
+# build_pip_subprocess_env() used to mkdtemp() per invocation and nothing
+# removed it — one orphaned temp dir (plus an unreusable pip cache) per
+# sandboxed tool run. A process-lifetime 0700 home with a persistent cache
+# dir bounds it to one directory and lets wheel downloads be reused.
+_pip_home_lock = threading.Lock()
+_pip_home: Optional[str] = None
+
+
+def _get_pip_home() -> str:
+    """Process-lifetime HOME for pip subprocesses (T-2). Created once, mode
+    0700 (mkdtemp default), with a .cache dir so pip reuses downloaded wheels
+    across installs. Never the server user's home; never per-call."""
+    global _pip_home
+    with _pip_home_lock:
+        if _pip_home is None:
+            home = tempfile.mkdtemp(prefix="letta-pip-home-")
+            os.makedirs(os.path.join(home, ".cache"), exist_ok=True)
+            assert stat.S_IMODE(os.stat(home).st_mode) == 0o700  # mkdtemp guarantee; fail loud if a platform breaks it
+            _pip_home = home
+        return _pip_home
+
 
 def build_pip_subprocess_env() -> Dict[str, str]:
     """Minimal environment for pip/venv subprocesses (B-12).
@@ -48,7 +72,7 @@ def build_pip_subprocess_env() -> Dict[str, str]:
     """
     env: Dict[str, str] = {k: os.environ[k] for k in PIP_ENV_BASE_KEYS if k in os.environ}
     env.update({k: v for k, v in os.environ.items() if k.startswith("PIP_")})
-    env["HOME"] = tempfile.mkdtemp(prefix="letta-pip-")
+    env["HOME"] = _get_pip_home()  # T-2: process-lifetime, not per-call
     return env
 
 
@@ -216,7 +240,9 @@ def create_venv_for_local_sandbox(sandbox_dir_path: str, venv_path: str, env: Di
     try:
         # Step 2: Upgrade pip
         logger.info("Upgrading pip in the virtual environment...")
-        subprocess.run([pip_path, "install", "--upgrade", "pip"], env=env, check=True)
+        # B-12 (re-check nit): wheel-only here too — this is a pip install path;
+        # "every pip path is wheel-only" means this one as well.
+        subprocess.run([pip_path, "install", "--only-binary=:all:", "--upgrade", "pip"], env=env, check=True)
 
         # Step 3: Install packages from requirements.txt if available
         requirements_txt_path = os.path.join(sandbox_dir_path, "requirements.txt")

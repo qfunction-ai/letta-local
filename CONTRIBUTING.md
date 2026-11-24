@@ -14,7 +14,7 @@ In short: AI tools are welcome, but you must disclose their use, and a human mus
 
 First things first, let's get you a personal copy of Letta to play with. Think of it as your very own playground. 🎪
 
-1. Head over to the Letta repository on GitHub.
+1. Head over to the LettaLocal repository (qfunction-ai/letta-local) on GitHub.
 2. In the upper-right corner, hit the 'Fork' button.
 
 ### 🚀 Clone the Repository
@@ -22,7 +22,7 @@ First things first, let's get you a personal copy of Letta to play with. Think o
 Now, let's bring your new playground to your local machine.
 
 ```shell
-git clone https://github.com/your-username/letta.git
+git clone https://github.com/your-username/letta-local.git
 ```
 
 ### 🧩 Install dependencies & configure environment
@@ -154,16 +154,19 @@ uv run black . -l 140
 
 ### 🚀 Create a Pull Request
 
-You're almost there! It's time to share your brilliance with the world. 🌍
+You're almost there! It's time to share your work. 🌍
 
-1. Visit [Letta](https://github.com/letta-ai/letta).
-2. Click "New Pull Request" button.
-3. Choose the base branch (`main`) and the compare branch (your feature branch).
-4. Whip up a catchy title and describe your changes in the description. 🪄
+This fork does not use PR-gated merging. Instead:
+
+1. Branch from `main` and do the work with a written plan (see `plans/` for the format).
+2. Push your branch to `qfunction-ai/letta-local` and send the diff for a reviewer pass.
+3. Once approved, the maintainer fast-forwards `main` to your branch and tags a release if one is warranted.
+
+Do not open pull requests against `letta-ai/letta` — that repository is unmaintained since 2026-08-05 and is not this project's upstream.
 
 ## 6. 🔍 Review and Approval
 
-The maintainers will take a look and might suggest some cool upgrades or ask for more details. Once they give the thumbs up, your creation becomes part of Letta!
+The maintainer will review your plan and diff, and might suggest changes or ask for more details. Once they give the thumbs up, your work becomes part of LettaLocal!
 
 ## 7. 📜 Code of Conduct
 
@@ -171,9 +174,9 @@ Please be sure to follow the project's Code of Conduct.
 
 ## 8. 📫 Contact
 
-Need help or just want to say hi? We're here for you. Reach out through filing an issue on this GitHub repository or message us on our [Discord server](https://discord.gg/9GEQrxmVyE).
+Reach out by filing an issue on this GitHub repository (qfunction-ai/letta-local). For security issues, use private vulnerability reporting — do not open a public issue.
 
-Thanks for making Letta even more fantastic!
+Thanks for making LettaLocal even more fantastic!
 
 ## WIP - 🐋 Docker Development
 If you prefer to keep your resources isolated by developing purely in containers, you can start Letta in development with:
