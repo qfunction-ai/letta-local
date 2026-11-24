@@ -1,5 +1,6 @@
 import os
 import platform
+import tempfile
 import subprocess
 import venv
 from typing import TYPE_CHECKING, Dict, Optional
@@ -15,6 +16,40 @@ if TYPE_CHECKING:
     from letta.schemas.tool import Tool
 
 logger = get_logger(__name__)
+
+
+# B-12 (v0.16.39): pip/venv subprocesses run in the SERVER process, outside
+# Landlock/seccomp. They never get a copy of the server environment — only
+# what pip itself needs. Server secrets (LETTA_SERVER_PASSWORD, pg URI,
+# encryption key) must never reach a package's build/setup code.
+PIP_ENV_BASE_KEYS = (
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+)
+
+
+def build_pip_subprocess_env() -> Dict[str, str]:
+    """Minimal environment for pip/venv subprocesses (B-12).
+
+    Allowlist only — never os.environ.copy(). HOME is a fresh temp dir so
+    package code cannot read server-user files (~/.pip config, credentials).
+    PIP_* variables pass through so operators can configure indexes/proxies.
+    """
+    env: Dict[str, str] = {k: os.environ[k] for k in PIP_ENV_BASE_KEYS if k in os.environ}
+    env.update({k: v for k, v in os.environ.items() if k.startswith("PIP_")})
+    env["HOME"] = tempfile.mkdtemp(prefix="letta-pip-")
+    return env
 
 
 def find_python_executable(local_configs: LocalSandboxConfig) -> str:
@@ -124,6 +159,10 @@ def install_pip_requirements_for_sandbox(
 
     # Construct pip install command
     pip_cmd = [python_exec, "-m", "pip", "install"]
+    # B-12 (v0.16.39): wheels only. sdist installs run package build/setup
+    # code as the server user, unsandboxed — a path around L-3's closure.
+    # A package with no wheel for the platform fails with a clear message.
+    pip_cmd.append("--only-binary=:all:")
     if upgrade:
         pip_cmd.append("--upgrade")
     pip_cmd += all_packages

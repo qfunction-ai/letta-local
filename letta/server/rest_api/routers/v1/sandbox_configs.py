@@ -20,7 +20,7 @@ from letta.schemas.sandbox_config import (
 )
 from letta.server.rest_api.dependencies import HeaderParams, get_headers, get_letta_server
 from letta.server.server import SyncServer
-from letta.services.helpers.tool_execution_helper import create_venv_for_local_sandbox, install_pip_requirements_for_sandbox
+from letta.services.helpers.tool_execution_helper import build_pip_subprocess_env, create_venv_for_local_sandbox, install_pip_requirements_for_sandbox
 from letta.validators import SandboxConfigId
 
 router = APIRouter(prefix="/sandbox-config", tags=["sandbox-config"])
@@ -143,11 +143,11 @@ async def force_recreate_local_sandbox_venv(
         logger.info(f"Deleted existing virtual environment at: {venv_path}")
 
     # Recreate the virtual environment
-    create_venv_for_local_sandbox(sandbox_dir_path=sandbox_dir, venv_path=str(venv_path), env=os.environ.copy(), force_recreate=True)
+    create_venv_for_local_sandbox(sandbox_dir_path=sandbox_dir, venv_path=str(venv_path), env=build_pip_subprocess_env(), force_recreate=True)
     logger.info(f"Successfully recreated virtual environment at: {venv_path}")
 
     # Install pip requirements
-    install_pip_requirements_for_sandbox(local_configs=local_configs, env=os.environ.copy())
+    install_pip_requirements_for_sandbox(local_configs=local_configs, env=build_pip_subprocess_env())
     logger.info(f"Successfully installed pip requirements for venv at: {venv_path}")
 
     return sbx_config

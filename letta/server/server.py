@@ -80,7 +80,7 @@ from letta.services.block_manager_git import GIT_MEMORY_ENABLED_TAG, GitEnabledB
 from letta.services.file_manager import FileManager
 from letta.services.files_agents_manager import FileAgentManager
 from letta.services.group_manager import GroupManager
-from letta.services.helpers.tool_execution_helper import prepare_local_sandbox
+from letta.services.helpers.tool_execution_helper import build_pip_subprocess_env, prepare_local_sandbox
 from letta.services.identity_manager import IdentityManager
 from letta.services.job_manager import JobManager
 from letta.services.llm_batch_manager import LLMBatchManager
@@ -419,7 +419,7 @@ class SyncServer(object):
                 if use_venv and tool_settings.tool_exec_autoreload_venv:
                     prepare_local_sandbox(
                         sandbox_config.get_local_config(),
-                        env=os.environ.copy(),
+                        env=build_pip_subprocess_env(),
                         force_recreate=True,
                     )
 
