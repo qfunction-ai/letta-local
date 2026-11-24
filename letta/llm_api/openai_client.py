@@ -442,16 +442,12 @@ class OpenAIClient(LLMClientBase):
         if supports_verbosity_control(model) and llm_config.verbosity:
             text_config_kwargs["verbosity"] = llm_config.verbosity
 
-        # Add response_format support for structured outputs via text.format
-        # Disable for models with degraded JSON capabilities
-        if (
-            hasattr(llm_config, "constraints")
-            and llm_config.constraints is not None
-            and llm_config.constraints.disable_structured_output
-        ):
-            # Skip structured output — model can't handle json_schema response_format
-            pass
-        elif hasattr(llm_config, "response_format") and llm_config.response_format is not None:
+        # Add response_format support for structured outputs via text.format.
+        # B-6 (v0.16.39): an explicit response_format OVERRIDES the local-model
+        # disable_structured_output constraint (auto-applied by
+        # apply_default_constraints when constraints are unset) — explicit
+        # configuration wins over the heuristic.
+        if hasattr(llm_config, "response_format") and llm_config.response_format is not None:
             format_dict = convert_response_format_to_responses_api(llm_config.response_format)
             if format_dict is not None:
                 text_config_kwargs["format"] = format_dict
@@ -671,16 +667,12 @@ class OpenAIClient(LLMClientBase):
         if tools and supports_parallel_tool_calling(model):
             data.parallel_tool_calls = llm_config.parallel_tool_calls
 
-        # Add response_format support for structured outputs
-        # Disable for models with degraded JSON capabilities
-        if (
-            hasattr(llm_config, "constraints")
-            and llm_config.constraints is not None
-            and llm_config.constraints.disable_structured_output
-        ):
-            # Skip structured output — model can't handle json_schema response_format
-            pass
-        elif hasattr(llm_config, "response_format") and llm_config.response_format is not None:
+        # Add response_format support for structured outputs.
+        # B-6 (v0.16.39): an explicit response_format OVERRIDES the local-model
+        # disable_structured_output constraint (auto-applied by
+        # apply_default_constraints when constraints are unset) — explicit
+        # configuration wins over the heuristic.
+        if hasattr(llm_config, "response_format") and llm_config.response_format is not None:
             # For Chat Completions API, we need the full nested structure
             if isinstance(llm_config.response_format, JsonSchemaResponseFormat):
                 # Convert to the OpenAI SDK format
