@@ -4,9 +4,9 @@
    model: ollama/nemotron-3-nano:4b
 
 == starting container ==
+ Volume letta-smoke_smoke-data Creating 
+ Volume letta-smoke_smoke-data Creating 
  Network letta-smoke_default Creating 
- Volume letta-smoke_smoke-data Creating 
- Volume letta-smoke_smoke-data Creating 
  Network letta-smoke_default Creating 
  Volume letta-smoke_smoke-data Created 
  Volume letta-smoke_smoke-data Created 
@@ -18,7 +18,7 @@
  Container letta-smoke-letta-1 Started 
   PASS  1. server healthy
 == check 2: create agent ==
-  PASS  2. create agent (agent-0b53e56d-ff29-4694-9ad4-d72409820255)
+  PASS  2. create agent (agent-b1d9a235-2d35-44cc-88d2-f8a24a11e13d)
 == check 3: non-streaming message ==
   PASS  3. non-streaming message
 == check 4: streaming message ==
@@ -53,8 +53,10 @@
 == check 20: L-3 localhost REST tripwire (full attack) ==
   PASS  20a. R-1 API password-env-var write rejected (400)
   PASS  20. L-3 tripwire CLOSED (full attack blocked: ENV_LEAKS:none;;ENV_DBSET:no;;NOCRED:401;;CRED:none-found;;PROC:blocked;;FILE:blocked)
+== check 21: README quick-start witness (B-13) ==
+  PASS  21. README quick-start witness (password auth + local embedding)
 == check 8: delete agent ==
   PASS  8. delete agent
 
-== smoke: 21 passed, 0 failed ==
+== smoke: 22 passed, 0 failed ==
 RIG_EXIT: 0
