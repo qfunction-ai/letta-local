@@ -5,7 +5,6 @@ from logging import CRITICAL, DEBUG, ERROR, INFO, NOTSET, WARN, WARNING
 LETTA_DIR = os.path.join(os.path.expanduser("~"), ".letta")
 LETTA_TOOL_EXECUTION_DIR = os.path.join(LETTA_DIR, "tool_execution_dir")
 
-LETTA_MODEL_ENDPOINT = "https://inference.letta.com/v1/"
 DEFAULT_TIMEZONE = "UTC"
 
 # Provider ordering for model listing (matches original _enabled_providers list order)

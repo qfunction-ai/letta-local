@@ -121,13 +121,6 @@ def modal_tool_wrapper(tool: PydanticTool, actor: PydanticUser, sandbox_env_vars
                 # sandbox-env-exempt: runs inside the Modal container, not the server process
                 os.environ[key] = str(value)
 
-        # TODO: directly instantiate the letta client once we upgrade to 1.0.0+ in core
-        # Initialize the Letta client
-        # if letta_api_key:
-        #     letta_client = Letta(token=letta_api_key, base_url=os.environ.get("LETTA_API_URL", "https://api.letta.com"))
-        # else:
-        #     letta_client = None
-
         tool_namespace = {
             "__builtins__": __builtins__,  # Include built-in functions
             # "_letta_client": letta_client,  # Make letta_client available

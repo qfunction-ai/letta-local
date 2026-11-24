@@ -3,7 +3,6 @@ from typing import TYPE_CHECKING, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from letta.constants import LETTA_MODEL_ENDPOINT
 from letta.errors import LettaInvalidArgumentError
 from letta.log import get_logger
 from letta.model_aliases import get_deprecated_google_handle_replacement, get_deprecated_google_model_replacement
@@ -550,13 +549,6 @@ class LLMConfig(BaseModel):
                 reasoning_effort="none",  # Default to "none" for GPT-5.2
                 verbosity="medium",
                 max_tokens=128000,
-            )
-        elif model_name == "letta":
-            return cls(
-                model="memgpt-openai",
-                model_endpoint_type="openai",
-                model_endpoint=LETTA_MODEL_ENDPOINT,
-                context_window=30000,
             )
         else:
             raise ValueError(f"Model {model_name} not supported.")

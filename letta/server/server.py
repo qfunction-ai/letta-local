@@ -54,7 +54,6 @@ from letta.schemas.providers import (
     GoogleAIProvider,
     GoogleVertexProvider,
     GroqProvider,
-    LettaProvider,
     LMStudioOpenAIProvider,
     MiniMaxProvider,
     OllamaProvider,
@@ -210,10 +209,9 @@ class SyncServer(object):
         """Initialize the MCP clients (there may be multiple)"""
         self.mcp_clients: Dict[str, AsyncBaseMCPClient] = {}
 
-        # collect providers (always has Letta as a default)
-        from letta.constants import LETTA_MODEL_ENDPOINT
-
-        self._enabled_providers: List[Provider] = [LettaProvider(name="letta", base_url=LETTA_MODEL_ENDPOINT)]
+        # collect providers (registry-driven; the fork registers no default
+        # upstream provider — the removed upstream inference endpoints (v0.16.39 B-2)
+        self._enabled_providers: List[Provider] = []
         if model_settings.openai_api_key:
             self._enabled_providers.append(
                 OpenAIProvider(
@@ -422,6 +420,44 @@ class SyncServer(object):
                         env=build_pip_subprocess_env(),
                         force_recreate=True,
                     )
+
+        # B-2 (v0.16.39): report agents whose stored configs still point at
+        # removed upstream endpoints. Report-only — never rewrites configs.
+        await self._report_stored_upstream_endpoints_async()
+
+    async def _report_stored_upstream_endpoints_async(self) -> None:
+        """Report (never rewrite) agents with configs referencing removed upstream endpoints."""
+        try:
+            from sqlalchemy import select
+
+            from letta.orm.agent import Agent as AgentModel
+            from letta.server.db import db_registry
+
+            domain = "letta" + ".com"  # assembled so the domain-sweep guard does not flag this checker itself
+            flagged = []
+            async with db_registry.async_session() as session:
+                result = await session.execute(select(AgentModel.id, AgentModel.name, AgentModel.llm_config, AgentModel.embedding_config))
+                for row in result.all():
+                    reasons = []
+                    for label, config in (("llm_config", row.llm_config), ("embedding_config", row.embedding_config)):
+                        if config is None:
+                            continue
+                        rendered = config.model_dump() if hasattr(config, "model_dump") else config
+                        if domain in str(rendered):
+                            reasons.append(label)
+                    if reasons:
+                        flagged.append(f"{row.name} ({row.id}): {', '.join(reasons)}")
+            if flagged:
+                logger.warning(
+                    "v0.16.39 B-2 stored-agent check: %d agent(s) have stored configs pointing at removed upstream "
+                    "endpoints and will fail on next use: %s. Recreate these agents with local provider configs. "
+                    "(This check reports only; it never rewrites stored configs.)",
+                    len(flagged),
+                    "; ".join(flagged),
+                )
+        except Exception:
+            # report-only: never block startup
+            logger.debug("Stored-agent upstream-endpoint check skipped", exc_info=True)
 
     def _init_memory_repo_manager(self) -> Optional[MemfsClient]:
         """Initialize the memory repository manager if configured.

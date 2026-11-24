@@ -11,7 +11,7 @@ from letta.schemas.agent import CreateAgent
 from letta.schemas.embedding_config import EmbeddingConfig
 from letta.schemas.enums import ProviderCategory, ProviderType
 from letta.schemas.llm_config import LLMConfig
-from letta.schemas.providers import LettaProvider, OpenAIProvider, ProviderCreate
+from letta.schemas.providers import AnthropicProvider, OpenAIProvider, ProviderCreate
 from letta.server.server import SyncServer
 from letta.services.organization_manager import OrganizationManager
 from letta.services.provider_manager import ProviderManager
@@ -61,7 +61,7 @@ async def test_sync_base_providers_creates_new_providers(default_user, provider_
     """Test that sync_base_providers creates providers that don't exist."""
     # Mock base providers from environment
     base_providers = [
-        LettaProvider(name="letta"),
+        AnthropicProvider(name="anthropic", api_key="sk-test-key"),
         OpenAIProvider(name="openai", api_key="sk-test-key"),
     ]
 
@@ -69,12 +69,12 @@ async def test_sync_base_providers_creates_new_providers(default_user, provider_
     await provider_manager.sync_base_providers(base_providers=base_providers, actor=default_user)
 
     # Verify providers were created in the database
-    letta_providers = await provider_manager.list_providers_async(name="letta", actor=default_user)
+    anthropic_providers = await provider_manager.list_providers_async(name="anthropic", actor=default_user)
     openai_providers = await provider_manager.list_providers_async(name="openai", actor=default_user)
 
-    assert len(letta_providers) == 1
-    assert letta_providers[0].name == "letta"
-    assert letta_providers[0].provider_type == ProviderType.letta
+    assert len(anthropic_providers) == 1
+    assert anthropic_providers[0].name == "anthropic"
+    assert anthropic_providers[0].provider_type == ProviderType.anthropic
 
     assert len(openai_providers) == 1
     assert openai_providers[0].name == "openai"
@@ -86,7 +86,7 @@ async def test_sync_base_providers_skips_existing_providers(default_user, provid
     """Test that sync_base_providers skips providers that already exist."""
     # Mock base providers from environment
     base_providers = [
-        LettaProvider(name="letta"),
+        AnthropicProvider(name="anthropic", api_key="sk-test-key"),
     ]
 
     # Sync providers to DB first time
@@ -96,8 +96,8 @@ async def test_sync_base_providers_skips_existing_providers(default_user, provid
     await provider_manager.sync_base_providers(base_providers=base_providers, actor=default_user)
 
     # Verify only one provider exists (not duplicated)
-    letta_providers = await provider_manager.list_providers_async(name="letta", actor=default_user)
-    assert len(letta_providers) == 1
+    anthropic_providers = await provider_manager.list_providers_async(name="anthropic", actor=default_user)
+    assert len(anthropic_providers) == 1
 
 
 @pytest.mark.asyncio
@@ -105,7 +105,7 @@ async def test_sync_base_providers_handles_race_condition(default_user, provider
     """Test that sync_base_providers handles race conditions gracefully."""
     # Mock base providers from environment
     base_providers = [
-        LettaProvider(name="letta"),
+        AnthropicProvider(name="anthropic", api_key="sk-test-key"),
     ]
 
     # Mock a race condition: list returns empty, but create fails with UniqueConstraintViolation
@@ -136,15 +136,15 @@ async def test_sync_base_providers_handles_none_api_key(default_user, provider_m
     """Test that sync_base_providers handles providers with None api_key."""
     # Mock base providers from environment (Letta doesn't need an API key)
     base_providers = [
-        LettaProvider(name="letta", api_key=None),
+        AnthropicProvider(name="anthropic", api_key=None),
     ]
 
     # Sync providers to DB - should convert None to empty string
     await provider_manager.sync_base_providers(base_providers=base_providers, actor=default_user)
 
     # Verify provider was created
-    letta_providers = await provider_manager.list_providers_async(name="letta", actor=default_user)
-    assert len(letta_providers) == 1
+    anthropic_providers = await provider_manager.list_providers_async(name="anthropic", actor=default_user)
+    assert len(anthropic_providers) == 1
     assert letta_providers[0].name == "letta"
 
 

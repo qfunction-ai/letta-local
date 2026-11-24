@@ -8,7 +8,7 @@ from letta.llm_api.azure_openai import get_azure_chat_completions_endpoint, get_
 from letta.llm_api.azure_openai_constants import AZURE_MODEL_TO_CONTEXT_LENGTH
 from pydantic import BaseModel, Field, model_validator
 
-from letta.constants import DEFAULT_EMBEDDING_CHUNK_SIZE, LETTA_MODEL_ENDPOINT, LLM_MAX_TOKENS, MIN_CONTEXT_WINDOW
+from letta.constants import DEFAULT_EMBEDDING_CHUNK_SIZE, LLM_MAX_TOKENS, MIN_CONTEXT_WINDOW
 from letta.schemas.embedding_config import EmbeddingConfig
 from letta.schemas.embedding_config_overrides import EMBEDDING_HANDLE_OVERRIDES
 from letta.schemas.enums import ProviderCategory, ProviderType
@@ -91,8 +91,6 @@ class Provider(ProviderBase):
 
     def cast_to_subtype(self):
         match self.provider_type:
-            case ProviderType.letta:
-                return LettaProvider(**self.model_dump(exclude_none=True))
             case ProviderType.openai:
                 return OpenAIProvider(**self.model_dump(exclude_none=True))
             case ProviderType.anthropic:
@@ -140,50 +138,6 @@ class ProviderCheck(BaseModel):
     api_key: str = Field(..., description="API key or secret key used for requests to the provider.")
     access_key: Optional[str] = Field(None, description="Access key used for requests to the provider.")
     region: Optional[str] = Field(None, description="Region used for requests to the provider.")
-
-
-class LettaProvider(Provider):
-    provider_type: Literal[ProviderType.letta] = Field(ProviderType.letta, description="The type of the provider.")
-    provider_category: ProviderCategory = Field(ProviderCategory.base, description="The category of the provider (base or byok)")
-
-    def list_llm_models(self) -> List[LLMConfig]:
-        return [
-            LLMConfig(
-                model="letta-free",  # NOTE: renamed
-                model_endpoint_type="openai",
-                model_endpoint=LETTA_MODEL_ENDPOINT,
-                context_window=30000,
-                handle=self.get_handle("letta-free"),
-                provider_name=self.name,
-                provider_category=self.provider_category,
-            )
-        ]
-
-    async def list_llm_models_async(self) -> List[LLMConfig]:
-        return [
-            LLMConfig(
-                model="letta-free",  # NOTE: renamed
-                model_endpoint_type="openai",
-                model_endpoint=LETTA_MODEL_ENDPOINT,
-                context_window=30000,
-                handle=self.get_handle("letta-free"),
-                provider_name=self.name,
-                provider_category=self.provider_category,
-            )
-        ]
-
-    def list_embedding_models(self):
-        return [
-            EmbeddingConfig(
-                embedding_model="letta-free",  # NOTE: renamed
-                embedding_endpoint_type="hugging-face",
-                embedding_endpoint="https://embeddings.memgpt.ai",
-                embedding_dim=1024,
-                embedding_chunk_size=300,
-                handle=self.get_handle("letta-free", is_embedding=True),
-                batch_size=32,
-            )
-        ]
 
 
 class OpenAIProvider(Provider):

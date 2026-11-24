@@ -3,7 +3,6 @@ from typing import Generator, List, Optional, Union
 import httpx
 from openai import OpenAI
 
-from letta.constants import LETTA_MODEL_ENDPOINT
 from letta.helpers.datetime_helpers import timestamp_to_datetime
 from letta.llm_api.helpers import add_inner_thoughts_to_functions, convert_to_structured_output
 from letta.llm_api.openai_client import (
@@ -182,15 +181,6 @@ def build_openai_chat_completions_request(
     # always set user id for openai requests
     if user_id:
         data.user = str(user_id)
-
-    if llm_config.model_endpoint == LETTA_MODEL_ENDPOINT:
-        if not user_id:
-            # override user id for inference.letta.com
-            import uuid
-
-            data.user = str(uuid.UUID(int=0))
-
-        data.model = "memgpt-openai"
 
     if use_structured_output and data.tools is not None and len(data.tools) > 0:
         # Convert to structured output style (which has 'strict' and no optionals)

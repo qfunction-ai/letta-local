@@ -211,19 +211,7 @@ def format_memory_blocks(blocks, agent_id: str) -> str:
             memory_context += "\n"
 
     memory_context += "\n</memory_blocks>\n\n"
-    memory_context += (
-        "<memory_management>\n"
-        f"Users can view and edit their memory blocks at:\n"
-        f"https://app.letta.com/agents/{agent_id}\n\n"
-        "Share this link when users ask how to manage their memory, what you remember about them, or how to view, edit, or delete stored information.\n"
-        "</memory_management>\n\n"
-        "<documentation>\n"
-        "- Memory blocks: https://docs.letta.com/guides/agents/memory-blocks/index.md\n"
-        "- Full Letta documentation: https://docs.letta.com/llms.txt\n\n"
-        "Reference these when users ask how Letta memory works or want to learn more about the platform.\n"
-        "</documentation>\n"
-        "</letta>"
-    )
+    memory_context += "</letta>"
     return memory_context
 
 

@@ -805,8 +805,6 @@ def create_application() -> "FastAPI":
             },
         )
 
-    settings.cors_origins.append("https://app.letta.com")
-
     # v0.16.38 (L-3): secure mode is ON by default. Opt out explicitly with
     # LETTA_SERVER_SECURE=false (local dev only) — an insecure start logs a
     # WARNING naming the risk. The password value is NEVER printed (v0.16.38
@@ -953,7 +951,6 @@ def start_server(
 
     if (os.getenv("LOCAL_HTTPS") == "true") or "--localhttps" in sys.argv:
         print(f"▶ Server running at: https://{host or 'localhost'}:{port or REST_DEFAULT_PORT}")
-        print("▶ View using ADE at: https://app.letta.com/development-servers/local/dashboard\n")
         if importlib.util.find_spec("granian") is not None and settings.use_granian:
             from granian import Granian
 
@@ -992,10 +989,8 @@ def start_server(
         if IS_WINDOWS:
             # Windows doesn't those the fancy unicode characters
             print(f"Server running at: http://{host or 'localhost'}:{port or REST_DEFAULT_PORT}")
-            print("View using ADE at: https://app.letta.com/development-servers/local/dashboard\n")
         else:
             print(f"▶ Server running at: http://{host or 'localhost'}:{port or REST_DEFAULT_PORT}")
-            print("▶ View using ADE at: https://app.letta.com/development-servers/local/dashboard\n")
 
         if importlib.util.find_spec("granian") is not None and settings.use_granian:
             # Experimental Granian engine

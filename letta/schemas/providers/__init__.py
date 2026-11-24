@@ -11,7 +11,6 @@ from .deepseek import DeepSeekProvider
 from .google_gemini import GoogleAIProvider
 from .google_vertex import GoogleVertexProvider
 from .groq import GroqProvider
-from .letta import LettaProvider
 from .lmstudio import LMStudioOpenAIProvider
 from .minimax import MiniMaxProvider
 from .mistral import MistralProvider
@@ -37,7 +36,6 @@ __all__ = [
     "GoogleVertexProvider",
     "GroqProvider",
     "LMStudioOpenAIProvider",
-    "LettaProvider",
     "MiniMaxProvider",
     "MistralProvider",
     "OllamaProvider",

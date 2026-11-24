@@ -15,7 +15,7 @@ from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai.types.responses import ResponseTextConfigParam
 from openai.types.responses.response_stream_event import ResponseStreamEvent
 
-from letta.constants import LETTA_MODEL_ENDPOINT, REQUEST_HEARTBEAT_PARAM
+from letta.constants import REQUEST_HEARTBEAT_PARAM
 from letta.errors import (
     ContextWindowExceededError,
     ErrorCode,
@@ -273,10 +273,6 @@ class OpenAIClient(LLMClientBase):
         if self._is_openrouter_request(llm_config):
             return False
 
-        # Keep Letta inference endpoint behavior unchanged.
-        if llm_config.model_endpoint == LETTA_MODEL_ENDPOINT:
-            return False
-
         # If provider_name is explicitly set and not openai, don't apply OpenAI-specific prompt caching fields.
         if llm_config.provider_name and llm_config.provider_name != "openai":
             return False
@@ -487,15 +483,6 @@ class OpenAIClient(LLMClientBase):
         if self.actor:
             data.user = self.actor.id
 
-        if llm_config.model_endpoint == LETTA_MODEL_ENDPOINT:
-            if not self.actor:
-                # override user id for inference.letta.com
-                import uuid
-
-                data.user = str(uuid.UUID(int=0))
-
-            data.model = "memgpt-openai"
-
         self._apply_prompt_cache_settings(
             llm_config=llm_config,
             model=model,
@@ -705,15 +692,6 @@ class OpenAIClient(LLMClientBase):
         # always set user id for openai requests
         if self.actor:
             data.user = self.actor.id
-
-        if llm_config.model_endpoint == LETTA_MODEL_ENDPOINT:
-            if not self.actor:
-                # override user id for inference.letta.com
-                import uuid
-
-                data.user = str(uuid.UUID(int=0))
-
-            data.model = "memgpt-openai"
 
         # For some reason, request heartbeats are still leaking into here...
         # So strip them manually for v3
