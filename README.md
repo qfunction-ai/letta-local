@@ -1,8 +1,8 @@
 # Letta Local
 
-A fork of [Letta](https://github.com/letta-ai/letta) optimized for **local model inference**.
+An independently maintained fork of [Letta](https://github.com/letta-ai/letta), optimized for **local model inference**. QFunction maintains this fork, including all of its security fixes. The upstream Letta project is no longer maintained — there are no upstream merges.
 
-> **Security posture:** production-ready for trusted tools. Known open: sandboxed tool code can reach the server's own REST API over localhost without authentication and rewrite its own sandbox/policy configuration (L-3, demonstrated live by the release rig). Fix due in v0.16.38 on **2026-12-04**. See [Known security holes](#known-security-holes).
+> **Security posture:** production-ready for trusted tools. Secure mode is **on by default**: the REST API requires password authentication, and sandboxed tool environments are allowlisted (no inherited server secrets). L-3, L-1 and L-2 are closed as of v0.16.38. Still open, each with a tracking ID: L-7, L-8, L-9, approval run-scoping (RC-7), and the numpy/OpenBLAS sandbox hang (RC-8). See [Known security holes](#known-security-holes).
 
 The upstream Letta project is built for cloud models (OpenAI, Anthropic, etc.). This fork makes Letta's stateful agent framework work with local inference servers — Ollama, vLLM, SGLang, LocalAI, llama.cpp, and MLX — without requiring a cloud API key.
 
@@ -350,30 +350,31 @@ pytest tests/integration_test_local_model_agent.py -v
 - **vLLM requires flags**: Native tool calling on vLLM needs `--enable-auto-tool-choice --tool-call-parser hermes`. Without these, all models fall back to prompt mode (which still works).
 - **Correction factor placeholders**: `TOKEN_ESTIMATE_CORRECTION` values for specific model families (qwen, llama, etc.) are placeholders (`None`). They fall back to `DEFAULT_TOKEN_CORRECTION = 2.5` until a benchmark script measures real ratios. Live calibration makes this less critical — the first API response provides the real ratio.
 - **vLLM reasoning models**: vLLM doesn't expose model capability metadata like Ollama's `/api/show`. Reasoning models served via vLLM need `reasoning=True` set explicitly on agent creation. The `enable_reasoner` flag is not auto-detected for vLLM.
+- **numpy/OpenBLAS hang under the sandbox (RC-8)**: Custom tools that import numpy or pandas can hang under the sandbox's seccomp `clone` restriction, because OpenBLAS starts thread pools at import time and the blocked `clone` syscall wedges them. Mitigation (single-threaded BLAS via spawn-side env) is planned for v0.16.39; until confirmed, tools importing numpy/pandas may need to avoid the sandboxed executor.
 
 ## Known security holes
 
-**Affected: every release up to and including v0.16.37, in every deployment, including ones that only run trusted tools if any custom tool code is reachable.**
+**L-3, L-1 and L-2 affected every release up to and including v0.16.37, in every deployment. All three are closed as of v0.16.38 (shipped 2026-11-22). The holes below are the ones that remain.**
 
-### L-3 — sandboxed tool code can reach the server's own REST API (demonstrated live)
+### Closed in v0.16.38: L-3, L-1, L-2
 
-The server's REST API has no authentication on localhost. Tool code executing in the Landlock sandbox can open a TCP connection to the server and call any endpoint — including rewriting its own sandbox configuration (widen read/write paths, enable network) and its own security policy. This is not a finding read from code: the release smoke rig (check 20) proves it on every release run by having a sandboxed custom tool PATCH the sandbox-config endpoint and receive `200 OK`.
+- **L-3 — sandboxed tool code could reach the server's own REST API without authentication** and rewrite its own sandbox/policy configuration. Closed: secure mode is on by default (opt out with `LETTA_SERVER_SECURE=false`); password middleware guards every endpoint except health/ready. The release rig proves the closure on every run (check 20: a sandboxed tool attempts the full attack — env-credential theft, direct PATCH with the password, /proc and file reads — and every path is blocked).
+- **L-1 — local sandbox environment inheritance.** Sandboxed tools received a copy of the server's process environment, including `LETTA_SERVER_PASSWORD`, database URIs, encryption keys, and provider API keys. Closed: tool environments are an explicit allowlist plus DB-provided variables (the intended credential channel); password-valued env vars are rejected at the API (R-1) and scrubbed at spawn.
+- **L-2 — `/data/config` readable from the sandbox.** Closed in v0.16.38.
 
-Consequence: any agent that can be steered into calling a tool — including via injected content — can escalate its own sandbox permissions for every later run.
+**Design consequence that remains:** authentication is now the only barrier for sandboxed tools reaching the local API, because tools can still *open connections* (L-8, open). **The server password must never be given to tools.** Agent-aware and multi-agent tools fail under secure mode with a visible 401 until scoped tool credentials exist (v0.16.39 design item).
 
-**Fix:** v0.16.38, due **2026-12-04** (14 days after the v0.16.37 tag). Minimal L-3 is its first item. This is a breaking change: consumers must send password headers. Password auth alone is not sufficient — v0.16.38 also switches local sandbox environments from a copy of the server's environment to an allowlist, so tool code cannot read the password out of its own environment (L-1), and any env var whose value equals the password is rejected at the API and scrubbed at spawn (R-1). **The server password must never be given to tools.** Tools that need the API need their own scoped credential, which does not exist yet (v0.16.39 design item) — until then, agent-aware and multi-agent tools fail with a visible 401.
+### Open holes
 
-### Other open holes (tracked for v0.16.38 scoping)
-
-- **L-1 — local sandbox environment inheritance.** Sandboxed tools receive a copy of the server's process environment, including `LETTA_SERVER_PASSWORD`, database URIs, encryption keys, and provider API keys. Fix (allowlist, not denylist) is required in v0.16.38 — without it, L-3's password auth is bypassable by any tool that reads its own environment.
-- **L-2 — `/data/config` readable from the sandbox.**
 - **L-7 — encryption key handling.**
 - **L-8 — Landlock network rules are not enforced on Docker Desktop** (the health endpoint reports this honestly as `landlock_net_rules_enforced: false`); TCP restrictions currently rely on seccomp. **Plainly: with L-8 unresolved, sandboxed tools can still CONNECT to the localhost API — after v0.16.38, authentication is the only thing stopping them.**
 - **L-9 — seccomp filter coverage.**
+- **Approval run-scoping (RC-7).** Approval binding matches `tool_call_id` only, with no run_id check; the last-two-messages gate is the only temporal scope.
+- **numpy/OpenBLAS sandbox hang (RC-8).** Custom tools that import numpy or pandas can hang under the sandbox's seccomp `clone` restriction, because OpenBLAS starts thread pools. See [Known issues](#known-issues).
 
 ### Canary note
 
-Agent creation payloads may include a `__canary__` block with a client-chosen value (intended: consumers like Epsilon set their own canaries). While L-3 is open, anyone who can reach the API can create agents whose canary value they know. This is harmless to existing agents and closes with L-3.
+Agent creation payloads may include a `__canary__` block with a client-chosen value (intended: consumers like Epsilon set their own canaries). Creating an agent requires authentication as of v0.16.38, so this is no longer reachable by unauthenticated callers. Existing agents are unaffected.
 
 ## Differences from upstream
 
@@ -396,21 +397,9 @@ Agent creation payloads may include a `__canary__` block with a client-chosen va
 | Secret scanning | None | Entropy + regex via policy engine |
 | File tools | grep_files is a stub | grep_files implemented, sandbox staging dir for large output |
 
-## Upstream sync
+## Contributing
 
-This fork tracks upstream and merges periodically. The upstream base is tagged at `upstream-base-113153571`. To merge upstream changes:
-
-```bash
-git remote add upstream https://github.com/letta-ai/letta.git
-git fetch upstream
-git merge upstream/main
-# Resolve conflicts, run tests
-pytest tests/test_tool_capability_probe.py tests/test_model_constraints.py \
-       tests/test_tool_call_repair.py tests/test_prompt_tool_calling.py \
-       tests/test_local_model_hardening.py tests/test_landlock_sandbox.py \
-       tests/test_policy_engine.py tests/test_audit_logger.py \
-       tests/test_canary_checker.py tests/test_policy_checker.py
-```
+Changes land on `main` only through pull requests with required CI checks. The `main` branch is protected. For security issues, use [private vulnerability reporting](https://github.com/qfunction-ai/letta-local/security/advisories/new) — do not open a public issue; see [SECURITY.md](SECURITY.md).
 
 ## License
 
