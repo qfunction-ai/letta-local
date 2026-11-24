@@ -638,6 +638,17 @@ async def create_agent(
     """
     Create an agent.
     """
+    # v0.16.39 (B-9): env vars carrying server credentials reopen L-3 — same
+    # rejection as the import paths and tool/sandbox-config routes. Covers the
+    # deprecated tool_exec_environment_variables field and the current secrets field.
+    from letta.security.server_credentials import reject_sensitive_env_vars
+
+    try:
+        reject_sensitive_env_vars(agent.tool_exec_environment_variables)
+        reject_sensitive_env_vars(agent.secrets)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     actor = await server.user_manager.get_actor_or_default_async(actor_id=headers.actor_id)
     return await server.create_agent_async(agent, actor=actor)
 
@@ -650,6 +661,17 @@ async def modify_agent(
     headers: HeaderParams = Depends(get_headers),
 ):
     """Update an existing agent."""
+    # v0.16.39 (B-9): env vars carrying server credentials reopen L-3 — same
+    # rejection as the import paths and tool/sandbox-config routes. Covers the
+    # deprecated tool_exec_environment_variables field and the current secrets field.
+    from letta.security.server_credentials import reject_sensitive_env_vars
+
+    try:
+        reject_sensitive_env_vars(update_agent.tool_exec_environment_variables)
+        reject_sensitive_env_vars(update_agent.secrets)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     actor = await server.user_manager.get_actor_or_default_async(actor_id=headers.actor_id)
     return await server.update_agent_async(agent_id=agent_id, request=update_agent, actor=actor)
 
