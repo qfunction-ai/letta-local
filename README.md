@@ -2,7 +2,7 @@
 
 An independently maintained fork of [Letta](https://github.com/letta-ai/letta), optimized for **local model inference**. QFunction maintains this fork, including all of its security fixes. The upstream Letta project is no longer maintained — there are no upstream merges.
 
-> **Security posture:** production-ready for trusted tools. Secure mode is **on by default**: the REST API requires password authentication, and sandboxed tool environments are allowlisted (no inherited server secrets). L-3, L-1 and L-2 are closed as of v0.16.38. Still open, each with a tracking ID: L-7, L-8, L-9, approval run-scoping (RC-7), and the numpy/OpenBLAS sandbox hang (RC-8). See [Known security holes](#known-security-holes).
+> **Security posture:** production-ready for trusted tools. Secure mode is **on by default**: the REST API requires password authentication, and sandboxed tool environments are allowlisted (no inherited server secrets). L-3, L-1 and L-2 are closed as of v0.16.38. Still open, each with a tracking ID: L-7, L-8, L-9, and approval run-scoping (RC-7). The numpy/OpenBLAS sandbox hang (RC-8) is mitigated as of v0.16.39. See [Known security holes](#known-security-holes).
 
 The upstream Letta project is built for cloud models (OpenAI, Anthropic, etc.). This fork makes Letta's stateful agent framework work with local inference servers — Ollama, vLLM, SGLang, LocalAI, llama.cpp, and MLX — without requiring a cloud API key.
 
@@ -350,7 +350,7 @@ pytest tests/integration_test_local_model_agent.py -v
 - **vLLM requires flags**: Native tool calling on vLLM needs `--enable-auto-tool-choice --tool-call-parser hermes`. Without these, all models fall back to prompt mode (which still works).
 - **Correction factor placeholders**: `TOKEN_ESTIMATE_CORRECTION` values for specific model families (qwen, llama, etc.) are placeholders (`None`). They fall back to `DEFAULT_TOKEN_CORRECTION = 2.5` until a benchmark script measures real ratios. Live calibration makes this less critical — the first API response provides the real ratio.
 - **vLLM reasoning models**: vLLM doesn't expose model capability metadata like Ollama's `/api/show`. Reasoning models served via vLLM need `reasoning=True` set explicitly on agent creation. The `enable_reasoner` flag is not auto-detected for vLLM.
-- **numpy/OpenBLAS hang under the sandbox (RC-8)**: Custom tools that import numpy or pandas can hang under the sandbox's seccomp `clone` restriction, because OpenBLAS starts thread pools at import time and the blocked `clone` syscall wedges them. Mitigation (single-threaded BLAS via spawn-side env) is planned for v0.16.39; until confirmed, tools importing numpy/pandas may need to avoid the sandboxed executor.
+- **numpy/OpenBLAS hang under the sandbox (RC-8) — MITIGATED as of v0.16.39**: Custom tools importing numpy or pandas used to hang under the sandbox's seccomp `clone` restriction (OpenBLAS thread pools at import time). v0.16.39 pins `OPENBLAS_NUM_THREADS=1` and `OMP_NUM_THREADS=1` in sandboxed tool environments. **Confirmed live on v0.16.39**: a sandboxed custom tool importing numpy 2.3.2 and computing a 100x1000 array sum completes in seconds under Landlock. If you still see hangs, report them.
 
 ## Known security holes
 
@@ -370,7 +370,7 @@ pytest tests/integration_test_local_model_agent.py -v
 - **L-8 — Landlock network rules are not enforced on Docker Desktop** (the health endpoint reports this honestly as `landlock_net_rules_enforced: false`); TCP restrictions currently rely on seccomp. **Plainly: with L-8 unresolved, sandboxed tools can still CONNECT to the localhost API — after v0.16.38, authentication is the only thing stopping them.**
 - **L-9 — seccomp filter coverage.**
 - **Approval run-scoping (RC-7).** Approval binding matches `tool_call_id` only, with no run_id check; the last-two-messages gate is the only temporal scope.
-- **numpy/OpenBLAS sandbox hang (RC-8).** Custom tools that import numpy or pandas can hang under the sandbox's seccomp `clone` restriction, because OpenBLAS starts thread pools. See [Known issues](#known-issues).
+- **numpy/OpenBLAS sandbox hang (RC-8) — mitigated in v0.16.39.** Sandboxed tools now run with single-threaded BLAS; confirmed live (numpy 2.3.2 import + compute under Landlock). See [Known issues](#known-issues).
 
 ### Canary note
 
