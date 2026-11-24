@@ -1,5 +1,16 @@
 # LettaLocal dependency advisory baseline
-# Generated 2026-11-24 against uv export --frozen --no-dev (all extras), the container's install set.
+#
+# Counting rule (the .40 plan review, change 1 — every later delta uses this rule):
+#   Tool: pip-audit (latest at generation time), requirement mode against a pinned export.
+#   Export: uv export --format requirements-txt --frozen --no-hashes --no-dev --all-extras
+#           (the container's install set at generation time).
+#   Unit: one line per advisory ID AS REPORTED BY pip-audit (GHSA or CVE or PYSEC, whatever
+#         the tool emits), case-normalized. Aliases are NOT merged: if a future scan reports
+#         the same issue under a different alias, it counts as new and fails the gate —
+#         deliberate, the gate fails toward scrutiny, never toward silence.
+#   Dedup: the same ID appearing for multiple packages (or twice for one) counts once.
+#   Date: 2026-11-24.
+#
 # Gate: the dependency scan ignores these IDs and FAILS on any NEW fixable advisory.
 # This file may only shrink. Adding an entry requires a justification comment on the line above it:
 #   what it is, why it is not reachable or fixable yet, and when it is revisited.
