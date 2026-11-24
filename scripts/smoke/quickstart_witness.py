@@ -35,7 +35,15 @@ response = client.agents.messages.create(
     agent_id=agent.id,
     messages=[{"role": "user", "content": "Hello! Reply with the single word: ready"}],
 )
-texts = [c.text for m in response.messages for c in (m.content or []) if getattr(c, "type", "") == "text" and getattr(c, "text", "")]
+# Not every message type carries content (ReasoningMessage doesn't) — read defensively.
+texts = []
+for m in response.messages:
+    content = getattr(m, "content", None)
+    if not content:
+        continue
+    for c in content:
+        if getattr(c, "type", "") == "text" and getattr(c, "text", None):
+            texts.append(c.text)
 print(f"MESSAGE_RECEIVED: {len(response.messages)} messages, {len(texts)} text chunks")
 if not texts:
     print("FAIL: no assistant text in response")
