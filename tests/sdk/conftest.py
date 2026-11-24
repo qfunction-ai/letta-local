@@ -34,7 +34,10 @@ def server_url() -> str:
         deadline = time.time() + timeout_seconds
         while time.time() < deadline:
             try:
-                resp = requests.get(url + "/v1/health")
+                # timeout=5: uvicorn binds its socket before app startup
+                # completes; if startup fails the poll can connect to the
+                # lingering socket and park forever without this.
+                resp = requests.get(url + "/v1/health", timeout=5)
                 if resp.status_code < 500:
                     break
             except requests.exceptions.RequestException:
