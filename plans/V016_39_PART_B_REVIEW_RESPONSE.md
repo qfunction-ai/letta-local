@@ -29,7 +29,7 @@ R-5 (secret-length floor + PG-password component), R-6 (password-file O_CREAT mo
 
 - v039 witness suite: 48 passed (46 + 2 new B-12 hot-path tests).
 - Rig on the R-1-fixed image: **22/22 PASS** (image built at `e6fedaa1e`; check 20 full attack chain CLOSED, check 21 quick-start witness green).
-- Full-suite FAILED-set diff vs matched baseline: pending, runs after the rig (sequential, avoids CPU contention with the rig's LLM checks).
+- Full-suite FAILED-set diff vs the pre-fix .39 run: **byte-identical** (zero new failures). 115F/1427P/1207E; pass delta +17 fully reconciled (+11 B-3 REV4 gate tests and +4 B-13 doc-drift guards added after the original run, +2 new B-12 hot-path witnesses — all pass).
 - CI growth witness: pending fast-forward (see R-3 above).
 
 **Request:** diff-only re-check of `066dad74e..8dbce13a0` (merge resolution, R-1/R-2/R-3 code, baseline regen, guard allowlist, archives check). Tag sequence after your pass: fast-forward main → CI growth witness (bad-addition push, then revert) → tag v0.16.39 → CI watch → published-image rig re-run → digest in evidence.
