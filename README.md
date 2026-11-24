@@ -73,9 +73,10 @@ alembic upgrade head
 
 ### 3. Start a local inference server
 
-Ollama:
+Ollama (one chat model, one embedding model):
 ```bash
 ollama pull phi3:mini
+ollama pull embeddinggemma
 ollama serve
 ```
 
@@ -87,7 +88,10 @@ vllm serve Qwen/Qwen2.5-1.5B-Instruct --port 9000 \
 
 ### 4. Start the Letta server
 
+Secure mode is on by default (v0.16.38+): the server requires a password. Set one and pass it to every client:
+
 ```bash
+LETTA_SERVER_PASSWORD="my-local-password" \
 LETTA_PG_URI="postgresql+asyncpg://letta:letta@localhost:5433/letta" \
 python -c "from letta.server.rest_api.app import start_server; start_server(port=8383)"
 ```
@@ -97,13 +101,13 @@ python -c "from letta.server.rest_api.app import start_server; start_server(port
 ```python
 from letta_client import Letta
 
-client = Letta(base_url="http://localhost:8383")
+client = Letta(base_url="http://localhost:8383", api_key="my-local-password")
 
-# Create an agent using a local model
+# Create an agent using local models (no cloud API keys)
 agent = client.agents.create(
     name="my-local-agent",
     model="ollama/phi3:mini",  # or "vllm/Qwen/Qwen2.5-1.5B-Instruct"
-    embedding="letta/letta-free",
+    embedding="ollama/embeddinggemma",
 )
 
 # Send a message

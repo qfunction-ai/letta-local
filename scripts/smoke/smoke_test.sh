@@ -819,6 +819,28 @@ else
 fi
 
 
+# ---------------------------------------------------------------- check 21
+# check 21 (B-13): README quick-start witness. Runs the actual quick-start code
+# path (password auth + LOCAL embedding model) against the rig server. The
+# README must stay runnable: password-less clients 401 under secure mode, and
+# the removed upstream cloud embedding preset breaks agent creation.
+echo "== check 21: README quick-start witness (B-13) =="
+QS_PY="python3"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+if [ -x "${REPO_ROOT}/.venv/bin/python" ]; then QS_PY="${REPO_ROOT}/.venv/bin/python"; fi
+if LETTA_BASE_URL="${BASE}" LETTA_SERVER_PASSWORD="${SMOKE_PASSWORD}" \
+   SMOKE_MODEL="${SMOKE_MODEL}" SMOKE_EMBEDDING="${SMOKE_EMBEDDING}" \
+   "${QS_PY}" "${REPO_ROOT}/scripts/smoke/quickstart_witness.py" > /tmp/rig_qs_witness.log 2>&1; then
+  if grep -q "QUICKSTART_WITNESS_PASS" /tmp/rig_qs_witness.log; then
+    ok "21. README quick-start witness (password auth + local embedding)"
+  else
+    bad "21. README quick-start witness (script exited 0 without PASS marker)"
+  fi
+else
+  bad "21. README quick-start witness ($(tail -1 /tmp/rig_qs_witness.log 2>/dev/null))"
+fi
+
+
 echo "== check 8: delete agent =="
 R8="$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "${BASE}/v1/agents/${AGENT_ID}")"
 if [ "${R8}" = "200" ] || [ "${R8}" = "204" ]; then

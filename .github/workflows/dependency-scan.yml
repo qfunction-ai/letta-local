@@ -1,7 +1,8 @@
-# B-3 (v0.16.39): dependency vulnerability scanning.
+# B-3 (v0.16.39): baseline-gated dependency vulnerability scanning.
 # pip-audit against the uv.lock export (deterministic — not the live env).
-# A vulnerability WITH an available fix fails the build; one WITHOUT a fix
-# is reported (README known-issues records it) but does not fail.
+# Advisories recorded in security/dependency-baseline.txt are accepted.
+# A NEW advisory with a fix version fails the build; without a fix it warns.
+# The baseline may only shrink — uncommented additions fail the growth check.
 name: Dependency Scan
 
 on:
@@ -19,6 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # growth check needs the base ref's baseline
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -31,32 +34,43 @@ jobs:
       - name: Export lockfile to requirements
         run: uv export --format requirements-txt --frozen --no-hashes --no-dev -o /tmp/requirements.txt
 
-      - name: Audit dependencies
+      - name: Build pip-audit ignore flags from baseline
         run: |
+          FLAGS=""
+          while read -r id; do
+            case "$id" in ""|\#*) continue;; esac
+            FLAGS="$FLAGS --ignore-vuln $id"
+          done < security/dependency-baseline.txt
+          echo "IGNORE_FLAGS<<EOF" >> "$GITHUB_ENV"
+          echo "$FLAGS" >> "$GITHUB_ENV"
+          echo "EOF" >> "$GITHUB_ENV"
+
+      - name: Audit dependencies (full, for the record)
+        run: pip-audit -r /tmp/requirements.txt --format json -o /tmp/audit_full.json || true
+
+      - name: Audit dependencies (gated)
+        run: |
+          # pip-audit exits 1 when it finds (non-ignored) vulnerabilities but
+          # still writes the JSON output; the gate script classifies whatever
+          # it finds (new fixable fails, new unfixable warns).
           set +e
-          pip-audit -r /tmp/requirements.txt --format json -o /tmp/audit.json
+          pip-audit -r /tmp/requirements.txt $IGNORE_FLAGS --format json -o /tmp/audit.json
           AUDIT_EXIT=$?
           set -e
-          if [ $AUDIT_EXIT -eq 0 ]; then
-            echo "pip-audit: no known vulnerabilities."
-            exit 0
-          fi
-          python3 - << 'PYEOF'
-          import json, sys
-          data = json.load(open("/tmp/audit.json"))
-          fixable, unfixable = [], []
-          for dep in data.get("dependencies", []):
-              for vuln in dep.get("vulns", []):
-                  entry = f"{dep.get('name')}=={dep.get('version')}: {vuln.get('id')} ({vuln.get('description', '')[:120]})"
-                  (fixable if vuln.get("fix_versions") else unfixable).append(entry)
-          if unfixable:
-              print("::warning::Vulnerabilities with NO fix available (reported, not failing):")
-              for e in unfixable:
-                  print(f"::warning::  {e}")
-          if fixable:
-              print("::error::Vulnerabilities with fixes available — update the lockfile:")
-              for e in fixable:
-                  print(f"::error::  {e}")
-              sys.exit(1)
-          print("No fixable vulnerabilities.")
-          PYEOF
+          echo "pip-audit exit: ${AUDIT_EXIT}"
+
+      - name: Baseline growth check + gate
+        run: |
+          git show origin/main:security/dependency-baseline.txt > /tmp/baseline_head.txt 2>/dev/null || cp security/dependency-baseline.txt /tmp/baseline_head.txt
+          python3 scripts/dependency_scan_gate.py \
+            --audit /tmp/audit.json \
+            --baseline security/dependency-baseline.txt \
+            --growth-check \
+            --head-baseline /tmp/baseline_head.txt
+
+      - name: Record full audit artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-audit
+          path: /tmp/audit_full.json
