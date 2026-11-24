@@ -137,7 +137,7 @@ async def test_agent_message_stored_in_clickhouse(server: SyncServer, actor, cli
         CreateAgent(
             name=f"clickhouse_agent_{uuid.uuid4().hex[:8]}",
             llm_config=llm_config,
-            embedding_config=EmbeddingConfig.default_config(model_name="letta"),
+            embedding_config=EmbeddingConfig.default_config(model_name="text-embedding-3-small", provider="openai"),
         ),
         actor=actor,
     )
@@ -307,7 +307,7 @@ async def test_cache_tokens_stored_for_anthropic(server: SyncServer, actor, clic
         CreateAgent(
             name=f"cache_test_agent_{uuid.uuid4().hex[:8]}",
             llm_config=llm_config,
-            embedding_config=EmbeddingConfig.default_config(model_name="letta"),
+            embedding_config=EmbeddingConfig.default_config(model_name="text-embedding-3-small", provider="openai"),
         ),
         actor=actor,
     )

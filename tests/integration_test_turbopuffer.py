@@ -111,7 +111,7 @@ def disable_turbopuffer():
 @pytest.fixture
 def sample_embedding_config():
     """Provide a sample embedding configuration"""
-    return EmbeddingConfig.default_config(model_name="letta")
+    return EmbeddingConfig.default_config(model_name="text-embedding-3-small", provider="openai")
 
 
 async def wait_for_embedding(

@@ -14,6 +14,7 @@ from sqlalchemy import text
 
 import letta.orm
 from alembic import op
+from letta.constants import DEFAULT_EMBEDDING_CHUNK_SIZE
 from letta.schemas.embedding_config import EmbeddingConfig
 
 # revision identifiers, used by Alembic.
@@ -30,8 +31,18 @@ def upgrade() -> None:
     # step 2: backfill existing archives with embedding configs in batches
     connection = op.get_bind()
 
-    # default embedding config for archives without passages
-    default_config = EmbeddingConfig.default_config(model_name="letta")
+    # default embedding config for archives without passages.
+    # v0.16.39 (B-2): the "letta" upstream preset was removed from
+    # EmbeddingConfig.default_config; the values are inlined here so the
+    # migration stays runnable and writes exactly what it always wrote.
+    # Migrations must not depend on mutable schema helpers.
+    default_config = EmbeddingConfig(
+        embedding_endpoint="https://embeddings.letta.com/",
+        embedding_model="letta-free",
+        embedding_dim=1536,
+        embedding_chunk_size=DEFAULT_EMBEDDING_CHUNK_SIZE,
+        embedding_endpoint_type="openai",
+    )
     default_embedding_config = default_config.model_dump()
 
     batch_size = 100

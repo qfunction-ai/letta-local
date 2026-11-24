@@ -1148,7 +1148,7 @@ async def test_update_agent(server: SyncServer, comprehensive_test_agent_fixture
         tags=["c", "d"],
         system="train system",
         llm_config=LLMConfig.default_config("gpt-4o-mini"),
-        embedding_config=EmbeddingConfig.default_config(model_name="letta"),
+        embedding_config=EmbeddingConfig.default_config(model_name="text-embedding-3-small", provider="openai"),
         message_ids=["10", "20"],
         metadata={"train_key": "train_value"},
         tool_exec_environment_variables={"test_env_var_key_a": "a", "new_tool_exec_key": "n"},

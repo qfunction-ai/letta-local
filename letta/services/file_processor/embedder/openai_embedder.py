@@ -28,10 +28,12 @@ class OpenAIEmbedder(BaseEmbedder):
         # OpenAI embedder uses the native vector db (PostgreSQL)
         # self.vector_db_type already set to VectorDBProvider.NATIVE by parent
 
-        self.default_embedding_config = (
-            EmbeddingConfig.default_config(model_name="text-embedding-3-small", provider="openai")
-            if model_settings.openai_api_key
-            else EmbeddingConfig.default_config(model_name="letta")
+        # v0.16.39 (B-2): the "letta" free-embedding upstream preset was
+        # removed. Without an OpenAI key the openai preset is still used as
+        # the default shape; embedding calls fail at request time with a
+        # clear auth error rather than pointing at a removed endpoint.
+        self.default_embedding_config = EmbeddingConfig.default_config(
+            model_name="text-embedding-3-small", provider="openai"
         )
         self.embedding_config = embedding_config or self.default_embedding_config
 
