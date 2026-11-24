@@ -188,6 +188,12 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                     "NO_COLOR": "1",
                     "TERM": "dumb",
                     "PYTHONUNBUFFERED": "1",
+                    # v0.16.39 (B-7, RC-8): numpy/pandas imports wedge under
+                    # the seccomp clone restriction because OpenBLAS starts
+                    # thread pools at import time. Single-threaded BLAS
+                    # avoids the pool spawn entirely.
+                    "OPENBLAS_NUM_THREADS": "1",
+                    "OMP_NUM_THREADS": "1",
                     # The sandboxed child must not configure file logging:
                     # letta.log's import-time dictConfig opens the logfile,
                     # which Landlock denies (writes outside the exec dir) —

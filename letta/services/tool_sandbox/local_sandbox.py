@@ -132,6 +132,12 @@ class AsyncToolSandboxLocal(AsyncToolSandboxBase):
                     "NO_COLOR": "1",
                     "TERM": "dumb",
                     "PYTHONUNBUFFERED": "1",
+                    # v0.16.39 (B-7, RC-8): same as the Landlock executor —
+                    # single-threaded BLAS avoids the OpenBLAS thread-pool
+                    # spawn that wedges numpy/pandas imports when clone is
+                    # restricted by the sandbox.
+                    "OPENBLAS_NUM_THREADS": "1",
+                    "OMP_NUM_THREADS": "1",
                 }
             )
 

@@ -577,7 +577,7 @@ fi
 echo "== check 20: L-3 localhost REST tripwire (full attack) =="
 # Version gate (F1): computed BEFORE the attack so every sub-check can use it.
 R20_GATE="$(python3 - "${BASE}" <<'PYGATE'
-import json, re, sys, urllib.request
+import json, os, re, sys, urllib.request
 base = sys.argv[1]
 m = re.search(r'__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"', open("letta/__init__.py").read())
 if not m:
@@ -588,6 +588,16 @@ server_raw = json.loads(urllib.request.urlopen(req).read()).get("version", "")
 if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", server_raw):
     print("BAD:server-version-not-strict-numeric:" + server_raw); raise SystemExit
 server = tuple(int(x) for x in server_raw.split("."))
+# B-11: optional RIG_TARGET pins the expected server version for release
+# runs. When set, any mismatch is a hard FAIL — the release must be tested
+# against the exact image it ships. When unset, behavior is unchanged
+# (the unfixed-first protocol runs pre-release images deliberately).
+rig_target = os.environ.get("RIG_TARGET", "").strip()
+if rig_target:
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", rig_target):
+        print("BAD:rig-target-not-strict-numeric:" + rig_target); raise SystemExit
+    if server != tuple(int(x) for x in rig_target.split(".")):
+        print("BAD:rig-target-mismatch:server=" + server_raw + ",expected=" + rig_target); raise SystemExit
 # Classify by the SERVER version alone: the unfixed-first protocol
 # deliberately runs a pre-.38 image against this bumped checkout, so
 # server==target equality is wrong here. The checkout literal must still
@@ -603,6 +613,10 @@ case "${R20_GATE}" in
     bad "20. L-3 tripwire (server reports non-numeric version — ${R20_GATE#BAD:server-version-not-strict-numeric:})" ;;
   "BAD:image-version-mismatch:"*)
     bad "20. L-3 tripwire (image version mismatch — ${R20_GATE#BAD:image-version-mismatch:})" ;;
+  "BAD:rig-target-not-strict-numeric:"*)
+    bad "20. L-3 tripwire (RIG_TARGET is not strict x.y.z — ${R20_GATE#BAD:rig-target-not-strict-numeric:})" ;;
+  "BAD:rig-target-mismatch:"*)
+    bad "20. L-3 tripwire (server version mismatch — ${R20_GATE#BAD:rig-target-mismatch:})" ;;
   *)
   # 20-pre: the server under test MUST be in secure mode (W3 ruling).
   R20_INSECURE="$(command curl -s -o /dev/null -w "%{http_code}" "${BASE}/v1/agents" -H "User-Agent: letta-client/1.0")"
