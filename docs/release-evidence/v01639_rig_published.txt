@@ -1,0 +1,61 @@
+== LettaLocal smoke test ==
+   image: ghcr.io/qfunction-ai/letta-local:0.16.39
+   port:  8284
+   model: ollama/nemotron-3-nano:4b
+
+== starting container ==
+ Network letta-smoke_default Creating 
+ Network letta-smoke_default Creating 
+ Volume letta-smoke_smoke-data Creating 
+ Volume letta-smoke_smoke-data Creating 
+ Volume letta-smoke_smoke-data Created 
+ Volume letta-smoke_smoke-data Created 
+ Network letta-smoke_default Created 
+ Network letta-smoke_default Created 
+ Container letta-smoke-letta-1 Creating 
+ Container letta-smoke-letta-1 Created 
+ Container letta-smoke-letta-1 Starting 
+ Container letta-smoke-letta-1 Started 
+  PASS  1. server healthy
+== check 2: create agent ==
+  PASS  2. create agent (agent-3fe94bc3-2089-444f-9026-b00c85eb2819)
+== check 3: non-streaming message ==
+  PASS  3. non-streaming message
+== check 4: streaming message ==
+  PASS  4. streaming message
+== check 4.5: forced tool call (run_first rule) ==
+  PASS  4.5 forced tool call (tool_calls rows exist for delete cascade)
+== check 4.7: canary redacted in stream ==
+  PASS  4.7 canary redacted in stream
+== check 4.9: prompt-mode no silent death ==
+  PASS  4.9 prompt-mode no silent death (reasoning_message tool_call_message tool_return_message reasoning_message tool_call_message tool_return_message reasoning_message assistant_message)
+== check 4.95: file tools under Landlock sandbox ==
+  PASS  4.95 file tools under Landlock (write staged + promoted)
+== check 5: capture -> reset-messages -> GET count ==
+  PASS  5. reset-messages (19 -> 1 messages)
+== check 6: policy PUT (valid contains-rule, invalid regex) ==
+  PASS  6a. policy PUT with contains operator
+  PASS  6b. invalid regex -> 400 naming the rule
+== check 6c: loop_detection round-trip + window_size 422 ==
+  PASS  6c. loop_detection round-trip + window_size 422
+== check 7: policy/evaluate denies execute_code ==
+  PASS  7. policy/evaluate denies execute_code
+== check 7b: run-abort (cancel in-flight run) ==
+  PASS  7b. run-abort (cancelled, notice persisted, agent usable, idempotent)
+== check 16: canary block read-only over REST ==
+  PASS  16. canary block read-only over REST (value=400 desc=400 core=400 delete=200)
+== check 17: policy audit event + deny-not-shadowed-by-audit ==
+  PASS  17. policy audit event + deny fires under audit shadow (events=1)
+== check 18: health sandbox fields ==
+  PASS  18. health sandbox fields present
+== check 19: prompt-mode canary tool-call leak ==
+  PASS  19. prompt-mode canary tool-call leak (no raw canary; redacted=1)
+== check 20: L-3 localhost REST tripwire (full attack) ==
+  PASS  20a. R-1 API password-env-var write rejected (400)
+  PASS  20. L-3 tripwire CLOSED (full attack blocked: ENV_LEAKS:none;;ENV_DBSET:no;;NOCRED:401;;CRED:none-found;;PROC:blocked;;FILE:blocked)
+== check 21: README quick-start witness (B-13) ==
+  PASS  21. README quick-start witness (password auth + local embedding)
+== check 8: delete agent ==
+  PASS  8. delete agent
+
+== smoke: 22 passed, 0 failed ==
