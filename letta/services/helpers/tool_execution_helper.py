@@ -112,7 +112,8 @@ def ensure_pip_is_up_to_date(python_exec: str, env: Optional[Dict[str, str]] = N
         env (dict, optional): Environment variables to pass to subprocess.
     """
     run_subprocess(
-        [python_exec, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"],
+        # B-12: wheel-only here too — this is a pip install path like any other
+        [python_exec, "-m", "pip", "install", "--only-binary=:all:", "--upgrade", "pip", "setuptools", "wheel"],
         env=env,
         fail_msg="Failed to upgrade pip, setuptools, and wheel.",
     )
@@ -221,7 +222,9 @@ def create_venv_for_local_sandbox(sandbox_dir_path: str, venv_path: str, env: Di
         requirements_txt_path = os.path.join(sandbox_dir_path, "requirements.txt")
         if os.path.isfile(requirements_txt_path):
             logger.info(f"Installing packages from requirements file: {requirements_txt_path}")
-            subprocess.run([pip_path, "install", "-r", requirements_txt_path], env=env, check=True)
+            # B-12 (R-1 fix): wheels only on this path too — sdist installs run
+            # package build code as the server user, unsandboxed.
+            subprocess.run([pip_path, "install", "--only-binary=:all:", "-r", requirements_txt_path], env=env, check=True)
             logger.info("Successfully installed packages from requirements.txt")
         else:
             logger.warning("No requirements.txt file found. Skipping package installation.")

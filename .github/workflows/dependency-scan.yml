@@ -15,6 +15,9 @@ on:
 permissions:
   contents: read
 
+env:
+  GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+
 jobs:
   pip-audit:
     runs-on: ubuntu-latest
@@ -32,7 +35,10 @@ jobs:
         run: pipx install pip-audit
 
       - name: Export lockfile to requirements
-        run: uv export --format requirements-txt --frozen --no-hashes --no-dev -o /tmp/requirements.txt
+        # R-2 (Part B review): --all-extras — the scan must match what the
+        # container installs (Dockerfile: uv sync --frozen --no-dev --all-extras).
+        # Without it CI saw 251 pins vs the container's 342.
+        run: uv export --format requirements-txt --frozen --no-hashes --no-dev --all-extras -o /tmp/requirements.txt
 
       - name: Build pip-audit ignore flags from baseline
         run: |
@@ -46,7 +52,9 @@ jobs:
           echo "EOF" >> "$GITHUB_ENV"
 
       - name: Audit dependencies (full, for the record)
-        run: pip-audit -r /tmp/requirements.txt --format json -o /tmp/audit_full.json || true
+        # --no-deps: the export is the fully-pinned closure; audit exactly the
+        # pins, no re-resolution.
+        run: pip-audit -r /tmp/requirements.txt --no-deps --format json -o /tmp/audit_full.json || true
 
       - name: Audit dependencies (gated)
         run: |
@@ -54,19 +62,31 @@ jobs:
           # still writes the JSON output; the gate script classifies whatever
           # it finds (new fixable fails, new unfixable warns).
           set +e
-          pip-audit -r /tmp/requirements.txt $IGNORE_FLAGS --format json -o /tmp/audit.json
+          pip-audit -r /tmp/requirements.txt --no-deps $IGNORE_FLAGS --format json -o /tmp/audit.json
           AUDIT_EXIT=$?
           set -e
           echo "pip-audit exit: ${AUDIT_EXIT}"
 
       - name: Baseline growth check + gate
+        # R-3 (Part B review): after actions/checkout on a push, origin/main IS
+        # the pushed commit — comparing against it compares the baseline to
+        # itself and the growth check can never fail. On push, compare against
+        # the event's previous SHA. Schedule/dispatch have no "before" — skip
+        # the growth check there (the gate itself still runs).
         run: |
-          git show origin/main:security/dependency-baseline.txt > /tmp/baseline_head.txt 2>/dev/null || cp security/dependency-baseline.txt /tmp/baseline_head.txt
+          GROWTH_ARGS=""
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ -n "$GITHUB_EVENT_BEFORE" ] && [ "$GITHUB_EVENT_BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            git show "$GITHUB_EVENT_BEFORE:security/dependency-baseline.txt" > /tmp/baseline_head.txt
+            GROWTH_ARGS="--growth-check --head-baseline /tmp/baseline_head.txt"
+            echo "growth check: comparing against $GITHUB_EVENT_BEFORE"
+          else
+            echo "no previous commit (schedule/dispatch/new branch): growth check skipped, gate still runs"
+          fi
           python3 scripts/dependency_scan_gate.py \
             --audit /tmp/audit.json \
             --baseline security/dependency-baseline.txt \
-            --growth-check \
-            --head-baseline /tmp/baseline_head.txt
+            --full-audit /tmp/audit_full.json \
+            $GROWTH_ARGS
 
       - name: Record full audit artifact
         if: always()

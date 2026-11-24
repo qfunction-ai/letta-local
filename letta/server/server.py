@@ -433,8 +433,13 @@ class SyncServer(object):
             from letta.orm.agent import Agent as AgentModel
             from letta.server.db import db_registry
 
-            domain = "letta" + ".com"  # assembled so the domain-sweep guard does not flag this checker itself
+            # This literal mention of the removed upstream domain is the ONE
+            # allowlisted exception in the B-2 domain-sweep guard
+            # (tests/test_v039_b02_domain_sweep.py) — the exception lives
+            # where the rule lives, not hidden in string assembly.
+            domain = "letta.com"
             flagged = []
+            archive_flagged = []
             async with db_registry.async_session() as session:
                 result = await session.execute(select(AgentModel.id, AgentModel.name, AgentModel.llm_config, AgentModel.embedding_config))
                 for row in result.all():
@@ -447,6 +452,18 @@ class SyncServer(object):
                             reasons.append(label)
                     if reasons:
                         flagged.append(f"{row.name} ({row.id}): {', '.join(reasons)}")
+                # Part B review nit: archives carry embedding_config too —
+                # migration f6cd5a1e519d correctly preserved the dead endpoint
+                # in historical archive configs, so report those as well.
+                from letta.orm.archive import Archive as ArchiveModel
+
+                archive_result = await session.execute(select(ArchiveModel.id, ArchiveModel.name, ArchiveModel.embedding_config))
+                for row in archive_result.all():
+                    if row.embedding_config is None:
+                        continue
+                    rendered = row.embedding_config.model_dump() if hasattr(row.embedding_config, "model_dump") else row.embedding_config
+                    if domain in str(rendered):
+                        archive_flagged.append(f"{row.name} ({row.id})")
             if flagged:
                 logger.warning(
                     "v0.16.39 B-2 stored-agent check: %d agent(s) have stored configs pointing at removed upstream "
@@ -454,6 +471,14 @@ class SyncServer(object):
                     "(This check reports only; it never rewrites stored configs.)",
                     len(flagged),
                     "; ".join(flagged),
+                )
+            if archive_flagged:
+                logger.warning(
+                    "v0.16.39 B-2 stored-archive check: %d archive(s) have embedding configs pointing at removed "
+                    "upstream endpoints and will fail on next use: %s. Recreate these archives with local provider "
+                    "configs. (This check reports only; it never rewrites stored configs.)",
+                    len(archive_flagged),
+                    "; ".join(archive_flagged),
                 )
         except Exception:
             # report-only: never block startup

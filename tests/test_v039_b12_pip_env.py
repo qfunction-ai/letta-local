@@ -106,3 +106,112 @@ def test_sdist_build_code_refused(tmp_path):
     with pytest.raises(Exception):
         teh.install_pip_requirements_for_sandbox(local_configs=configs, env=teh.build_pip_subprocess_env())
     assert not marker.exists(), "sdist build code ran during install — wheel-only violated"
+
+
+# ---------------------------------------------------------------------------
+# R-1 (Part B review): the HOT PATH — _prepare_venv — must use the pip
+# allowlist env, not the tool-execution env. The original B-12 wiring covered
+# three operator-triggered call sites; the path every pip_requirements tool
+# actually takes is _prepare_venv in both sandboxes. These witnesses drive it.
+# ---------------------------------------------------------------------------
+
+POISON_ENV = {
+    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+    "LETTA_SERVER_PASSWORD": "super-secret-pw-123",
+    "LETTA_PG_URI": "postgresql://u:secretpw@localhost/db",
+    "MY_AGENT_SECRET_TOKEN": "agent-tool-secret-xyz",
+}
+
+
+class _CapturedSubprocess:
+    """Records every (cmd, env) pair instead of running anything."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args[0] if args else kwargs.get("command"), kwargs.get("env")))
+        if args and args[0] and args[0][0] == "python3":
+            # venv.create path — no-op
+            return None
+        return subprocess.CompletedProcess(args[0] if args else [], 0, "", "")
+
+
+@pytest.mark.asyncio
+async def test_prepare_venv_hot_path_uses_pip_allowlist_env(monkeypatch, tmp_path):
+    """Drive LocalSandbox._prepare_venv with a POISONED tool env: no secret may
+    reach any pip/venv subprocess, HOME must be a fresh temp dir, and the
+    install command must be wheel-only."""
+    from letta.services.tool_sandbox.local_sandbox import AsyncToolSandboxLocal
+
+    captured = _CapturedSubprocess()
+    monkeypatch.setattr(teh.subprocess, "run", captured)
+    monkeypatch.setattr(teh, "run_subprocess", captured)
+    # create_venv_for_local_sandbox checks os.path.isdir(venv) — make it exist
+    venv_path = tmp_path / "venv"
+    venv_path.mkdir()
+    (venv_path / "bin").mkdir()
+    # find_python_executable requires the binary to exist
+    (venv_path / "bin" / "python3").write_text("#!/bin/sh\n")
+    (venv_path / "bin" / "pip").write_text("#!/bin/sh\n")
+
+    sandbox = AsyncToolSandboxLocal.__new__(AsyncToolSandboxLocal)
+    sandbox.force_recreate_venv = False
+    sandbox.tool = None
+
+    configs = LocalSandboxConfig(
+        sandbox_dir=str(tmp_path),
+        venv_name="venv",
+        use_venv=True,
+        pip_requirements=[PipRequirement(name="numpy")],
+    )
+
+    await sandbox._prepare_venv(configs, str(venv_path), dict(POISON_ENV))
+
+    assert captured.calls, "expected pip/venv subprocess calls"
+    for cmd, env in captured.calls:
+        assert env is not None
+        for k, v in POISON_ENV.items():
+            if k == "PATH":
+                continue
+            assert env.get(k) != v, f"secret {k} leaked to subprocess env"
+            assert v not in (env.get(k) or ""), f"secret value of {k} leaked"
+        assert env.get("HOME", "").startswith(tempfile.gettempdir()), (
+            "pip subprocess HOME must be a fresh temp dir, not the server user's home"
+        )
+    installs = [cmd for cmd, _ in captured.calls if cmd and "pip" in cmd and "install" in cmd]
+    assert installs, "expected a pip install call"
+    for cmd in installs:
+        assert any("--only-binary=:all:" == part for c in cmd for part in (c if isinstance(c, list) else [c])), (
+            "hot-path pip install must be wheel-only"
+        )
+
+
+def test_source_guard_prepare_venv_never_passes_tool_env_to_pip():
+    """AST guard (R-1): both _prepare_venv bodies must route pip/venv calls
+    through build_pip_subprocess_env, never the raw tool env parameter."""
+    import ast
+
+    for mod_path, cls_name in [
+        ("letta/services/tool_sandbox/local_sandbox.py", "AsyncToolSandboxLocal"),
+        ("letta/services/tool_sandbox/landlock_sandbox.py", "AsyncToolSandboxLandlock"),
+    ]:
+        src = Path(__file__).resolve().parents[1] / mod_path
+        tree = ast.parse(src.read_text())
+        found = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_prepare_venv":
+                found = True
+                body_src = ast.unparse(node)
+                assert "build_pip_subprocess_env()" in body_src, (
+                    f"{mod_path}: _prepare_venv must build the pip allowlist env"
+                )
+                # no call inside _prepare_venv may pass env=env (the raw param)
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Call):
+                        for kw in sub.keywords:
+                            if kw.arg == "env" and isinstance(kw.value, ast.Name) and kw.value.id == "env":
+                                raise AssertionError(
+                                    f"{mod_path}: _prepare_venv passes the raw tool env to a subprocess call"
+                                )
+        assert found, f"{mod_path}: _prepare_venv not found"

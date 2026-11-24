@@ -16,6 +16,7 @@ from letta.schemas.sandbox_config import SandboxConfig
 from letta.schemas.tool import Tool
 from letta.schemas.tool_execution_result import ToolExecutionResult
 from letta.services.helpers.tool_execution_helper import (
+    build_pip_subprocess_env,
     create_venv_for_local_sandbox,
     find_python_executable,
     install_pip_requirements_for_sandbox,
@@ -164,7 +165,13 @@ class AsyncToolSandboxLocal(AsyncToolSandboxBase):
     async def _prepare_venv(self, local_configs, venv_path: str, env: Dict[str, str]):
         """
         Prepare virtual environment asynchronously (in a background thread).
+
+        B-12 (R-1 fix, Part B review): pip/venv subprocesses NEVER get the tool
+        execution env — it carries agent secrets, and it lacks HOME (pip would
+        resolve ~ to the server user's home). build_pip_subprocess_env() is the
+        allowlist env: no secrets, fresh temp HOME, PIP_* passthrough.
         """
+        pip_env = build_pip_subprocess_env()
         if self.force_recreate_venv or not await asyncio.to_thread(os.path.isdir, venv_path):
             sandbox_dir = os.path.expanduser(local_configs.sandbox_dir)
             log_event(name="start create_venv_for_local_sandbox", attributes={"venv_path": venv_path})
@@ -172,7 +179,7 @@ class AsyncToolSandboxLocal(AsyncToolSandboxBase):
                 create_venv_for_local_sandbox,
                 sandbox_dir_path=sandbox_dir,
                 venv_path=venv_path,
-                env=env,
+                env=pip_env,
                 force_recreate=self.force_recreate_venv,
             )
             log_event(name="finish create_venv_for_local_sandbox")
@@ -180,7 +187,7 @@ class AsyncToolSandboxLocal(AsyncToolSandboxBase):
         if local_configs.pip_requirements or (self.tool and self.tool.pip_requirements):
             log_event(name="start install_pip_requirements_for_sandbox", attributes={"local_configs": local_configs.model_dump_json()})
             await asyncio.to_thread(
-                install_pip_requirements_for_sandbox, local_configs, upgrade=True, user_install_if_no_venv=False, env=env, tool=self.tool
+                install_pip_requirements_for_sandbox, local_configs, upgrade=True, user_install_if_no_venv=False, env=pip_env, tool=self.tool
             )
             log_event(name="finish install_pip_requirements_for_sandbox", attributes={"local_configs": local_configs.model_dump_json()})
 

@@ -56,7 +56,7 @@ def check_growth(old_text: str, new_text: str) -> list:
     return sorted(i for i in new_ids - old_ids if i not in new_commented)
 
 
-def run_gate(audit_path: str, baseline_path: str) -> int:
+def run_gate(audit_path: str, baseline_path: str, full_audit_path: str = None) -> int:
     with open(audit_path) as f:
         data = json.load(f)
     with open(baseline_path) as f:
@@ -79,6 +79,23 @@ def run_gate(audit_path: str, baseline_path: str) -> int:
         print(f"::error::NEW advisory with a fix available — update the lockfile or justify+baseline it: {e}")
 
     print(f"baseline accepted: {baseline_hits} advisory hits; new fixable: {len(fixable)}; new unfixable: {len(unfixable)}")
+    # Part B review nit: the gated audit excludes every baseline ID (pip-audit
+    # --ignore-vuln), so its hit count is always 0 and proves nothing. The hit
+    # count that matters — how many advisories the baseline is actually
+    # absorbing — comes from the FULL audit.
+    if full_audit_path:
+        try:
+            with open(full_audit_path) as f:
+                full = json.load(f)
+            full_hits = sum(
+                1
+                for dep in full.get("dependencies", [])
+                for vuln in dep.get("vulns", [])
+                if (vuln.get("id") or "").upper() in baseline_ids
+            )
+            print(f"full-audit coverage: {full_hits} advisory records absorbed by the baseline")
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"::warning::could not read full audit for coverage count: {e}")
     return 1 if fixable else 0
 
 
@@ -86,6 +103,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--audit", required=True)
     ap.add_argument("--baseline", required=True)
+    ap.add_argument("--full-audit", default=None,
+                    help="path to the ungated audit JSON; used only to report how many records the baseline absorbs")
     ap.add_argument("--growth-check", action="store_true",
                     help="also verify the baseline did not grow with uncommented IDs (vs --head-baseline)")
     ap.add_argument("--head-baseline", default=None,
@@ -106,7 +125,7 @@ def main() -> int:
         if bad:
             return 1
 
-    return run_gate(args.audit, args.baseline)
+    return run_gate(args.audit, args.baseline, full_audit_path=args.full_audit)
 
 
 if __name__ == "__main__":
