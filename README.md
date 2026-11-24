@@ -355,7 +355,7 @@ pytest tests/integration_test_local_model_agent.py -v
 - **Correction factor placeholders**: `TOKEN_ESTIMATE_CORRECTION` values for specific model families (qwen, llama, etc.) are placeholders (`None`). They fall back to `DEFAULT_TOKEN_CORRECTION = 2.5` until a benchmark script measures real ratios. Live calibration makes this less critical — the first API response provides the real ratio.
 - **vLLM reasoning models**: vLLM doesn't expose model capability metadata like Ollama's `/api/show`. Reasoning models served via vLLM need `reasoning=True` set explicitly on agent creation. The `enable_reasoner` flag is not auto-detected for vLLM.
 - **numpy/OpenBLAS hang under the sandbox (RC-8) — MITIGATED as of v0.16.39**: Custom tools importing numpy or pandas used to hang under the sandbox's seccomp `clone` restriction (OpenBLAS thread pools at import time). v0.16.39 pins `OPENBLAS_NUM_THREADS=1` and `OMP_NUM_THREADS=1` in sandboxed tool environments. **Confirmed live on v0.16.39**: a sandboxed custom tool importing numpy 2.3.2 and computing a 100x1000 array sum completes in seconds under Landlock. If you still see hangs, report them.
-
+- **Third-party dependency advisories.** A dependency scan of the full container lockfile reports known advisories in third-party packages, several with fixed versions available. New advisories fail CI against a recorded baseline; a targeted upgrade of the dependencies that handle untrusted input (pypdf, pillow, aiohttp, urllib3) is the first item of v0.16.40.
 ## Known security holes
 
 **L-3, L-1 and L-2 affected every release up to and including v0.16.37, in every deployment. All three are closed as of v0.16.38 (shipped 2026-11-22). The holes below are the ones that remain.**
