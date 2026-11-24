@@ -1,0 +1,62 @@
+# B-3 (v0.16.39): dependency vulnerability scanning.
+# pip-audit against the uv.lock export (deterministic — not the live env).
+# A vulnerability WITH an available fix fails the build; one WITHOUT a fix
+# is reported (README known-issues records it) but does not fail.
+name: Dependency Scan
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: false
+
+      - name: Install pip-audit
+        run: pipx install pip-audit
+
+      - name: Export lockfile to requirements
+        run: uv export --format requirements-txt --frozen --no-hashes --no-dev -o /tmp/requirements.txt
+
+      - name: Audit dependencies
+        run: |
+          set +e
+          pip-audit -r /tmp/requirements.txt --format json -o /tmp/audit.json
+          AUDIT_EXIT=$?
+          set -e
+          if [ $AUDIT_EXIT -eq 0 ]; then
+            echo "pip-audit: no known vulnerabilities."
+            exit 0
+          fi
+          python3 - << 'PYEOF'
+          import json, sys
+          data = json.load(open("/tmp/audit.json"))
+          fixable, unfixable = [], []
+          for dep in data.get("dependencies", []):
+              for vuln in dep.get("vulns", []):
+                  entry = f"{dep.get('name')}=={dep.get('version')}: {vuln.get('id')} ({vuln.get('description', '')[:120]})"
+                  (fixable if vuln.get("fix_versions") else unfixable).append(entry)
+          if unfixable:
+              print("::warning::Vulnerabilities with NO fix available (reported, not failing):")
+              for e in unfixable:
+                  print(f"::warning::  {e}")
+          if fixable:
+              print("::error::Vulnerabilities with fixes available — update the lockfile:")
+              for e in fixable:
+                  print(f"::error::  {e}")
+              sys.exit(1)
+          print("No fixable vulnerabilities.")
+          PYEOF
