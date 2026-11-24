@@ -384,10 +384,6 @@ Agent creation payloads may include a `__canary__` block with a client-chosen va
 
 Letta archived the V1 server in August 2026 and now develops Letta Code, a separate architecture. This table describes how this fork diverged from the V1 server; it is not a comparison with Letta Code.
 
-## Lineage
-
-This code comes from the Letta V1 server (archived upstream; last upstream version 0.16.8). LettaLocal's history was re-rooted, so it shares no git history with upstream. Versions 0.16.9 and later are QFunction's own — upstream 0.16.x tags do not correspond to LettaLocal releases.
-
 | Area | Upstream | This fork |
 |------|----------|-----------|
 | Target | Cloud models (OpenAI, Anthropic) | Local inference servers |
@@ -406,6 +402,9 @@ This code comes from the Letta V1 server (archived upstream; last upstream versi
 | Exfiltration detection | None | Canary injection + output filtering |
 | Secret scanning | None | Entropy + regex via policy engine |
 | File tools | grep_files is a stub | grep_files implemented, sandbox staging dir for large output |
+## Lineage
+
+This code comes from the Letta V1 server (archived upstream; last upstream version 0.16.8). LettaLocal's history was re-rooted, so it shares no git history with upstream. Versions 0.16.9 and later are QFunction's own — upstream 0.16.x tags do not correspond to LettaLocal releases.
 
 ## Contributing
 
