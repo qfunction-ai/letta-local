@@ -12,6 +12,10 @@ relevant details.
 
 Do **not** open a public issue for security vulnerabilities.
 
+Letta does not accept security reports for the retired V1 server, so all
+LettaLocal reports go to QFunction through GitHub private vulnerability
+reporting.
+
 We aim to acknowledge reports promptly.
 
 ## Supported Versions

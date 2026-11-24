@@ -162,7 +162,7 @@ This fork does not use PR-gated merging. Instead:
 2. Push your branch to `qfunction-ai/letta-local` and send the diff for a reviewer pass.
 3. Once approved, the maintainer fast-forwards `main` to your branch and tags a release if one is warranted.
 
-Do not open pull requests against `letta-ai/letta` — that repository is unmaintained since 2026-08-05 and is not this project's upstream.
+Do not open pull requests against `letta-ai/letta`: Letta archived the V1 server there in August 2026, and it does not accept changes to it. Contribute to this repository instead.
 
 ## 6. 🔍 Review and Approval
 

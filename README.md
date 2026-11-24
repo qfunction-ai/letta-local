@@ -1,6 +1,6 @@
 # Letta Local
 
-An independently maintained fork of [Letta](https://github.com/letta-ai/letta), optimized for **local model inference**. QFunction maintains this fork, including all of its security fixes. The upstream Letta project is no longer maintained — there are no upstream merges.
+An independently maintained fork of [Letta's V1 API server](https://github.com/letta-ai/letta). Letta retired the V1 server in August 2026 and moved its active development to Letta Code, a different architecture. QFunction maintains this V1 lineage for self-hosted, local-model use, including all of its security fixes. There are no upstream merges.
 
 > **Security posture:** production-ready for trusted tools. Secure mode is **on by default**: the REST API requires password authentication, and sandboxed tool environments are allowlisted (no inherited server secrets). L-3, L-1 and L-2 are closed as of v0.16.38. Still open, each with a tracking ID: L-7, L-8, L-9, and approval run-scoping (RC-7). The numpy/OpenBLAS sandbox hang (RC-8) is mitigated as of v0.16.39. See [Known security holes](#known-security-holes).
 
@@ -382,7 +382,11 @@ Agent creation payloads may include a `__canary__` block with a client-chosen va
 
 ## Differences from upstream
 
-Upstream (letta-ai/letta) is unmaintained since 2026-08-05; this table describes the historical divergence point, not a moving target.
+Letta archived the V1 server in August 2026 and now develops Letta Code, a separate architecture. This table describes how this fork diverged from the V1 server; it is not a comparison with Letta Code.
+
+## Lineage
+
+This code comes from the Letta V1 server (archived upstream; last upstream version 0.16.8). LettaLocal's history was re-rooted, so it shares no git history with upstream. Versions 0.16.9 and later are QFunction's own — upstream 0.16.x tags do not correspond to LettaLocal releases.
 
 | Area | Upstream | This fork |
 |------|----------|-----------|

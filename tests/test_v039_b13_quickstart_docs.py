@@ -8,6 +8,8 @@ smoke rig check 21 (scripts/smoke/quickstart_witness.py).
 import re
 from pathlib import Path
 
+import pytest
+
 README = Path(__file__).resolve().parents[1] / "README.md"
 
 
@@ -50,3 +52,34 @@ def test_witness_script_matches_readme_defaults():
     witness = (Path(__file__).resolve().parents[1] / "scripts" / "smoke" / "quickstart_witness.py").read_text()
     assert "ollama/embeddinggemma" in witness
     assert "api_key=PASSWORD" in witness
+
+
+# ---------------------------------------------------------------------------
+# D-2 (final check): the "upstream is unmaintained" claim was removed by U-1
+# and then reappeared in two new places in the same batch. Guard it: upstream
+# Letta retired the V1 SERVER (archived August 2026) but is actively
+# developing Letta Code. Saying "upstream is unmaintained" is false.
+# ---------------------------------------------------------------------------
+
+_UPSTREAM_UNMAINTAINED_RE = re.compile(
+    r"(upstream|letta-ai/letta)[^.\n]{0,60}(unmaintained|no longer maintained)",
+    re.IGNORECASE,
+)
+
+
+@pytest.mark.parametrize(
+    "doc", ["README.md", "CONTRIBUTING.md", "SECURITY.md"]
+)
+def test_docs_do_not_claim_upstream_is_unmaintained(doc):
+    """README/CONTRIBUTING/SECURITY must not say upstream Letta is
+    unmaintained or no longer maintained. Upstream archived the V1 server
+    (August 2026) but actively develops Letta Code."""
+    repo_root = Path(__file__).resolve().parents[1]
+    text = (repo_root / doc).read_text()
+    m = _UPSTREAM_UNMAINTAINED_RE.search(text)
+    assert m is None, (
+        f"{doc} claims upstream Letta is unmaintained "
+        f"(match: {m.group(0)!r}). Upstream retired the V1 server but "
+        f"actively develops Letta Code. Say the V1 server is retired/"
+        f"archived, not that Letta is unmaintained."
+    )
