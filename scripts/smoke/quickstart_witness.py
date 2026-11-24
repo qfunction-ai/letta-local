@@ -35,16 +35,22 @@ response = client.agents.messages.create(
     agent_id=agent.id,
     messages=[{"role": "user", "content": "Hello! Reply with the single word: ready"}],
 )
-# Not every message type carries content (ReasoningMessage doesn't) — read defensively.
+# Message shapes vary by type: ReasoningMessage has no content; AssistantMessage.content
+# is Union[str, List[parts]] — a plain str iterates as characters, so check both shapes.
 texts = []
+types_seen = []
 for m in response.messages:
+    types_seen.append(getattr(m, "message_type", type(m).__name__))
     content = getattr(m, "content", None)
     if not content:
+        continue
+    if isinstance(content, str):
+        texts.append(content)
         continue
     for c in content:
         if getattr(c, "type", "") == "text" and getattr(c, "text", None):
             texts.append(c.text)
-print(f"MESSAGE_RECEIVED: {len(response.messages)} messages, {len(texts)} text chunks")
+print(f"MESSAGE_RECEIVED: {len(response.messages)} messages {types_seen}, {len(texts)} text chunks")
 if not texts:
     print("FAIL: no assistant text in response")
     sys.exit(1)
