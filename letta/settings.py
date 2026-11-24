@@ -504,6 +504,10 @@ class Settings(BaseSettings):
 
     # For encryption
     encryption_key: Optional[str] = None
+    # v0.16.39 (B-4): refuse to start when secrets would be stored in plaintext.
+    # Production setting — see README/SECURITY.md. Default stays False (dev setups
+    # keep working; a loud startup WARNING fires under secure mode instead).
+    require_encryption: bool = False
 
     # File processing timeout settings
     file_processing_timeout_minutes: int = 30

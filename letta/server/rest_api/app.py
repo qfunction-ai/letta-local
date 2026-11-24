@@ -167,7 +167,7 @@ def generate_openapi_schema(app: FastAPI):
 
 # v0.16.38 (L-3/R-1): password resolution lives in server_credentials so the
 # scrub/validate layer can compare against it. Registered module-level here.
-from letta.security.server_credentials import resolve_server_password
+from letta.security.server_credentials import check_encryption_at_startup, resolve_server_password
 
 
 random_password = resolve_server_password()
@@ -833,6 +833,11 @@ def create_application() -> "FastAPI":
             "any process on this machine, including sandboxed tool code, can call every endpoint "
             "(known hole L-3, see README). Use only for local development."
         )
+
+    # v0.16.39 (B-4): refuse to start / warn loudly when secrets would be stored
+    # in plaintext. LETTA_REQUIRE_ENCRYPTION=true + no LETTA_ENCRYPTION_KEY ->
+    # RuntimeError before serving; secure mode + no key -> one startup WARNING.
+    check_encryption_at_startup(secure=secure)
 
     # Add reverse proxy middleware to handle X-Forwarded-* headers
     # app.add_middleware(ReverseProxyMiddleware, base_path=settings.server_base_path)
