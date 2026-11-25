@@ -79,7 +79,11 @@ class TestGate:
         """The shipped baseline parses, is non-empty, and matches its recorded size."""
         text = BASELINE.read_text()
         ids, _ = gate.parse_baseline(text)
-        assert len(ids) > 300
+        # v0.16.40 floor: the baseline shrank 421 -> 196 via C-1 upgrades
+        # (urllib3/pypdf/pillow/aiohttp: -171) and the C-2 container-extras
+        # trim (-54). The floor guards against accidental wholesale loss,
+        # not growth — growth is the growth-check's job.
+        assert len(ids) > 150
         m = [l for l in text.splitlines() if l.startswith("# Baseline size:")]
         assert m, "baseline must record its size"
         recorded = int(m[0].split(":")[1].strip().split()[0])

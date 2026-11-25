@@ -2,7 +2,9 @@
 #
 # Counting rule (the .40 plan review, change 1 — every later delta uses this rule):
 #   Tool: pip-audit (latest at generation time), requirement mode against a pinned export.
-#   Export: uv export --format requirements-txt --frozen --no-hashes --no-dev --all-extras
+#   Export: uv export --format requirements-txt --frozen --no-hashes --no-dev --extra postgres
+#     --extra sqlite --extra server --extra external-tools (v0.16.40 C-2: the container's
+#     explicit extras list — the scan must match what the container installs; was --all-extras)
 #           (the container's install set at generation time).
 #   Unit: one line per advisory ID AS REPORTED BY pip-audit (GHSA or CVE or PYSEC, whatever
 #         the tool emits), case-normalized. Aliases are NOT merged: if a future scan reports
@@ -16,10 +18,9 @@
 #   what it is, why it is not reachable or fixable yet, and when it is revisited.
 # An uncommented addition fails the baseline-growth check in CI.
 
-# Baseline size: 421 unique advisory IDs (regenerated 2026-11-24 from the all-extras
-# export — R-2 scope correction: the original baseline was generated against a
-# non-all-extras export and missed extras-only packages. Added IDs carry a
-# justification comment per the growth rule; none were hand-picked for acceptance.)
+# Baseline size: 196 unique advisory IDs (v0.16.40: 421 at .39 release; -6 urllib3, -63 pypdf,
+# -53 pillow, -49 aiohttp via C-1 upgrades; -54 dev/desktop/locust-family via the C-2
+# container-extras trim — every removal proven package-owned by the pre-upgrade scan).
 
 CVE-2025-66034
 CVE-2026-114134
