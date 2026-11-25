@@ -888,6 +888,16 @@ def create_application() -> "FastAPI":
         allow_headers=["*"],
     )
 
+    # v0.16.40 (U-7): server-enforced Origin + Host validation. CORS middleware
+    # is browser-advisory (foreign-Origin requests executed with 200); this
+    # guard REJECTS them, plus foreign Host headers (DNS-rebinding signature).
+    # Middleware order: added after CORS, so it runs BEFORE it (middleware
+    # executes in reverse add order) — rejections win over CORS handling.
+    from letta.security.origin_host_guard import OriginHostGuardMiddleware
+
+    bind_host = os.getenv("HOST", "localhost").strip()
+    app.add_middleware(OriginHostGuardMiddleware, allowed_origins=settings.cors_origins, bind_host=bind_host)
+
     # Set up OpenTelemetry tracing
     otlp_endpoint = settings.otel_exporter_otlp_endpoint
     if otlp_endpoint and not settings.disable_tracing:
