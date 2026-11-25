@@ -41,7 +41,7 @@ COPY pyproject.toml uv.lock README.md ./
 # are load-bearing for the rig; desktop/experimental/modal/profiling/bedrock/
 # pinecone/redis/cloud-tool-sandbox await KEEP/DROP answers.
 RUN uv sync --frozen --no-dev --python 3.11 \
-    --extra postgres --extra sqlite --extra server --extra external-tools
+    --extra postgres --extra sqlite --extra server --extra redis
 
 # Copy the rest of the application code
 COPY . .

@@ -953,6 +953,34 @@ else
   bad "23. public HTTPS fetch (smoke container not running)"
 fi
 
+# ---------------------------------------------------------------- check 24
+# check 24 (X-1, v0.16.40 extras review): Redis must ACTUALLY initialize.
+# The image's startup.sh always sets LETTA_REDIS_HOST (external host or
+# internal redis-server + localhost), so every run exercises this path.
+# The failure class this catches: the redis EXTRA missing from the image —
+# redis_client.py wraps the import in try/except ImportError and silently
+# falls back to NoopAsyncRedisClient. The server starts, chat works, and
+# the busy locks + Redis SSE paths are quietly dead. Silent fallback is
+# exactly what a trim introduces; this check makes it loud.
+echo "== check 24: Redis client initialized (no silent Noop fallback) =="
+CTR24="$(docker compose -f "${COMPOSE_FILE}" ps -q letta 2>/dev/null | head -1)"
+if [ -n "${CTR24}" ]; then
+  R24_LOGS="$(docker logs "${CTR24}" 2>&1)"
+  if echo "${R24_LOGS}" | grep -q "Redis client initialized"; then
+    if echo "${R24_LOGS}" | grep -q "Failed to initialize Redis"; then
+      bad "24. Redis init (BOTH success and failure lines in logs — initialization is flapping)"
+    else
+      ok "24. Redis client initialized (no silent Noop fallback)"
+    fi
+  elif echo "${R24_LOGS}" | grep -q "Failed to initialize Redis"; then
+    bad "24. Redis init FAILED (silent Noop fallback active — busy locks and Redis SSE dead; is the redis extra in the image?)"
+  else
+    bad "24. Redis init (neither success nor failure line found in logs — the init path never ran)"
+  fi
+else
+  bad "24. Redis init (smoke container not running)"
+fi
+
 echo
 echo "== smoke: ${PASS} passed, ${FAIL} failed =="
 if [ "${FAIL}" -eq 0 ]; then exit 0; else exit 1; fi

@@ -3,22 +3,23 @@
 # Counting rule (the .40 plan review, change 1 — every later delta uses this rule):
 #   Tool: pip-audit (latest at generation time), requirement mode against a pinned export.
 #   Export: uv export --format requirements-txt --frozen --no-hashes --no-dev --extra postgres
-#     --extra sqlite --extra server --extra external-tools (v0.16.40 C-2: the container's
-#     explicit extras list — the scan must match what the container installs; was --all-extras)
-#           (the container's install set at generation time).
+#     --extra sqlite --extra server --extra redis (v0.16.40 C-2 final matrix, extras review
+#     2026-11-25: redis ADDED — startup.sh always sets LETTA_REDIS_HOST, silent Noop fallback
+#     otherwise; external-tools DROPPED — exa-py is a base dep, web_search unaffected;
+#     the scan must match what the container installs).
 #   Unit: one line per advisory ID AS REPORTED BY pip-audit (GHSA or CVE or PYSEC, whatever
 #         the tool emits), case-normalized. Aliases are NOT merged: if a future scan reports
 #         the same issue under a different alias, it counts as new and fails the gate —
 #         deliberate, the gate fails toward scrutiny, never toward silence.
 #   Dedup: the same ID appearing for multiple packages (or twice for one) counts once.
-#   Date: 2026-11-24.
+#   Date: 2026-11-25 (regenerated: 196 -> 183 IDs; external-tools out, redis in; zero new).
 #
 # Gate: the dependency scan ignores these IDs and FAILS on any NEW fixable advisory.
 # This file may only shrink. Adding an entry requires a justification comment on the line above it:
 #   what it is, why it is not reachable or fixable yet, and when it is revisited.
 # An uncommented addition fails the baseline-growth check in CI.
 
-# Baseline size: 196 unique advisory IDs (v0.16.40: 421 at .39 release; -6 urllib3, -63 pypdf,
+# Baseline size: 183 unique advisory IDs (v0.16.40: 421 at .39 release; -6 urllib3, -63 pypdf,
 # -53 pillow, -49 aiohttp via C-1 upgrades; -54 dev/desktop/locust-family via the C-2
 # container-extras trim — every removal proven package-owned by the pre-upgrade scan).
 
@@ -215,7 +216,6 @@ PYSEC-2026-99
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
 # R-2 scope correction: langsmith==0.4.18 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-CVE-2026-59152
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
@@ -228,7 +228,6 @@ CVE-2026-59152
 # R-2 scope correction: filelock==3.19.1 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
 # R-2 scope correction: langchain-core==0.3.75 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-1518
 # R-2 scope correction: pg8000==1.31.4 (extras: postgres) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
 PYSEC-2026-1766
 # R-2 scope correction: pytest==8.4.1 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
@@ -236,26 +235,17 @@ PYSEC-2026-1766
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
 # R-2 scope correction: flask==3.1.2 (extras: desktop) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
 # R-2 scope correction: langchain==0.3.27 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-2192
 # R-2 scope correction: langchain-core==0.3.75 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-2193
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
 # R-2 scope correction: granian==2.5.1 (extras: experimental) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
 # R-2 scope correction: granian==2.5.1 (extras: experimental) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
 # R-2 scope correction: langsmith==0.4.18 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-2555
 # R-2 scope correction: langchain-core==0.3.75 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-2562
 # R-2 scope correction: langchain-core==0.3.75 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-2563
 # R-2 scope correction: langchain-core==0.3.75 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-2564
 # R-2 scope correction: langsmith==0.4.18 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-2582
 # R-2 scope correction: langsmith==0.4.18 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-2583
 # R-2 scope correction: langsmith==0.4.18 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-2584
 # R-2 scope correction: python-engineio==4.12.2 (extras: desktop) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
 # R-2 scope correction: python-engineio==4.12.2 (extras: desktop) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
 # R-2 scope correction: python-socketio==5.13.0 (extras: desktop) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
@@ -265,7 +255,6 @@ PYSEC-2026-2584
 # R-2 scope correction: msgpack==1.1.1 (extras: desktop) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
 # R-2 scope correction: h2==4.3.0 (extras: modal) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
 # R-2 scope correction: langchain-core==0.3.75 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-373
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
@@ -285,4 +274,3 @@ PYSEC-2026-373
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
 # R-2 scope correction: langchain-text-splitters==0.3.9 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-77

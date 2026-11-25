@@ -50,7 +50,7 @@ jobs:
         # (Dockerfile: postgres, sqlite, server, external-tools) — dev dropped,
         # the rest pending the consumer matrix. Keep this export in lockstep
         # with the Dockerfile's --extra list, same commit.
-        run: uv export --format requirements-txt --frozen --no-hashes --no-dev --extra postgres --extra sqlite --extra server --extra external-tools -o /tmp/requirements.txt
+        run: uv export --format requirements-txt --frozen --no-hashes --no-dev --extra postgres --extra sqlite --extra server --extra redis -o /tmp/requirements.txt
 
       - name: Build pip-audit ignore flags from baseline
         run: |

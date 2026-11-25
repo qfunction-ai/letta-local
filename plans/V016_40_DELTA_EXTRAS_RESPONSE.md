@@ -44,3 +44,21 @@ verification against the current tree:
 
 No action required from you. Next consumer contact is the v0.16.40
 consumer notice at your re-pin.
+
+
+---
+
+## CORRECTION (2026-11-25, review cycle)
+
+Point 2 above is wrong in mechanism and I owe you the record. When I wrote
+"tiktoken is a base dependency (pyproject.toml:156, main dependencies
+block)" I had verified that the line existed and that tiktoken imported
+inside the image — but line 156 sits in the **desktop** extra, not base.
+tiktoken reached the image transitively (via tavily-python, a base dep),
+which is exactly the fragility your answer was pointing at, one level
+down: your conclusion ("declare it directly, don't rely on the drop")
+was right, and your "no base dependency" observation was closer to true
+than my "base dependency" claim. The fork has since moved tiktoken into
+base `dependencies` explicitly (v0.16.40). Your `letta/agent.py:39`
+citation remains stale-tree (the file was deleted in v0.16.39) — re-base
+your analysis checkout before the next handoff.
