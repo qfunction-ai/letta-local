@@ -848,6 +848,12 @@ def create_application() -> "FastAPI":
     # RuntimeError before serving; secure mode + no key -> one startup WARNING.
     check_encryption_at_startup(secure=secure)
 
+    # v0.16.40 (R-5): warn when a configured secret is too short for
+    # containment matching (exact-match-only protection).
+    from letta.security.server_credentials import warn_on_short_secrets
+
+    warn_on_short_secrets()
+
     # v0.16.40 (U-5/L-10): the image-fetch SSRF guard's operator escape hatch.
     # When on, image URLs may target private/loopback addresses — lab setups
     # serving images internally. Loud on purpose, every start.

@@ -152,8 +152,22 @@ def check_encryption_at_startup(secure: bool) -> None:
         )
 
 
+# v0.16.40 (R-5): containment (contains) matching only for secrets at least
+# this long. Shorter secrets substring-match benign values (a 4-char operator
+# password scrubs PATH via 'bin'; the compose-default DB password 'letta'
+# matches 'letta' anywhere). Below the floor: exact match only + a startup
+# WARNING that the password is short.
+CONTAINMENT_MIN_SECRET_LENGTH = 12
+
+
 def get_sensitive_env_values() -> set[str]:
-    """Values that must never appear in a sandboxed tool environment (exact match)."""
+    """Values that must never appear in a sandboxed tool environment.
+
+    v0.16.40 (R-5): includes the Postgres PASSWORD COMPONENT of the URI (a
+    value carrying just the DB password previously passed — only the whole
+    URI matched). Secrets shorter than CONTAINMENT_MIN_SECRET_LENGTH are
+    exact-match-only downstream.
+    """
     values: set[str] = set()
     if _server_password:
         values.add(_server_password)
@@ -162,12 +176,38 @@ def get_sensitive_env_values() -> set[str]:
 
         if settings.pg_uri:
             values.add(settings.pg_uri)
+            # R-5: the PG password component (password=... in the URI) is its
+            # own secret — a value carrying ONLY it must not pass.
+            try:
+                from urllib.parse import urlparse, unquote
+
+                pw = urlparse(settings.pg_uri).password
+                if pw:
+                    values.add(unquote(pw))
+            except Exception:
+                pass
         if getattr(settings, "encryption_key", None):
             values.add(str(settings.encryption_key))
     except Exception:
         # Settings unavailable (early import, exotic test env): password-only scrub.
         pass
     return values
+
+
+def warn_on_short_secrets() -> None:
+    """v0.16.40 (R-5): one WARNING per start when a configured secret is too
+    short for containment matching (exact-match-only protection)."""
+    for s in get_sensitive_env_values():
+        if len(s) < CONTAINMENT_MIN_SECRET_LENGTH:
+            logger.warning(
+                "A server secret is only %d characters — below the containment-match "
+                "floor (%d). Protection for it is exact-match only. Use a longer secret "
+                "(32+ recommended).",
+                len(s),
+                CONTAINMENT_MIN_SECRET_LENGTH,
+            )
+            # warn once per short secret, not once per call site
+            break
 
 
 def scrub_sensitive_env(env: dict[str, str | None]) -> dict[str, str | None]:
@@ -190,14 +230,23 @@ def scrub_sensitive_env(env: dict[str, str | None]) -> dict[str, str | None]:
 
 
 def _value_carries_secret(value: str, sensitive: set[str]) -> bool:
-    """True if value CONTAINS any secret — raw form or URL-encoded form
-    (urllib.parse.quote(secret, safe="")). Exact match is the trivial subset."""
+    """True if value carries any secret.
+
+    v0.16.40 (R-5): secrets at least CONTAINMENT_MIN_SECRET_LENGTH long match
+    by CONTAINMENT (raw or URL-encoded) — the v0.16.39 B-10 behavior. Shorter
+    secrets match EXACT-ONLY: a 4-char password must not scrub PATH because
+    it appears as a substring of 'bin'.
+    """
     for s in sensitive:
-        if s in value:
-            return True
-        encoded = quote(s, safe="")
-        if encoded != s and encoded in value:
-            return True
+        if len(s) >= CONTAINMENT_MIN_SECRET_LENGTH:
+            if s in value:
+                return True
+            encoded = quote(s, safe="")
+            if encoded != s and encoded in value:
+                return True
+        else:
+            if value == s:
+                return True
     return False
 
 
