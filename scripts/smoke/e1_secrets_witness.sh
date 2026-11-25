@@ -32,7 +32,9 @@ cleanup() {
 trap cleanup EXIT
 
 wait_health() {
-  for i in $(seq 1 60); do
+  # 240s: shared-docker-host contention (other agents' stacks + suites)
+  # can double boot time; 120s was observed insufficient.
+  for i in $(seq 1 120); do
     if curl -sf -H "Authorization: Bearer ${PASSWORD}" "$BASE/v1/health" >/dev/null 2>&1; then
       return 0
     fi
