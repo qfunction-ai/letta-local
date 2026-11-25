@@ -850,6 +850,76 @@ else
   bad "8. delete agent (http=${R8})"
 fi
 
+# ---------------------------------------------------------------- check 23
+# check 23 (W-1 review, owed item 1): REAL public HTTPS fetch through the
+# production guard code — a real certificate chain, a real redirect, and a
+# real CDN. The local TLS witness proves the mechanism; this proves it
+# against the internet. Wikimedia's Special:FilePath answers with a real
+# 30x redirect to upload.wikimedia.org (exercises redirect re-validation +
+# SNI on a real cert chain) and the final response carries image/png.
+#
+# Failure policy (plan REV 2): guard rejection, cert failure, wrong
+# content type, or HTTP 403 = FAIL (a 403 is a policy answer, not a
+# network failure). Genuine network unreachability = loud SKIP for ad-hoc
+# runs; the RELEASE-GATE run must PASS this check — a SKIP there blocks
+# the tag unless waived in the evidence.
+#
+# UA: Wikimedia policy expects a descriptive UA with contact info and can
+# 403 generic ones — this check passes a compliant rig UA via the
+# user_agent parameter (production default stays Letta/{version}).
+echo "== check 23: real public HTTPS image fetch (redirect + real cert chain) =="
+CTR="$(docker compose -f "${COMPOSE_FILE}" ps -q letta 2>/dev/null | head -1)"
+if [ -n "${CTR}" ]; then
+  if docker exec "$CTR" python - <<'PY23' > /tmp/rig_pubfetch.log 2>&1
+import asyncio, sys
+from letta.helpers.message_helper import _fetch_image_from_url
+
+UA = "LettaLocal-rig/0.16.40 (+https://github.com/qfunction-ai/letta-local)"
+URL = "https://commons.wikimedia.org/wiki/Special:FilePath/Example.png"
+
+try:
+    data, media_type = asyncio.run(_fetch_image_from_url(URL, timeout_seconds=30.0, user_agent=UA))
+except Exception as e:
+    cls = type(e).__name__
+    msg = str(e)
+    # A 403 from Wikimedia is a POLICY answer -> FAIL, not a skip.
+    if "403" in msg:
+        print("PUBFETCH_FAIL: 403 (policy refusal — check the UA compliance)")
+        sys.exit(1)
+    # Genuine network unreachability -> loud SKIP (release gate must still PASS).
+    if cls in ("LettaImageFetchError",) and ("DNS resolution failed" in msg or "timed out" in msg.lower() or "ConnectError" in msg or "connect" in msg.lower()):
+        print("PUBFETCH_SKIP: no outbound network from the rig host")
+        sys.exit(2)
+    print(f"PUBFETCH_FAIL: {cls}: {msg[:200]}")
+    sys.exit(1)
+
+if not data:
+    print("PUBFETCH_FAIL: empty body")
+    sys.exit(1)
+if not (media_type or "").lower().startswith("image/"):
+    print(f"PUBFETCH_FAIL: content type {media_type}")
+    sys.exit(1)
+print(f"PUBFETCH_PASS: {len(data)} bytes, {media_type}")
+PY23
+  then
+    if grep -q "PUBFETCH_PASS" /tmp/rig_pubfetch.log; then
+      ok "23. real public HTTPS image fetch (redirect + real cert chain)"
+    else
+      bad "23. public fetch: unexpected exit 0 without PASS marker"
+    fi
+  else
+    RC=$?
+    if grep -q "PUBFETCH_SKIP" /tmp/rig_pubfetch.log 2>/dev/null; then
+      echo "  SKIP  23. real public HTTPS fetch ($(tail -1 /tmp/rig_pubfetch.log))"
+      echo "        NOTE: release-gate runs must PASS this check; a SKIP blocks the tag."
+    else
+      bad "23. public HTTPS fetch ($(tail -1 /tmp/rig_pubfetch.log 2>/dev/null))"
+    fi
+  fi
+else
+  bad "23. public HTTPS fetch (smoke container not running)"
+fi
+
 echo
 echo "== smoke: ${PASS} passed, ${FAIL} failed =="
 if [ "${FAIL}" -eq 0 ]; then exit 0; else exit 1; fi

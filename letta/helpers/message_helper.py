@@ -28,16 +28,27 @@ def _image_fetch_private_allowed() -> bool:
     return os.getenv("LETTA_IMAGE_FETCH_ALLOW_PRIVATE", "").lower() in ("1", "true", "yes")
 
 
-def _validate_image_fetch_address(url: str) -> None:
-    """Resolve the hostname and reject non-public destinations (SSRF guard).
+def _validate_image_fetch_address(url: str) -> str:
+    """Resolve the hostname once, reject non-public destinations, return the pin.
 
     Rejects loopback, private (RFC 1918), link-local (incl. 169.254.169.254),
-    unique-local IPv6, multicast, reserved, and unspecified addresses. DNS
-    rebinding between check and connect is closed by pinning the connection
-    to the resolved IP (the caller passes the validated IP to httpx).
+    unique-local IPv6, multicast, reserved, and unspecified addresses.
+
+    Returns the validated IP the caller must pin the connection to. This is
+    the ONLY DNS lookup on the fetch path (W-1): a second lookup before
+    connect would reopen the rebinding window — an attacker answering
+    validation with a public IP and connect with 127.0.0.1.
+
+    Address selection (A-2): the first IPv4 address when there is one,
+    otherwise the first IPv6 — an IPv6-first answer on an IPv4-only host
+    must not break the fetch. Every resolved address is validated
+    regardless of which is pinned.
+
+    Under the LETTA_IMAGE_FETCH_ALLOW_PRIVATE hatch this skips ONLY the
+    non-public-address rejection — it still resolves once and returns the
+    IP, so the caller still pins. The hatch relaxes the address policy; it
+    does not switch off pinning or create a lab-only code path.
     """
-    if _image_fetch_private_allowed():
-        return
     parsed = urlparse(url)
     host = parsed.hostname
     if not host:
@@ -46,39 +57,38 @@ def _validate_image_fetch_address(url: str) -> None:
         addr_infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
     except socket.gaierror as e:
         raise LettaImageFetchError(url=url, reason=f"DNS resolution failed: {e}")
+    private_allowed = _image_fetch_private_allowed()
+    validated: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
     for ai in addr_infos:
         ip = ipaddress.ip_address(ai[4][0])
-        # is_global covers loopback/private/link-local/unique-local; multicast
-        # and reserved are global-routable in Python's taxonomy but never
-        # legitimate fetch destinations — reject them explicitly.
-        if not ip.is_global or ip.is_multicast or ip.is_reserved:
-            raise LettaImageFetchError(
-                url=url,
-                reason=f"refusing to fetch from non-public address {ip} (SSRF guard; set LETTA_IMAGE_FETCH_ALLOW_PRIVATE=true for lab setups)",
-            )
+        if not private_allowed:
+            # is_global covers loopback/private/link-local/unique-local; multicast
+            # and reserved are global-routable in Python's taxonomy but never
+            # legitimate fetch destinations — reject them explicitly.
+            if not ip.is_global or ip.is_multicast or ip.is_reserved:
+                raise LettaImageFetchError(
+                    url=url,
+                    reason=f"refusing to fetch from non-public address {ip} (SSRF guard; set LETTA_IMAGE_FETCH_ALLOW_PRIVATE=true for lab setups)",
+                )
+        validated.append(ip)
+    if not validated:
+        raise LettaImageFetchError(url=url, reason="DNS returned no addresses")
+    # A-2: prefer the first IPv4, else the first IPv6
+    for ip in validated:
+        if ip.version == 4:
+            return str(ip)
+    return str(validated[0])
 
 
-def _pin_host_to_ip(url: str) -> str | None:
-    """Return a URL with the hostname replaced by its first resolved IP.
+def _pinned_url(url: str, ip: str) -> str:
+    """Build a URL with the hostname replaced by an ALREADY-VALIDATED IP.
 
     The Host header is preserved via httpx's `headers` so virtual hosts keep
-    working; the connection itself goes to the validated IP, which closes the
-    DNS-rebinding window between validation and connect.
+    working; the connection itself goes to the validated IP. No DNS happens
+    here (W-1): the IP comes from _validate_image_fetch_address's single
+    lookup, so what was validated is exactly what gets connected to.
     """
     parsed = urlparse(url)
-    host = parsed.hostname
-    if not host:
-        return None
-    try:
-        addr_infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
-    except socket.gaierror:
-        return None
-    # Validate EVERY resolved address, then connect to the first.
-    for ai in addr_infos:
-        ip = ipaddress.ip_address(ai[4][0])
-        if (not ip.is_global or ip.is_multicast or ip.is_reserved) and not _image_fetch_private_allowed():
-            return None
-    ip = addr_infos[0][4][0]
     # IPv6 literals need brackets in the URL
     ip_str = f"[{ip}]" if ":" in str(ip) else str(ip)
     port_part = f":{parsed.port}" if parsed.port else ""
@@ -108,7 +118,9 @@ def _hop_headers(original_url: str, pinned_url: str, base_headers: dict) -> dict
     return hop_headers
 
 
-async def _fetch_image_from_url(url: str, max_retries: int = 1, timeout_seconds: float = 5.0) -> tuple[bytes, str | None]:
+async def _fetch_image_from_url(
+    url: str, max_retries: int = 1, timeout_seconds: float = 5.0, user_agent: str | None = None
+) -> tuple[bytes, str | None]:
     """
     Async helper to fetch image from URL without blocking the event loop.
     Retries once on timeout to handle transient network issues.
@@ -135,13 +147,13 @@ async def _fetch_image_from_url(url: str, max_retries: int = 1, timeout_seconds:
     # Connect timeout is half of total timeout, capped at 3 seconds
     connect_timeout = min(timeout_seconds / 2, 3.0)
     timeout = httpx.Timeout(timeout_seconds, connect=connect_timeout)
-    base_headers = {"User-Agent": f"Letta/{__version__}"}
+    base_headers = {"User-Agent": user_agent or f"Letta/{__version__}"}
 
-    # SSRF guard: validate the destination BEFORE any request
-    _validate_image_fetch_address(url)
-    # Pin the connection to the validated IP (rebinding-proof), keep Host
-    # and SNI on the ORIGINAL hostname (V-2)
-    pinned_url = _pin_host_to_ip(url) or url
+    # SSRF guard (W-1): validate the destination in the SAME lookup that
+    # yields the pin — one DNS resolution per URL, ever. Pin the connection
+    # to the validated IP (rebinding-proof), keep Host and SNI on the
+    # ORIGINAL hostname (V-2).
+    pinned_url = _pinned_url(url, _validate_image_fetch_address(url))
 
     current_url, current_pinned = url, pinned_url
     last_exception = None
@@ -166,8 +178,8 @@ async def _fetch_image_from_url(url: str, max_retries: int = 1, timeout_seconds:
                     from urllib.parse import urljoin
 
                     next_url = urljoin(current_url, location)
-                    _validate_image_fetch_address(next_url)
-                    next_pinned = _pin_host_to_ip(next_url) or next_url
+                    next_ip = _validate_image_fetch_address(next_url)
+                    next_pinned = _pinned_url(next_url, next_ip)
                     current_url, current_pinned = next_url, next_pinned
                     hop_headers = _hop_headers(current_url, current_pinned, base_headers)
                     extensions = _request_extensions(current_url)

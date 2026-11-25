@@ -5,14 +5,17 @@ metadata address rejected, ::1 rejected, redirect hops re-validated,
 non-image content type rejected, oversize aborted, escape hatch works,
 normal fetch works.
 
-The guard: `_validate_image_fetch_address` resolves the hostname and
-rejects non-global addresses; `_pin_host_to_ip` pins the connection to
-the validated IP (DNS-rebinding-proof); redirects are followed manually
-with re-validation; content type must be image/*; body capped at 10 MB.
+The guard: `_validate_image_fetch_address` resolves the hostname ONCE,
+rejects non-global addresses, and returns the validated IP the caller
+pins the connection to (DNS-rebinding-proof, W-1 single-lookup); redirects
+are followed manually with re-validation; content type must be image/*;
+body capped at 10 MB.
 """
 
 import asyncio
 import http.server
+import ipaddress
+import socket
 import socketserver
 import threading
 
@@ -21,7 +24,7 @@ import pytest
 from letta.errors import LettaImageFetchError
 from letta.helpers.message_helper import (
     _fetch_image_from_url,
-    _pin_host_to_ip,
+    _pinned_url,
     _validate_image_fetch_address,
 )
 
@@ -127,16 +130,46 @@ class TestAddressValidation:
         # Does not raise
         _validate_image_fetch_address("http://127.0.0.1/x")
 
-    def test_pin_refuses_private(self):
-        # When validation fails, pinning returns None rather than an unvalidated URL
-        assert _pin_host_to_ip("http://127.0.0.1/x") is None
-
-    def test_pin_public_host(self):
-        # A public hostname pins to its resolved IP (runs DNS; example.com is stable public infra)
-        pinned = _pin_host_to_ip("http://example.com/img.png")
-        if pinned is None:  # no network in CI — skip rather than fail
-            pytest.skip("no network for public DNS resolution")
+    def test_validate_returns_pin_and_pinned_url_has_no_hostname(self):
+        # Validation RETURNS the validated IP (W-1: the single lookup), and
+        # _pinned_url builds from it with no DNS. example.com is stable public
+        # infra; skip rather than fail when the host has no network.
+        try:
+            ip = _validate_image_fetch_address("http://example.com/img.png")
+        except LettaImageFetchError as e:
+            if "DNS resolution failed" in str(e):
+                pytest.skip("no network for public DNS resolution")
+            raise
+        pinned = _pinned_url("http://example.com/img.png", ip)
         assert pinned.startswith("http://") and "example.com" not in pinned
+        assert ip in pinned
+
+    def test_validate_prefers_ipv4(self, monkeypatch):
+        """A-2: mixed v4/v6 answer -> the IPv4 address is pinned (an
+        IPv6-first answer on an IPv4-only host must not break the fetch)."""
+        import letta.helpers.message_helper as mh
+
+        v6 = ipaddress.ip_address("2606:2800:220:1:248:1899:10:10")
+        v4 = ipaddress.ip_address("93.184.216.34")
+        fake_ai_v6 = (socket.AF_INET6, socket.SOCK_STREAM, 6, "", (str(v6), 80))
+        fake_ai_v4 = (socket.AF_INET, socket.SOCK_STREAM, 6, "", (str(v4), 80))
+        monkeypatch.setattr(
+            mh.socket, "getaddrinfo", lambda *a, **kw: [fake_ai_v6, fake_ai_v4]
+        )
+        assert _validate_image_fetch_address("http://example.com/x") == str(v4)
+
+    def test_validate_ipv6_only_answer(self, monkeypatch):
+        """A-2: IPv6-only answer -> the (validated) IPv6 is pinned."""
+        import letta.helpers.message_helper as mh
+
+        v6 = ipaddress.ip_address("2606:2800:220:1:248:1899:10:10")
+        fake_ai_v6 = (socket.AF_INET6, socket.SOCK_STREAM, 6, "", (str(v6), 80))
+        monkeypatch.setattr(
+            mh.socket, "getaddrinfo", lambda *a, **kw: [fake_ai_v6]
+        )
+        ip = _validate_image_fetch_address("http://example.com/x")
+        assert ip == str(v6)
+        assert _pinned_url("http://example.com/x", ip) == f"http://[{v6}]/x"
 
 
 class TestFetchGuard:

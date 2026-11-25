@@ -26,8 +26,9 @@ from letta.errors import LettaImageFetchError
 from letta.helpers.message_helper import _fetch_image_from_url
 
 
-def _make_tls_server(tmp_path, cn="img.test"):
-    """Self-signed TLS server for cn, serving /img.png. Returns (port, cert)."""
+def _make_tls_server(tmp_path, cn="img.test", redirect_from=None, redirect_to=None):
+    """Self-signed TLS server for cn, serving /img.png (optionally one
+    redirect hop). Returns (port, cert)."""
     key, cert = tmp_path / "k.pem", tmp_path / "c.pem"
     subprocess.run(
         ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", str(key), "-out", str(cert),
@@ -37,7 +38,12 @@ def _make_tls_server(tmp_path, cn="img.test"):
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            if self.path == "/img.png":
+            if redirect_from and self.path == redirect_from:
+                self.send_response(302)
+                self.send_header("Location", redirect_to)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            elif self.path == "/img.png":
                 body = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
                 self.send_response(200)
                 self.send_header("Content-Type", "image/png")
@@ -189,3 +195,87 @@ class TestMissingContentType:
         with pytest.raises(LettaImageFetchError, match="no content type"):
             asyncio.run(_fetch_image_from_url(f"http://127.0.0.1:{port}/x.png"))
         srv.shutdown()
+
+
+class TestW1SingleLookup:
+    """W-1 (348518b review): one DNS lookup per URL, ever. The old
+    `_pin_host_to_ip` did a second lookup and fell back to the UNPINNED
+    url when it failed — an attacker answering validation with a public IP
+    and connect with 127.0.0.1. These witnesses pin the structural
+    property: exactly one by-name lookup per URL / per redirect hop, and
+    no unpinned fetch in any mode."""
+
+    def _counting_stub(self, port, calls):
+        import ipaddress as _ipa
+
+        def fake_getaddrinfo(host, *a, **kw):
+            # A-1: count only lookups of HOSTNAMES. The transport resolves
+            # the pinned numeric literal too (instantly); that must not
+            # inflate the count or the witness tests the wrong thing.
+            try:
+                _ipa.ip_address(host)
+                is_name = False
+            except ValueError:
+                is_name = True
+            if is_name:
+                calls.append(host)
+            if host == "img.test":
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+            return socket.getaddrinfo(host, *a, **kw)
+
+        return fake_getaddrinfo
+
+    def test_single_dns_lookup_per_fetch(self, tmp_path, monkeypatch):
+        """One by-name getaddrinfo call for the whole fetch (A-1 counting)."""
+        port, cert = _make_tls_server(tmp_path)
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "letta.helpers.message_helper.socket.getaddrinfo", self._counting_stub(port, calls)
+        )
+        monkeypatch.setenv("SSL_CERT_FILE", cert)
+        data, _ = asyncio.run(_fetch_image_from_url(f"https://img.test:{port}/img.png"))
+        assert data.startswith(b"\x89PNG")
+        assert calls == ["img.test"], f"expected exactly one by-name lookup, saw: {calls}"
+
+    def test_single_lookup_per_redirect_hop(self, tmp_path, monkeypatch):
+        """One by-name lookup per hop: the original URL plus each redirect
+        target — never two for the same name."""
+        port, cert = _make_tls_server(tmp_path, redirect_from="/hop", redirect_to="/img.png")
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "letta.helpers.message_helper.socket.getaddrinfo", self._counting_stub(port, calls)
+        )
+        monkeypatch.setenv("SSL_CERT_FILE", cert)
+        data, _ = asyncio.run(_fetch_image_from_url(f"https://img.test:{port}/hop"))
+        assert data.startswith(b"\x89PNG")
+        assert calls == ["img.test", "img.test"], f"one lookup per hop expected, saw: {calls}"
+
+    def test_gaierror_fails_closed(self, tmp_path, monkeypatch):
+        """DNS failure at the (only) lookup: the fetch raises; nothing goes
+        out to any URL, pinned or not. The old code fell back to the
+        unpinned URL here."""
+        port, cert = _make_tls_server(tmp_path)
+
+        def fake(host, *a, **kw):
+            raise socket.gaierror("name resolution failed")
+
+        monkeypatch.setattr("letta.helpers.message_helper.socket.getaddrinfo", fake)
+        with pytest.raises(LettaImageFetchError, match="DNS"):
+            asyncio.run(_fetch_image_from_url(f"https://img.test:{port}/img.png"))
+
+    def test_hatch_still_pins(self, tmp_path, monkeypatch):
+        """Review Q3: under LETTA_IMAGE_FETCH_ALLOW_PRIVATE the fetch
+        proceeds to a private address AND is pinned — the request goes to
+        the resolved IP (one lookup), not to a second resolution of the
+        hostname."""
+        port, cert = _make_tls_server(tmp_path)
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "letta.helpers.message_helper.socket.getaddrinfo", self._counting_stub(port, calls)
+        )
+        monkeypatch.setenv("SSL_CERT_FILE", cert)
+        # autouse fixture sets the hatch; assert it is on for clarity
+        assert os.environ.get("LETTA_IMAGE_FETCH_ALLOW_PRIVATE") in ("1", "true", "yes")
+        data, _ = asyncio.run(_fetch_image_from_url(f"https://img.test:{port}/img.png"))
+        assert data.startswith(b"\x89PNG")
+        assert calls == ["img.test"], f"hatch mode must still pin via the single lookup: {calls}"

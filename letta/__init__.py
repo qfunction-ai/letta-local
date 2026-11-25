@@ -2,10 +2,12 @@ import os
 from importlib.metadata import PackageNotFoundError, version
 
 try:
-    __version__ = version("letta") or "0.16.40"
+    __version__ = version("letta")
 except PackageNotFoundError:
-    # Fallback for development installations
-    __version__ = "0.16.40"
+    # Dev checkouts without an installed dist-info. No version literal here:
+    # it would go stale at the next release. The container install (what the
+    # release rig gates) always carries real metadata.
+    __version__ = "0+unknown"
 
 if os.environ.get("LETTA_VERSION"):
     __version__ = os.environ["LETTA_VERSION"]
