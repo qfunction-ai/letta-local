@@ -837,6 +837,16 @@ def create_application() -> "FastAPI":
     # RuntimeError before serving; secure mode + no key -> one startup WARNING.
     check_encryption_at_startup(secure=secure)
 
+    # v0.16.40 (U-5/L-10): the image-fetch SSRF guard's operator escape hatch.
+    # When on, image URLs may target private/loopback addresses — lab setups
+    # serving images internally. Loud on purpose, every start.
+    if os.getenv("LETTA_IMAGE_FETCH_ALLOW_PRIVATE", "").lower() in ("1", "true", "yes"):
+        print(
+            "▶ WARNING: LETTA_IMAGE_FETCH_ALLOW_PRIVATE is set — the server-side image fetch "
+            "will follow URLs to private/loopback/metadata addresses (U-5 lab mode). "
+            "Do not enable in production."
+        )
+
     # Add reverse proxy middleware to handle X-Forwarded-* headers
     # app.add_middleware(ReverseProxyMiddleware, base_path=settings.server_base_path)
 

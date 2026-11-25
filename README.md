@@ -2,7 +2,7 @@
 
 An independently maintained fork of [Letta's V1 API server](https://github.com/letta-ai/letta). Letta retired the V1 server in August 2026 and moved its active development to Letta Code, a different architecture. QFunction maintains this V1 lineage for self-hosted, local-model use, including all of its security fixes. There are no upstream merges.
 
-> **Security posture:** production-ready for trusted tools. Secure mode is **on by default**: the REST API requires password authentication, and sandboxed tool environments are allowlisted (no inherited server secrets). L-3, L-1 and L-2 are closed as of v0.16.38. Still open, each with a tracking ID: L-7, L-8, L-9, and approval run-scoping (RC-7). The numpy/OpenBLAS sandbox hang (RC-8) is mitigated as of v0.16.39. See [Known security holes](#known-security-holes).
+> **Security posture:** production-ready for trusted tools. Secure mode is **on by default**: the REST API requires password authentication, and sandboxed tool environments are allowlisted (no inherited server secrets). L-3, L-1 and L-2 are closed as of v0.16.38. L-10 (SSRF in the image fetch) is closed as of v0.16.40. Still open, each with a tracking ID: L-7, L-8, L-9, and approval run-scoping (RC-7). The numpy/OpenBLAS sandbox hang (RC-8) is mitigated as of v0.16.39. See [Known security holes](#known-security-holes).
 
 The upstream Letta project is built for cloud models (OpenAI, Anthropic, etc.). This fork makes Letta's stateful agent framework work with local inference servers — Ollama, vLLM, SGLang, LocalAI, llama.cpp, and MLX — without requiring a cloud API key.
 
@@ -367,6 +367,10 @@ pytest tests/integration_test_local_model_agent.py -v
 - **L-2 — `/data/config` readable from the sandbox.** Closed in v0.16.38.
 
 **Design consequence that remains:** authentication is now the only barrier for sandboxed tools reaching the local API, because tools can still *open connections* (L-8, open). **The server password must never be given to tools.** Agent-aware and multi-agent tools fail under secure mode with a visible 401 until scoped tool credentials exist (v0.16.39 design item).
+
+### Closed in v0.16.40: L-10
+
+- **L-10 — SSRF in the server-side image fetch.** Any authenticated caller could put an arbitrary URL in an image message and the server would fetch it — loopback, RFC 1918, link-local, the cloud metadata address (169.254.169.254) — and feed the response to the model. Closed in v0.16.40: destination addresses are resolved and validated before connecting (the connection is pinned to the validated IP, closing DNS-rebinding), redirects are followed manually with re-validation at each hop (max 3), the content type must be `image/*`, and the body is capped at 10 MB with a streamed abort. Lab setups serving images internally can set `LETTA_IMAGE_FETCH_ALLOW_PRIVATE=true` (logs a startup note; defaults off).
 
 ### Open holes
 

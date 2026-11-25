@@ -1,6 +1,9 @@
 import asyncio
 import base64
+import ipaddress
 import mimetypes
+import os
+import socket
 from urllib.parse import urlparse
 
 import httpx
@@ -12,10 +15,85 @@ from letta.schemas.letta_message_content import Base64Image, ImageContent, Image
 from letta.schemas.message import Message, MessageCreate
 
 
+# v0.16.40 (U-5 / L-10): SSRF guard for the server-side image fetch.
+# An authenticated caller can put any URL in an image message; without this
+# check the fetch would happily reach loopback, RFC 1918, link-local, or the
+# cloud metadata address — and hand the response to the model.
+_IMAGE_FETCH_MAX_BYTES = 10 * 1024 * 1024  # 10 MB cap, streamed abort
+_IMAGE_FETCH_MAX_REDIRECTS = 3  # followed MANUALLY, re-validated each hop
+
+
+def _image_fetch_private_allowed() -> bool:
+    """Operator escape hatch for lab setups serving images internally."""
+    return os.getenv("LETTA_IMAGE_FETCH_ALLOW_PRIVATE", "").lower() in ("1", "true", "yes")
+
+
+def _validate_image_fetch_address(url: str) -> None:
+    """Resolve the hostname and reject non-public destinations (SSRF guard).
+
+    Rejects loopback, private (RFC 1918), link-local (incl. 169.254.169.254),
+    unique-local IPv6, multicast, reserved, and unspecified addresses. DNS
+    rebinding between check and connect is closed by pinning the connection
+    to the resolved IP (the caller passes the validated IP to httpx).
+    """
+    if _image_fetch_private_allowed():
+        return
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        raise LettaImageFetchError(url=url, reason="URL has no hostname")
+    try:
+        addr_infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
+    except socket.gaierror as e:
+        raise LettaImageFetchError(url=url, reason=f"DNS resolution failed: {e}")
+    for ai in addr_infos:
+        ip = ipaddress.ip_address(ai[4][0])
+        # is_global covers loopback/private/link-local/unique-local; multicast
+        # and reserved are global-routable in Python's taxonomy but never
+        # legitimate fetch destinations — reject them explicitly.
+        if not ip.is_global or ip.is_multicast or ip.is_reserved:
+            raise LettaImageFetchError(
+                url=url,
+                reason=f"refusing to fetch from non-public address {ip} (SSRF guard; set LETTA_IMAGE_FETCH_ALLOW_PRIVATE=true for lab setups)",
+            )
+
+
+def _pin_host_to_ip(url: str) -> str | None:
+    """Return a URL with the hostname replaced by its first resolved IP.
+
+    The Host header is preserved via httpx's `headers` so virtual hosts keep
+    working; the connection itself goes to the validated IP, which closes the
+    DNS-rebinding window between validation and connect.
+    """
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return None
+    try:
+        addr_infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        return None
+    # Validate EVERY resolved address, then connect to the first.
+    for ai in addr_infos:
+        ip = ipaddress.ip_address(ai[4][0])
+        if (not ip.is_global or ip.is_multicast or ip.is_reserved) and not _image_fetch_private_allowed():
+            return None
+    ip = addr_infos[0][4][0]
+    # IPv6 literals need brackets in the URL
+    ip_str = f"[{ip}]" if ":" in str(ip) else str(ip)
+    port_part = f":{parsed.port}" if parsed.port else ""
+    return f"{parsed.scheme}://{ip_str}{port_part}{parsed.path}{'?' + parsed.query if parsed.query else ''}"
+
+
 async def _fetch_image_from_url(url: str, max_retries: int = 1, timeout_seconds: float = 5.0) -> tuple[bytes, str | None]:
     """
     Async helper to fetch image from URL without blocking the event loop.
     Retries once on timeout to handle transient network issues.
+
+    v0.16.40 (U-5/L-10): the fetch is SSRF-guarded — destination addresses
+    are validated before connecting, redirects are followed manually with
+    re-validation at each hop (max 3), the content type must be image/*,
+    and the body is capped at 10 MB with a streamed abort.
 
     Args:
         url: URL of the image to fetch
@@ -26,20 +104,59 @@ async def _fetch_image_from_url(url: str, max_retries: int = 1, timeout_seconds:
         Tuple of (image_bytes, media_type)
 
     Raises:
-        LettaImageFetchError: If image fetch fails after all retries
+        LettaImageFetchError: If image fetch fails after all retries, or is blocked by the SSRF guard
     """
     # Connect timeout is half of total timeout, capped at 3 seconds
     connect_timeout = min(timeout_seconds / 2, 3.0)
     timeout = httpx.Timeout(timeout_seconds, connect=connect_timeout)
     headers = {"User-Agent": f"Letta/{__version__}"}
 
+    # SSRF guard: validate the destination BEFORE any request
+    _validate_image_fetch_address(url)
+    # Pin the connection to the validated IP (rebinding-proof), keep Host
+    pinned_url = _pin_host_to_ip(url) or url
+    if pinned_url != url:
+        parsed = urlparse(url)
+        host_header = parsed.hostname + (f":{parsed.port}" if parsed.port else "")
+        headers["Host"] = host_header
+
+    current_url, pinned_url = url, pinned_url
     last_exception = None
     for attempt in range(max_retries + 1):
         try:
-            async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
-                image_response = await client.get(url, follow_redirects=True)
+            async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=False) as client:
+                image_response = await client.get(pinned_url)
+                # Manual redirect handling: max 3 hops, re-validate each
+                hops = 0
+                while image_response.has_redirect_location and hops < _IMAGE_FETCH_MAX_REDIRECTS:
+                    location = image_response.headers.get("location", "")
+                    if not location:
+                        break
+                    from urllib.parse import urljoin
+
+                    next_url = urljoin(current_url, location)
+                    _validate_image_fetch_address(next_url)
+                    next_pinned = _pin_host_to_ip(next_url) or next_url
+                    next_parsed = urlparse(next_url)
+                    next_headers = dict(headers)
+                    if next_pinned != next_url:
+                        next_headers["Host"] = next_parsed.hostname + (f":{next_parsed.port}" if next_parsed.port else "")
+                    current_url, pinned_url = next_url, next_pinned
+                    image_response = await client.get(pinned_url, headers=next_headers)
+                    hops += 1
+                if image_response.has_redirect_location:
+                    raise LettaImageFetchError(url=url, reason=f"Too many redirects (max {_IMAGE_FETCH_MAX_REDIRECTS})")
                 image_response.raise_for_status()
-                image_bytes = image_response.content
+                # Content-type must be image/*
+                media_type = image_response.headers.get("content-type", "")
+                if media_type and not media_type.split(";")[0].strip().lower().startswith("image/"):
+                    raise LettaImageFetchError(url=url, reason=f"refusing non-image content type: {media_type}")
+                # Streamed size cap: abort past 10 MB
+                image_bytes = b""
+                async for chunk in image_response.aiter_bytes():
+                    image_bytes += chunk
+                    if len(image_bytes) > _IMAGE_FETCH_MAX_BYTES:
+                        raise LettaImageFetchError(url=url, reason=f"image exceeds {_IMAGE_FETCH_MAX_BYTES} byte cap")
                 image_media_type = image_response.headers.get("content-type")
                 return image_bytes, image_media_type
         except httpx.TimeoutException as e:
@@ -50,6 +167,9 @@ async def _fetch_image_from_url(url: str, max_retries: int = 1, timeout_seconds:
                 continue
             # Final attempt failed
             raise LettaImageFetchError(url=url, reason=f"Timeout after {max_retries + 1} attempts: {e}")
+        except LettaImageFetchError:
+            # Guard rejections and policy failures are NOT retried
+            raise
         except (httpx.RemoteProtocolError, httpx.HTTPStatusError) as e:
             # Don't retry on protocol errors or HTTP errors (4xx, 5xx)
             raise LettaImageFetchError(url=url, reason=str(e))
