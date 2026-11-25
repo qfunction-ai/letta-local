@@ -59,10 +59,24 @@ def _password_file_path() -> Path | None:
 
 
 def _read_password_file() -> str | None:
+    """Read the persisted password, warning + tightening if the file's
+    permissions are looser than 0600 (v0.16.40 R-6: a pre-existing loose file
+    is not silently reused)."""
     path = _password_file_path()
     if path is None:
         return None
     try:
+        mode = path.stat().st_mode & 0o777
+        if mode != 0o600:
+            logger.warning(
+                "server_password file has loose permissions (%o); tightening to 0600. "
+                "Check who created it.",
+                mode,
+            )
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
         value = path.read_text().strip()
         return value or None
     except OSError:
@@ -71,16 +85,32 @@ def _read_password_file() -> str | None:
 
 def _write_password_file(value: str) -> None:
     """Best-effort persistence, mode 0600. Unwritable dir: password still works
-    for this process (app.py's secure-mode block logs the guidance)."""
+    for this process (app.py's secure-mode block logs the guidance).
+
+    v0.16.40 (R-6): the file is created via a 0600 temp file + atomic rename —
+    there is no window where the password exists on disk with umask-derived
+    permissions (write_text-then-chmod had a 0644-shaped window). This is the
+    SINGLE writer: app.py's secure-mode block delegates here rather than
+    writing its own copy.
+    """
     path = _password_file_path()
     if path is None:
         return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(value)
-        path.chmod(0o600)
+        tmp = path.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, value.encode())
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
     except OSError:
-        pass
+        # Best-effort: password still works for this process.
+        try:
+            path.with_suffix(".tmp").unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def get_server_password() -> str | None:

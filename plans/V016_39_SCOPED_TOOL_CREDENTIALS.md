@@ -32,6 +32,23 @@ v0.16.39 narrowed the env and made installs wheel-only, but `install_pip_require
 
 ---
 
+### 1.4 The LOCAL executor is not a security boundary (v0.16.40 R-6/U-9 input)
+
+Under the LOCAL executor (Landlock unavailable — non-Landlock hosts, or the
+fallback path), tools run as the SERVER USER with no filesystem restriction:
+they can read `${LETTA_DIR}/server_password` (mode 0600, but same user) and
+`/proc/<ppid>/environ` (the server's own environment). B-5's guarantees
+(credential injection, non-persistability, scope enforcement) are API-layer
+controls and hold regardless of executor — but confidentiality of the SERVER
+password does not. This design must state plainly:
+
+- B-5 protects SCOPED tool credentials' scope and injection; it does not make
+  the LOCAL executor safe to run untrusted tool code.
+- Recommendation shipped with v0.16.40 (U-9): secure mode logs a startup
+  WARNING when the selected tool executor is LOCAL.
+- Operators running untrusted tools should use Landlock-capable hosts
+  (Docker Desktop with kernel Landlock support) or E2B/Modal.
+
 ## 2. Design: scoped tool credentials (B-5)
 
 ### 2.1 Credential shape

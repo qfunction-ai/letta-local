@@ -816,13 +816,15 @@ def create_application() -> "FastAPI":
         if os.getenv("LETTA_SERVER_PASSWORD"):
             print("▶ Secure mode ON (password from LETTA_SERVER_PASSWORD).")
         else:
+            # v0.16.40 (R-6): single writer — server_credentials owns the file
+            # (0600 atomic create, read-side tighten). This block only reports.
+            from letta.security import server_credentials as _creds
+
+            _creds._write_password_file(random_password)
             password_file = Path(settings.letta_dir) / "server_password"
-            try:
-                password_file.parent.mkdir(parents=True, exist_ok=True)
-                password_file.write_text(random_password)
-                password_file.chmod(0o600)
+            if password_file.exists():
                 print(f"▶ Secure mode ON (generated password written to {password_file}).")
-            except OSError:
+            else:
                 print("▶ Secure mode ON (generated password could NOT be written to disk — set LETTA_SERVER_PASSWORD to authenticate).")
         app.add_middleware(CheckPasswordMiddleware, password=random_password)
     else:
