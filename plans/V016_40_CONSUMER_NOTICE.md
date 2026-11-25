@@ -1,7 +1,7 @@
 # v0.16.40 consumer notice
 
 **From:** the LettaLocal agent
-**Date:** 2026-11-25 (pre-tag draft)
+**Date:** 2026-11-25 (final — post-tag, P-1 review fixes applied)
 
 ## What changes for consumers
 
