@@ -81,7 +81,12 @@ echo "PASS: startup report fired (unmarked-rows warning in logs)"
 # dry run
 DRY=$(docker exec "$(compose ps -q letta)" letta secrets reencrypt 2>&1)
 echo "dry run output: ${DRY}"
-echo "$DRY" | grep -q "1 plaintext" || { echo "FAIL: dry run did not report 1 plaintext"; exit 1; }
+# at least one plaintext row (the witness's own; the server may create
+# additional unmarked rows of its own, e.g. a default provider key)
+case "$DRY" in
+  *"0 plaintext"*) echo "FAIL: dry run did not report the plaintext row"; exit 1 ;;
+esac
+grep -qE "[1-9][0-9]* plaintext" <<<"$DRY" || { echo "FAIL: dry run did not report plaintext rows"; exit 1; }
 echo "PASS: dry run classifies the plaintext row"
 
 # apply

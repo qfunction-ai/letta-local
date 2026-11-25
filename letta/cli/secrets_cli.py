@@ -237,24 +237,35 @@ def report_unmarked_secret_rows() -> None:
 
     if not getattr(settings, "encryption_key", None):
         return
-    try:
-        import asyncio as _aio
+    import asyncio as _aio
 
+    async def _count() -> int:
         from sqlalchemy import text
 
-        async def _count() -> int:
-            total = 0
-            async with db_registry.async_session() as session:
-                for table, cols in SECRET_TABLES.items():
-                    for _attr, col in cols:
-                        r = await session.execute(
-                            text(f"SELECT COUNT(*) FROM {table} WHERE {col} IS NOT NULL AND {col} NOT LIKE :m"),
-                            {"m": ENCRYPTION_MARKER + "%"},
-                        )
-                        total += r.scalar_one()
-            return total
+        total = 0
+        async with db_registry.async_session() as session:
+            for table, cols in SECRET_TABLES.items():
+                for _attr, col in cols:
+                    r = await session.execute(
+                        text(f"SELECT COUNT(*) FROM {table} WHERE {col} IS NOT NULL AND {col} NOT LIKE :m"),
+                        {"m": ENCRYPTION_MARKER + "%"},
+                    )
+                    total += r.scalar_one()
+        return total
 
-        total = _aio.run(_count())
+    try:
+        try:
+            loop = _aio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            # Called from async context (lifespan): schedule on this loop
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                total = ex.submit(_aio.run, _count()).result()
+        else:
+            total = _aio.run(_count())
     except Exception:
         # Report-only: any failure (no DB yet, migration pending) is silent.
         return
