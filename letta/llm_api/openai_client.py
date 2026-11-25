@@ -209,7 +209,23 @@ class OpenAIClient(LLMClientBase):
 
     def _prepare_client_kwargs_embedding(self, embedding_config: EmbeddingConfig) -> dict:
         api_key = model_settings.openai_api_key or os.environ.get("OPENAI_API_KEY")
-        # supposedly the openai python client requires a dummy API key
+        # v0.16.40 (R-7): never default a CLOUD embedding endpoint to a dummy key.
+        # The fallback preset points at api.openai.com; with a dummy key the
+        # request still leaves the machine with uploaded document chunks in
+        # the body (401 at best) — in a product sold as local. Fail closed
+        # instead: no key + cloud endpoint = configuration error, not a
+        # silent remote call. Local endpoints (Ollama, vLLM, LM Studio...)
+        # keep the dummy-key convention — they don't authenticate.
+        endpoint = (embedding_config.embedding_endpoint or "").rstrip("/")
+        is_cloud = endpoint == "https://api.openai.com/v1" or endpoint == "https://api.openai.com"
+        if is_cloud and not api_key:
+            raise ValueError(
+                "No embedding model configured: an OpenAI embedding endpoint is set but no API key "
+                "(OPENAI_API_KEY / model settings). Configure a local embedding endpoint "
+                "(e.g. Ollama embeddinggemma) or provide a key. Refusing to send document "
+                "content to api.openai.com unauthenticated (v0.16.40 R-7)."
+            )
+        # Local endpoints: the openai python client requires some API key value
         api_key = api_key or "DUMMY_API_KEY"
         kwargs = {"api_key": api_key, "base_url": embedding_config.embedding_endpoint}
         return kwargs
