@@ -831,12 +831,9 @@ def create_application() -> "FastAPI":
         # v0.16.40 (U-6): insecure mode is ONLY for loopback. An unauthenticated
         # API bound to a non-loopback address is on the network — refuse to
         # start. The error names the fix.
-        _bind_host = os.getenv("HOST", "localhost").strip()
-        if _bind_host not in ("localhost", "127.0.0.1", "::1"):
-            raise RuntimeError(
-                f"Insecure mode (LETTA_SERVER_SECURE=false) refuses to bind non-loopback host '{_bind_host}'. "
-                "Set LETTA_SERVER_PASSWORD (and remove LETTA_SERVER_SECURE=false), or bind to 127.0.0.1."
-            )
+        from letta.security.server_credentials import check_insecure_bind_host
+
+        check_insecure_bind_host(None)
         print(
             "▶ WARNING: insecure mode (LETTA_SERVER_SECURE=false). The REST API is UNAUTHENTICATED — "
             "any process on this machine, including sandboxed tool code, can call every endpoint "
@@ -968,13 +965,10 @@ def start_server(
 ):
     """Convenience method to start the server from within Python"""
     # v0.16.40 (U-6): insecure mode + non-loopback bind refuses to start.
-    insecure = os.getenv("LETTA_SERVER_SECURE", "true").lower() == "false"
-    effective_host = host or os.getenv("HOST") or "localhost"
-    if insecure and effective_host.strip() not in ("localhost", "127.0.0.1", "::1"):
-        raise RuntimeError(
-            f"Insecure mode (LETTA_SERVER_SECURE=false) refuses to bind non-loopback host '{effective_host}'. "
-            "Set LETTA_SERVER_PASSWORD (and remove LETTA_SERVER_SECURE=false), or bind to 127.0.0.1."
-        )
+    if os.getenv("LETTA_SERVER_SECURE", "true").lower() == "false":
+        from letta.security.server_credentials import check_insecure_bind_host
+
+        check_insecure_bind_host(host)
     if debug:
         from letta.server.server import logger as server_logger
 

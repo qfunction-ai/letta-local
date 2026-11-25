@@ -12,63 +12,62 @@ letta/server/startup.sh (shell, witnessed by the rig/smoke, unit-tested
 here only for the decision helper).
 """
 
-import importlib
 import os
 
 import pytest
 
 
-def _reload_app_module():
-    import letta.server.rest_api.app as app_mod
-
-    return importlib.reload(app_mod)
-
-
-@pytest.fixture(autouse=True)
-def _clean_env(monkeypatch):
-    for var in ("LETTA_SERVER_SECURE", "HOST", "LETTA_SERVER_PASSWORD"):
-        monkeypatch.delenv(var, raising=False)
+from letta.security.server_credentials import check_insecure_bind_host
 
 
 class TestInsecureLoopbackAppGuard:
+    """The shared helper (check_insecure_bind_host) — used by both the
+    app-module block and start_server. Function-level tests, no module
+    reload: reloading the full app module re-runs app-level singletons and
+    poisons suite order."""
+
     def test_insecure_non_loopback_refuses(self, monkeypatch):
-        monkeypatch.setenv("LETTA_SERVER_SECURE", "false")
-        monkeypatch.setenv("HOST", "0.0.0.0")
+        monkeypatch.delenv("HOST", raising=False)
         with pytest.raises(RuntimeError, match="refuses to bind non-loopback host '0.0.0.0'"):
-            _reload_app_module()
+            check_insecure_bind_host("0.0.0.0")
 
-    def test_insecure_public_ip_refuses(self, monkeypatch):
-        monkeypatch.setenv("LETTA_SERVER_SECURE", "false")
-        monkeypatch.setenv("HOST", "192.168.1.10")
+    def test_insecure_public_ip_refuses(self):
         with pytest.raises(RuntimeError, match="refuses to bind non-loopback host"):
-            _reload_app_module()
+            check_insecure_bind_host("192.168.1.10")
 
-    def test_insecure_loopback_allowed(self, monkeypatch):
-        monkeypatch.setenv("LETTA_SERVER_SECURE", "false")
-        monkeypatch.setenv("HOST", "127.0.0.1")
-        app_mod = _reload_app_module()  # no raise
-        assert app_mod is not None
+    def test_insecure_loopback_allowed(self):
+        check_insecure_bind_host("127.0.0.1")  # no raise
 
-    def test_insecure_localhost_name_allowed(self, monkeypatch):
-        monkeypatch.setenv("LETTA_SERVER_SECURE", "false")
-        monkeypatch.setenv("HOST", "localhost")
-        _reload_app_module()
+    def test_insecure_localhost_name_allowed(self):
+        check_insecure_bind_host("localhost")
 
-    def test_insecure_ipv6_loopback_allowed(self, monkeypatch):
-        monkeypatch.setenv("LETTA_SERVER_SECURE", "false")
-        monkeypatch.setenv("HOST", "::1")
-        _reload_app_module()
+    def test_insecure_ipv6_loopback_allowed(self):
+        check_insecure_bind_host("::1")
 
-    def test_secure_non_loopback_allowed(self, monkeypatch):
-        monkeypatch.setenv("LETTA_SERVER_SECURE", "true")
+    def test_env_host_respected(self, monkeypatch):
         monkeypatch.setenv("HOST", "0.0.0.0")
-        _reload_app_module()
+        with pytest.raises(RuntimeError, match="'0.0.0.0'"):
+            check_insecure_bind_host(None)
 
-    def test_error_names_the_fix(self, monkeypatch):
-        monkeypatch.setenv("LETTA_SERVER_SECURE", "false")
-        monkeypatch.setenv("HOST", "0.0.0.0")
+    def test_none_falls_back_to_default(self, monkeypatch):
+        monkeypatch.delenv("HOST", raising=False)
+        check_insecure_bind_host(None)  # default localhost — no raise
+
+    def test_error_names_the_fix(self):
         with pytest.raises(RuntimeError, match="Set LETTA_SERVER_PASSWORD"):
-            _reload_app_module()
+            check_insecure_bind_host("0.0.0.0")
+
+    def test_app_module_delegates(self):
+        """Source-shape: app.py and start_server call the helper, no inline
+        copies of the rule."""
+        import inspect
+
+        import letta.server.rest_api.app as app_mod
+
+        src = inspect.getsource(app_mod)
+        assert "check_insecure_bind_host(None)" in src
+        assert "check_insecure_bind_host(host)" in src
+        assert src.count("refuses to bind non-loopback") == 0  # no inline copies
 
 
 class TestStartServerGuard:

@@ -194,6 +194,17 @@ def get_sensitive_env_values() -> set[str]:
     return values
 
 
+def check_insecure_bind_host(host: str | None) -> None:
+    """v0.16.40 (U-6): insecure mode is only for loopback. Raises RuntimeError
+    (naming the fix) when insecure mode would bind a non-loopback host."""
+    effective = (host or os.getenv("HOST") or "localhost").strip()
+    if effective not in ("localhost", "127.0.0.1", "::1"):
+        raise RuntimeError(
+            f"Insecure mode (LETTA_SERVER_SECURE=false) refuses to bind non-loopback host '{effective}'. "
+            "Set LETTA_SERVER_PASSWORD (and remove LETTA_SERVER_SECURE=false), or bind to 127.0.0.1."
+        )
+
+
 def warn_on_short_secrets() -> None:
     """v0.16.40 (R-5): one WARNING per start when a configured secret is too
     short for containment matching (exact-match-only protection)."""
