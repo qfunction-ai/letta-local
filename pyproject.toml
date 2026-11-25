@@ -9,6 +9,7 @@ license = {text = "Apache License"}
 readme = "README.md"
 requires-python = "<3.14,>=3.11"
 dependencies = [
+    "pypdf>=6.21.4",
     "urllib3>=2.8.0",
     "typer>=0.15.2",
     "questionary>=2.0.1",
