@@ -140,6 +140,27 @@ On first request, the probe sends a test request with one tool:
 
 Results are cached in-memory. The probe only runs once per model per process.
 
+## Turning on encryption on an existing install
+
+If the server ran without `LETTA_ENCRYPTION_KEY`, secrets (agent API keys, provider keys, MCP tokens) are stored as plaintext in the database. Setting a key later does **not** re-encrypt them. Fix:
+
+1. Set `LETTA_ENCRYPTION_KEY` (32+ random characters).
+2. Dry run — see what would change (in the container):
+   ```bash
+   docker exec <container> letta secrets reencrypt
+   ```
+   Reports counts per class: unmarked-encrypted (to be marked), plaintext (to be encrypted), ambiguous (needs a decision). Ambiguous rows are listed by table/column/ID — never values.
+3. Apply:
+   ```bash
+   docker exec <container> letta secrets reencrypt --apply --yes
+   ```
+   Ambiguous rows block `--apply` unless you re-enter those secrets through the API (the write path now encrypts them) or pass `--treat-ambiguous-as-plaintext --yes`, declaring no other key has ever been used on this database.
+4. Only then set `LETTA_REQUIRE_ENCRYPTION=true` (refuses future plaintext stores).
+
+A second `--apply` changes nothing (idempotent). After a successful run, the startup unmarked-rows warning goes quiet.
+
+**Do not downgrade below v0.16.40 after secrets have been written (or after `--apply`) without restoring a database backup taken before the upgrade** — older versions read the marked ciphertext (`enc:v1:...`) as plaintext, silently handing garbage credentials to tools.
+
 ## Configuration
 
 ### ModelConstraints

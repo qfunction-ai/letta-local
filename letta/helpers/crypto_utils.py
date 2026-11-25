@@ -20,6 +20,15 @@ _crypto_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="CryptoW
 
 # Common API key prefixes that should not be considered encrypted
 # These are plaintext credentials that happen to be long strings
+# v0.16.40 (E-1): ciphertext version marker. New ciphertext is prefixed
+# `enc:v1:`; detection becomes exact (is_encrypted) for marked values and the
+# read path never heuristic-falls-back on them. v1 = today's format: base64
+# (salt + iv + ciphertext + tag), AES-256-GCM, PBKDF2 key derivation with
+# today's parameters. Any KDF/cipher/key-handling change (e.g. key rotation)
+# gets v2.
+ENCRYPTION_MARKER = "enc:v1:"
+
+
 PLAINTEXT_PREFIXES = (
     "sk-",  # OpenAI, Anthropic
     "pk-",  # Public keys
@@ -146,8 +155,8 @@ class CryptoUtils:
         # Combine salt + iv + ciphertext + tag
         encrypted_data = salt + iv + ciphertext + tag
 
-        # Return as base64 encoded string
-        return base64.b64encode(encrypted_data).decode("utf-8")
+        # Return as base64 encoded string, marked (v0.16.40 E-1)
+        return ENCRYPTION_MARKER + base64.b64encode(encrypted_data).decode("utf-8")
 
     @classmethod
     async def encrypt_async(cls, plaintext: str, master_key: Optional[str] = None) -> str:
@@ -195,8 +204,8 @@ class CryptoUtils:
         # Combine salt + iv + ciphertext + tag
         encrypted_data = salt + iv + ciphertext + tag
 
-        # Return as base64 encoded string
-        return base64.b64encode(encrypted_data).decode("utf-8")
+        # Return as base64 encoded string, marked (v0.16.40 E-1)
+        return ENCRYPTION_MARKER + base64.b64encode(encrypted_data).decode("utf-8")
 
     @classmethod
     def decrypt(cls, encrypted: str, master_key: Optional[str] = None) -> str:
@@ -225,6 +234,11 @@ class CryptoUtils:
             )
 
         try:
+            # v0.16.40 (E-1): strip the version marker if present (new writes
+            # carry it; legacy values are bare base64)
+            if encrypted.startswith(ENCRYPTION_MARKER):
+                encrypted = encrypted[len(ENCRYPTION_MARKER):]
+
             # Decode from base64
             encrypted_data = base64.b64decode(encrypted)
 
@@ -276,6 +290,10 @@ class CryptoUtils:
             )
 
         try:
+            # v0.16.40 (E-1): strip the version marker if present
+            if encrypted.startswith(ENCRYPTION_MARKER):
+                encrypted = encrypted[len(ENCRYPTION_MARKER):]
+
             # Decode from base64
             encrypted_data = base64.b64decode(encrypted)
 
@@ -309,6 +327,12 @@ class CryptoUtils:
         false positives. Strings matching known API key prefixes are assumed to be
         plaintext credentials, not encrypted values.
         """
+        # v0.16.40 (E-1): marked values are ciphertext, exactly — the prefix
+        # is self-identifying and overrides every heuristic (the base64 test
+        # below would fail on the marker's colons).
+        if value.startswith(ENCRYPTION_MARKER):
+            return True
+
         # Exclude strings that look like known API key formats
         if any(value.startswith(prefix) for prefix in PLAINTEXT_PREFIXES):
             return False

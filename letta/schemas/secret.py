@@ -3,7 +3,7 @@ from typing import Any, Dict, Optional
 from pydantic import BaseModel, ConfigDict, PrivateAttr
 from pydantic_core import core_schema
 
-from letta.helpers.crypto_utils import CryptoUtils
+from letta.helpers.crypto_utils import ENCRYPTION_MARKER, CryptoUtils
 from letta.log import get_logger
 from letta.utils import bounded_gather
 
@@ -28,8 +28,23 @@ class Secret(BaseModel):
     encrypted_value: Optional[str] = None
     # Cache the decrypted value to avoid repeated decryption (not serialized for security)
     _plaintext_cache: Optional[str] = PrivateAttr(default=None)
+    # v0.16.40 (E-1): WHY get_plaintext(_async) returned what it did —
+    # 'decrypted' (with the configured key), 'no-key-fallback' (no key
+    # configured; stored value returned as plaintext), 'plaintext-fallback'
+    # (decrypt failed, value not marked, heuristic says not ciphertext),
+    # 'marked-raise' is NOT recorded (it raises). Managers use this to decide
+    # reuse: only 'decrypted' counts as unchanged-safe.
+    _read_provenance: Optional[str] = PrivateAttr(default=None)
 
     model_config = ConfigDict(frozen=True)
+
+    def was_decrypted_with_key(self) -> bool:
+        """True only if the last get_plaintext(_async) genuinely decrypted the
+        stored value with the configured key (v0.16.40 E-1). A stored value is
+        safe to REUSE only when this is True — a fallback (legacy plaintext)
+        must be re-encrypted, and a raised read (marked, wrong key) must not be
+        treated as a comparison value at all."""
+        return self._read_provenance == "decrypted"
 
     @classmethod
     def from_plaintext(cls, value: Optional[str]) -> "Secret":
@@ -184,26 +199,45 @@ class Secret(BaseModel):
             plaintext = CryptoUtils.decrypt(self.encrypted_value)
             # Cache the decrypted value (PrivateAttr fields can be mutated even with frozen=True)
             self._plaintext_cache = plaintext
+            self._read_provenance = "decrypted"
             return plaintext
         except ValueError as e:
             error_msg = str(e)
+
+            # v0.16.40 (E-1): a MARKED value that fails to decrypt never falls
+            # back — wrong key or corruption. Returning the stored string as
+            # "plaintext" would hand garbage credentials to tools.
+            is_marked = self.encrypted_value.startswith(ENCRYPTION_MARKER)
 
             # Handle missing encryption key - return stored value as plaintext.
             # When no key is configured, the value was most likely stored as plaintext
             # (since encryption requires a key). The is_encrypted() heuristic is unreliable
             # here — it false-positives on long alphanumeric API keys that happen to be
-            # valid base64 with decoded length >= 45 bytes.
+            # valid base64 with decoded length >= 45 bytes. Marked values are exempt from
+            # this fallback: a marker without a configured key is a configuration error.
             if "No encryption key configured" in error_msg:
+                if is_marked:
+                    logger.error(
+                        "Encrypted (marked) Secret value present but no encryption key is configured. "
+                        "Set LETTA_ENCRYPTION_KEY."
+                    )
+                    raise
                 logger.debug("No encryption key configured - returning stored value as plaintext")
                 self._plaintext_cache = self.encrypted_value
+                self._read_provenance = "no-key-fallback"
                 return self.encrypted_value
 
             # Handle decryption failure - check if value might be plaintext
             elif "Failed to decrypt data" in error_msg:
+                if is_marked:
+                    # Marked + failed decrypt = wrong key or corruption: raise
+                    logger.error("Failed to decrypt marked Secret value - wrong key or corrupted data")
+                    raise
                 if not CryptoUtils.is_encrypted(self.encrypted_value):
                     # It's plaintext that was stored when no key was available
                     logger.debug("Secret value appears to be plaintext (stored without encryption)")
                     self._plaintext_cache = self.encrypted_value
+                    self._read_provenance = "plaintext-fallback"
                     return self.encrypted_value
                 # Otherwise, it's corrupted or wrong key
                 logger.error("Failed to decrypt Secret value - data may be corrupted or wrong key")
@@ -238,25 +272,43 @@ class Secret(BaseModel):
             plaintext = await CryptoUtils.decrypt_async(self.encrypted_value)
             # Cache the decrypted value
             self._plaintext_cache = plaintext
+            self._read_provenance = "decrypted"
             return plaintext
         except ValueError as e:
             error_msg = str(e)
+
+            # v0.16.40 (E-1): a MARKED value that fails to decrypt never falls
+            # back — wrong key or corruption. See get_plaintext() for rationale.
+            is_marked = self.encrypted_value.startswith(ENCRYPTION_MARKER)
 
             # Handle missing encryption key - return stored value as plaintext.
             # When no key is configured, the value was most likely stored as plaintext
             # (since encryption requires a key). The is_encrypted() heuristic is unreliable
             # here — it false-positives on long alphanumeric API keys that happen to be
-            # valid base64 with decoded length >= 45 bytes.
+            # valid base64 with decoded length >= 45 bytes. Marked values are exempt from
+            # this fallback: a marker without a configured key is a configuration error.
             if "No encryption key configured" in error_msg:
+                if is_marked:
+                    logger.error(
+                        "Encrypted (marked) Secret value present but no encryption key is configured. "
+                        "Set LETTA_ENCRYPTION_KEY."
+                    )
+                    raise
                 logger.debug("No encryption key configured - returning stored value as plaintext")
                 self._plaintext_cache = self.encrypted_value
+                self._read_provenance = "no-key-fallback"
                 return self.encrypted_value
 
             # Handle decryption failure - check if value might be plaintext
             elif "Failed to decrypt data" in error_msg:
+                if is_marked:
+                    # Marked + failed decrypt = wrong key or corruption: raise
+                    logger.error("Failed to decrypt marked Secret value - wrong key or corrupted data")
+                    raise
                 if not CryptoUtils.is_encrypted(self.encrypted_value):
                     logger.debug("Secret value appears to be plaintext (stored without encryption)")
                     self._plaintext_cache = self.encrypted_value
+                    self._read_provenance = "plaintext-fallback"
                     return self.encrypted_value
                 logger.error("Failed to decrypt Secret value - data may be corrupted or wrong key")
                 raise

@@ -854,6 +854,12 @@ def create_application() -> "FastAPI":
 
     warn_on_short_secrets()
 
+    # v0.16.40 (E-1): report-only count of unmarked secret rows (legacy
+    # plaintext / pre-.40 ciphertext). Gated on a configured key.
+    from letta.cli.secrets_cli import report_unmarked_secret_rows
+
+    report_unmarked_secret_rows()
+
     # v0.16.40 (U-5/L-10): the image-fetch SSRF guard's operator escape hatch.
     # When on, image URLs may target private/loopback addresses — lab setups
     # serving images internally. Loud on purpose, every start.

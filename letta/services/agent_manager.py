@@ -958,20 +958,45 @@ class AgentManager:
                 # TODO: do we need to delete each time or can we just upsert?
                 await session.execute(delete(AgentEnvironmentVariable).where(AgentEnvironmentVariable.agent_id == aid))
 
-                # Decrypt existing values to check for changes (async to avoid blocking)
+                # Decrypt existing values to check for changes (async to avoid blocking).
+                # v0.16.40 (E-1): a value is "unchanged" ONLY if it decrypted with the
+                # configured key (Secret.was_decrypted_with_key). Two legacy failure
+                # modes must both re-encrypt:
+                #   - fallback reads (legacy plaintext stored without a key): the stored
+                #     value equals the incoming value, but the ROW is still plaintext —
+                #     re-encrypting is the entire point of re-sending it (Delta's D-3);
+                #   - ambiguous reads (high-entropy plaintext that passes the base64
+                #     heuristic): get_plaintext_async RAISES on these — the update would
+                #     500 before reaching the reuse logic. Catch, treat as changed,
+                #     re-encrypt from the INCOMING value: re-sending through the API is
+                #     the operator's documented fix for ambiguous rows.
                 existing_values: dict[str, str | None] = {}
+                existing_decrypted: dict[str, bool] = {}
                 for k, existing_env in existing_env_vars.items():
                     if existing_env.value_enc:
                         existing_secret = Secret.from_encrypted(existing_env.value_enc)
-                        existing_values[k] = await existing_secret.get_plaintext_async()
+                        try:
+                            existing_values[k] = await existing_secret.get_plaintext_async()
+                        except ValueError:
+                            # Marked-with-wrong-key or ambiguous legacy plaintext: not
+                            # comparable. Treat as changed (never reused).
+                            existing_values[k] = None
+                            existing_decrypted[k] = False
+                            continue
+                        existing_decrypted[k] = existing_secret.was_decrypted_with_key()
                     else:
                         existing_values[k] = None
+                        existing_decrypted[k] = False
 
-                # Identify values that need encryption (new or changed)
+                # Identify values that need encryption (new, changed, or not
+                # stored-as-key-encrypted-ciphertext)
                 to_encrypt = {
                     k: v
                     for k, v in agent_secrets.items()
-                    if k not in existing_env_vars or existing_values.get(k) != v or not existing_env_vars[k].value_enc
+                    if k not in existing_env_vars
+                    or not existing_decrypted.get(k, False)
+                    or existing_values.get(k) != v
+                    or not existing_env_vars[k].value_enc
                 }
 
                 # Batch encrypt new/changed values concurrently (async to avoid blocking event loop)
