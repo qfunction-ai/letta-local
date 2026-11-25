@@ -204,71 +204,43 @@ PYSEC-2026-97
 PYSEC-2026-98
 PYSEC-2026-99
 # R-2 scope correction: filelock==3.19.1 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-CVE-2026-112909
 # R-2 scope correction: filelock==3.19.1 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-CVE-2026-112910
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-CVE-2026-113714
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-CVE-2026-113717
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-CVE-2026-113718
 # R-2 scope correction: msgpack==1.1.1 (extras: desktop) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-CVE-2026-114613
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-CVE-2026-115927
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-CVE-2026-116577
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-CVE-2026-116578
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-CVE-2026-126347
 # R-2 scope correction: langsmith==0.4.18 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
 CVE-2026-59152
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-GHSA-3hv7-mjh2-fv65
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-GHSA-8423-8fgw-73vq
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-GHSA-c2m8-h5v5-343r
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-GHSA-chx6-46f5-w4vp
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-GHSA-pw6j-qg29-8w7f
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2025-265
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2025-266
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2025-267
 # R-2 scope correction: filelock==3.19.1 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-1374
 # R-2 scope correction: filelock==3.19.1 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-1375
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-140
 # R-2 scope correction: langchain-core==0.3.75 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
 PYSEC-2026-1518
 # R-2 scope correction: pg8000==1.31.4 (extras: postgres) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
 PYSEC-2026-1766
 # R-2 scope correction: pytest==8.4.1 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-1845
 # R-2 scope correction: python-socketio==5.13.0 (extras: desktop) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-1854
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-2009
 # R-2 scope correction: flask==3.1.2 (extras: desktop) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-2151
 # R-2 scope correction: langchain==0.3.27 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
 PYSEC-2026-2192
 # R-2 scope correction: langchain-core==0.3.75 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
 PYSEC-2026-2193
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-2287
 # R-2 scope correction: granian==2.5.1 (extras: experimental) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-2502
 # R-2 scope correction: granian==2.5.1 (extras: experimental) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-2503
 # R-2 scope correction: langsmith==0.4.18 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
 PYSEC-2026-2555
 # R-2 scope correction: langchain-core==0.3.75 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
@@ -284,58 +256,32 @@ PYSEC-2026-2583
 # R-2 scope correction: langsmith==0.4.18 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
 PYSEC-2026-2584
 # R-2 scope correction: python-engineio==4.12.2 (extras: desktop) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-3032
 # R-2 scope correction: python-engineio==4.12.2 (extras: desktop) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-3033
 # R-2 scope correction: python-socketio==5.13.0 (extras: desktop) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-3042
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-3387
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-3388
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-3389
 # R-2 scope correction: msgpack==1.1.1 (extras: desktop) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-3625
 # R-2 scope correction: h2==4.3.0 (extras: modal) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-3628
 # R-2 scope correction: langchain-core==0.3.75 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
 PYSEC-2026-373
 # R-2 scope correction: tornado==6.5.2 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-3928
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-4011
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-4012
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-4013
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-4014
 # R-2 scope correction: hpack==4.1.0 (extras: modal) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
-PYSEC-2026-4053
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-4372
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-4374
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-4375
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-4378
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-4379
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-4380
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-4381
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-4382
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-4384
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-4385
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-4386
 # R-2 scope correction: virtualenv==20.34.0 (extras: dev) — dev-extra only; the container installs it because --all-extras includes the dev extra while --no-dev drops only the dev GROUP. Revisit: v0.16.40 C-2 extras trim (decide whether the container should install the dev extra at all).
-PYSEC-2026-4387
 # R-2 scope correction: langchain-text-splitters==0.3.9 (extras: desktop, external-tools) — extras-only, absent from the original non-all-extras export; not reachable unless those extras are installed. Revisit: v0.16.40 C-2 extras trim.
 PYSEC-2026-77

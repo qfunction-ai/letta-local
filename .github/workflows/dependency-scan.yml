@@ -45,10 +45,12 @@ jobs:
         run: python -m pip install pip-audit
 
       - name: Export lockfile to requirements
-        # R-2 (Part B review): --all-extras — the scan must match what the
-        # container installs (Dockerfile: uv sync --frozen --no-dev --all-extras).
-        # Without it CI saw 251 pins vs the container's 342.
-        run: uv export --format requirements-txt --frozen --no-hashes --no-dev --all-extras -o /tmp/requirements.txt
+        # R-2 (Part B review): the scan must match what the container installs.
+        # C-2 (v0.16.40): the container now installs an EXPLICIT extras list
+        # (Dockerfile: postgres, sqlite, server, external-tools) — dev dropped,
+        # the rest pending the consumer matrix. Keep this export in lockstep
+        # with the Dockerfile's --extra list, same commit.
+        run: uv export --format requirements-txt --frozen --no-hashes --no-dev --extra postgres --extra sqlite --extra server --extra external-tools -o /tmp/requirements.txt
 
       - name: Build pip-audit ignore flags from baseline
         run: |

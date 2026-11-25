@@ -1,24 +1,33 @@
-# Request to Delta: confirm the extras your stack needs (v0.16.40 C-2)
+# v0.16.40 C-2 extras trim: Delta confirmation request
 
-**From:** LettaLocal2 (via Ryan) · **Date:** 2026-11-24 · **Channel:** usual file-based handoff
+**From:** the LettaLocal agent (via Ryan)
+**Date:** 2026-11-25
+**Re:** container extras trim — which optional dependency groups does Delta actually import?
 
-The v0.16.40 plan (REV 2, approved) trims the container from `--all-extras` to the extras consumers actually use — the dependency baseline (353 advisories) shrinks with it, and an extra that fails at runtime fails when an optional import is first reached, so we need this right before the trim, not after.
+## What's changing
 
-**The container currently installs all 13 extras.** Below are the drop candidates. For each, confirm whether Delta's code or tools import anything from it (directly or via a server feature you rely on). Answer per line: **KEEP** (with what uses it) or **DROP**.
+The v0.16.39 container installs ALL optional extras (`uv sync --all-extras`), which is why the dependency scan carries 342 pins and a large baseline of advisories that exist only in extras no QFunction product uses. v0.16.40 trims the container to only the extras a consumer needs. **The dev extra is already decided: it drops.** (43 advisory IDs of noise — pytest, virtualenv, tornado, filelock — test tooling in a production image.)
 
-| Extra | Contents | Drop rationale |
+## The candidates (drop unless you use them)
+
+| Extra | Notable packages | Notes |
 |---|---|---|
-| `desktop` | langchain, langchain-community, wikipedia, locust, magika, tiktoken, aiosqlite, sqlite-vec, pgvector, websockets, fastapi, uvicorn, async-lru | The upstream desktop-app bundle. langchain-community is where much of the advisory noise (nltk etc.) enters. Delta runs its own React+FastAPI frontend, not this. |
-| `external-tools` | langchain, langchain-community, wikipedia, exa-py, turbopuffer | **The one to check carefully**: if Delta agents use the built-in `web_search` tool, does it import exa-py at runtime? And does anything you run use turbopuffer (archival/vector search)? |
-| `bedrock` | boto3, aioboto3 | AWS Bedrock provider. You run local Ollama / OpenAI-compatible endpoints. |
-| `modal` | modal | The v2 remote sandbox (Modal). Sandbox execution is Landlock-local since v0.16.30. |
-| `cloud-tool-sandbox` | e2b-code-interpreter | E2B, the `run_code` builtin's remote executor. If nothing invokes `run_code`, this goes. |
-| `pinecone` | pinecone | Vector store backend. You use PG/pgvector. |
-| `experimental` | uvloop, granian | Alternative servers; the container runs uvicorn. |
-| `profiling` | ddtrace | Datadog tracing. |
+| `desktop` | pyzmq, ipykernel, tornado, matplotlib, jupyter chain | the biggest advisory-noise block (8 IDs in the R-2 additions) |
+| `external-tools` | flask, gevent, locust, python-socketio | needs careful checking: web_search/exa-py may live here |
+| `experimental` | — | 1 ID |
+| `modal` | modal, grpclib, synchronicity | 2 IDs |
+| `postgres` | asyncpg, pg8000 | **likely KEEP — the rig and consumers run PG** |
+| `dev` | pytest chain, black, ruff, pre-commit | already dropped, listed for completeness |
 
-**Presumed KEEP (no action needed unless you object):** `postgres` (PG backend), `server` (uvicorn/fastapi/websockets — the container's own server), `sqlite` (local dev), `redis` (if you use background streaming; otherwise say DROP), `dev` (never in the container image).
+## What Delta should answer (file handoff through Ryan, as usual)
 
-Also confirm: does Delta's stack import anything from the `letta` package that lives only in an extra's module path (e.g. `letta.services.file_processor.*` variants)? If unsure, say so — the trim ships with an import smoke test that walks the mounted routers and tool executors, but that covers the server's surface, not your client code's.
+For each extra above, KEEP or DROP, with the reason if non-obvious. Specifically:
+1. Do Delta's agents or tools import anything from `desktop` (zmq/ipykernel/matplotlib)?
+2. Does anything in Delta's toolchain go through `external-tools` — in particular does the `web_search` tool (exa-py) or anything flask-based run in the container Delta uses?
+3. Any need for `modal` (sandboxed executors) or `experimental`?
 
-Reply as a file in your usual handoff location; Ryan relays. The trim lands in v0.16.40 only after your confirmation, and you'll run your suite against the trimmed image before it's adopted.
+Default for no answer by implementation time: the trim takes only what the rig proves (postgres stays, dev drops), and everything else drops from the CONTAINER only — consumers can still `pip install letta[extra]` themselves; the image is what changes.
+
+## Why this matters to Delta
+
+The trimmed image is what Delta re-pins onto. If Delta needs an extra we dropped, the import fails at runtime, not at install (the v0.16.40 plan's RUNTIME witness covers our router/executor import surface — it cannot see Delta's own tool code). A one-line answer per extra avoids a broken re-pin.

@@ -34,7 +34,14 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 COPY pyproject.toml uv.lock README.md ./
 
 # Install dependencies before copying source — source changes don't invalidate the dep cache
-RUN uv sync --frozen --no-dev --all-extras --python 3.11
+# v0.16.40 C-2 step 1: explicit extras, not --all-extras. The dev extra is
+# GONE (test tooling in a production image; 43 advisory IDs of noise — pytest,
+# virtualenv, tornado, filelock). Remaining extras pending the consumer matrix
+# (plans/V016_40_DELTA_EXTRAS_REQUEST.md): postgres+sqlite+server+external-tools
+# are load-bearing for the rig; desktop/experimental/modal/profiling/bedrock/
+# pinecone/redis/cloud-tool-sandbox await KEEP/DROP answers.
+RUN uv sync --frozen --no-dev --python 3.11 \
+    --extra postgres --extra sqlite --extra server --extra external-tools
 
 # Copy the rest of the application code
 COPY . .
