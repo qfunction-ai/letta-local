@@ -64,15 +64,22 @@ jobs:
       - name: Audit dependencies (full, for the record)
         # --no-deps: the export is the fully-pinned closure; audit exactly the
         # pins, no re-resolution.
-        run: pip-audit -r /tmp/requirements.txt --no-deps --format json -o /tmp/audit_full.json || true
+        # --disable-pip (v0.16.40 B-3 hardening, approved with the .39 release
+        # review): with --no-deps, pip-audit installs NOTHING — it only looks
+        # up each pinned name==version in the advisory database. This removes
+        # the source-build failure class entirely (the lxml cp314 sdist crash
+        # behind the v0.16.39 CI fix) and the runner's Python version stops
+        # mattering. Python 3.11 setup stays, for container parity.
+        run: pip-audit -r /tmp/requirements.txt --no-deps --disable-pip --format json -o /tmp/audit_full.json || true
 
       - name: Audit dependencies (gated)
         run: |
           # pip-audit exits 1 when it finds (non-ignored) vulnerabilities but
           # still writes the JSON output; the gate script classifies whatever
           # it finds (new fixable fails, new unfixable warns).
+          # --disable-pip: see the full-audit step above.
           set +e
-          pip-audit -r /tmp/requirements.txt --no-deps $IGNORE_FLAGS --format json -o /tmp/audit.json
+          pip-audit -r /tmp/requirements.txt --no-deps --disable-pip $IGNORE_FLAGS --format json -o /tmp/audit.json
           AUDIT_EXIT=$?
           set -e
           echo "pip-audit exit: ${AUDIT_EXIT}"
