@@ -8,6 +8,25 @@ set -e  # Exit on any error
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8283}"
 
+# v0.16.40 (U-6, review P-2): the CONTAINER requires secure mode. A 0.0.0.0
+# bind in a container is what makes the port reachable from outside it, so
+# insecure mode in a container is exactly the case U-6 exists to prevent.
+# Loopback binds still work (docker run --network host with HOST=127.0.0.1
+# for local development). The error names the fix.
+if [ "${LETTA_SERVER_SECURE:-}" = "false" ] || [ "${SECURE:-}" = "false" ]; then
+    case "$HOST" in
+        localhost|127.0.0.1|::1)
+            echo "WARNING: insecure mode on loopback ($HOST) — local development only."
+            ;;
+        *)
+            echo "ERROR: insecure mode (LETTA_SERVER_SECURE=false) refuses to bind $HOST in the container."
+            echo "Set LETTA_SERVER_PASSWORD, or run with --network host and HOST=127.0.0.1."
+            exit 1
+            ;;
+    esac
+fi
+
+
 # Function to wait for PostgreSQL to be ready
 wait_for_postgres() {
     until pg_isready -U "${POSTGRES_USER:-letta}" -h localhost; do
