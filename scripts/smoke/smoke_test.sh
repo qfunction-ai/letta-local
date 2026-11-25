@@ -872,10 +872,22 @@ CTR="$(docker compose -f "${COMPOSE_FILE}" ps -q letta 2>/dev/null | head -1)"
 if [ -n "${CTR}" ]; then
   if docker exec "$CTR" python - <<'PY23' > /tmp/rig_pubfetch.log 2>&1
 import asyncio, sys
+import letta.helpers.message_helper as mh
 from letta.helpers.message_helper import _fetch_image_from_url
 
 UA = "LettaLocal-rig/0.16.40 (+https://github.com/qfunction-ai/letta-local)"
 URL = "https://commons.wikimedia.org/wiki/Special:FilePath/Example.png"
+
+# Nit 2 (ceb43f3 review): confirm the redirect actually happened. Wrap the
+# single-lookup validator and count calls: the original URL plus at least
+# one hop. If Wikimedia ever serves the file directly, the redirect path
+# goes untested — the check must FAIL, not quietly pass.
+lookup_urls = []
+_real_validate = mh._validate_image_fetch_address
+def _counting_validate(url):
+    lookup_urls.append(url)
+    return _real_validate(url)
+mh._validate_image_fetch_address = _counting_validate
 
 try:
     data, media_type = asyncio.run(_fetch_image_from_url(URL, timeout_seconds=30.0, user_agent=UA))
@@ -886,9 +898,22 @@ except Exception as e:
     if "403" in msg:
         print("PUBFETCH_FAIL: 403 (policy refusal — check the UA compliance)")
         sys.exit(1)
-    # Genuine network unreachability -> loud SKIP (release gate must still PASS).
-    if cls in ("LettaImageFetchError",) and ("DNS resolution failed" in msg or "timed out" in msg.lower() or "ConnectError" in msg or "connect" in msg.lower()):
+    # Nit 1 (ceb43f3 review): certificate failures are classified FIRST and
+    # are always FAIL — a real cert chain is the main thing this check
+    # exists to prove. httpx reports TLS verification failures wrapped in
+    # ConnectError, so wording-based SKIP matching must never catch them.
+    low = msg.lower()
+    if ("CERTIFICATE_VERIFY_FAILED" in msg or "certificate" in low
+            or "hostname mismatch" in low or "ssl" in low):
+        print(f"PUBFETCH_FAIL: TLS/certificate failure: {msg[:200]}")
+        sys.exit(1)
+    # Genuine network unreachability -> loud SKIP (release gate must still
+    # PASS). SKIP ONLY for DNS failure, timeouts, or no route to host.
+    if cls in ("LettaImageFetchError",) and ("DNS resolution failed" in msg or "timed out" in low):
         print("PUBFETCH_SKIP: no outbound network from the rig host")
+        sys.exit(2)
+    if "ConnectError" in msg or "no route to host" in low or "network is unreachable" in low:
+        print(f"PUBFETCH_SKIP: no outbound network from the rig host ({msg[:120]})")
         sys.exit(2)
     print(f"PUBFETCH_FAIL: {cls}: {msg[:200]}")
     sys.exit(1)
@@ -899,7 +924,11 @@ if not data:
 if not (media_type or "").lower().startswith("image/"):
     print(f"PUBFETCH_FAIL: content type {media_type}")
     sys.exit(1)
-print(f"PUBFETCH_PASS: {len(data)} bytes, {media_type}")
+# Nit 2: the redirect path must have been exercised — original + >= 1 hop.
+if len(lookup_urls) < 2:
+    print(f"PUBFETCH_FAIL: no redirect happened ({len(lookup_urls)} lookup(s)) — redirect path untested")
+    sys.exit(1)
+print(f"PUBFETCH_PASS: {len(data)} bytes, {media_type}, {len(lookup_urls)} validated hops")
 PY23
   then
     if grep -q "PUBFETCH_PASS" /tmp/rig_pubfetch.log; then
