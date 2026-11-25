@@ -266,6 +266,17 @@ async def lifespan(app_: FastAPI):
     except Exception as e:
         logger.warning(f"[Worker {worker_id}] EcoLogits initialization failed: {e}")
 
+    # v0.16.40 (E-1): report-only count of unmarked secret rows (legacy
+    # plaintext / pre-.40 ciphertext), gated on a configured key. Runs HERE —
+    # the DB is migrated and ready; the app-module init was too early (the
+    # count silently failed during migrations).
+    try:
+        from letta.cli.secrets_cli import report_unmarked_secret_rows
+
+        report_unmarked_secret_rows()
+    except Exception as e:
+        logger.warning(f"[Worker {worker_id}] unmarked-secret-row report failed: {e}")
+
     set_readiness_state(reason="ready", source="lifespan_startup_complete")
     logger.info(f"[Worker {worker_id}] Lifespan startup completed")
     yield
@@ -851,11 +862,6 @@ def create_application() -> "FastAPI":
 
     warn_on_short_secrets()
 
-    # v0.16.40 (E-1): report-only count of unmarked secret rows (legacy
-    # plaintext / pre-.40 ciphertext). Gated on a configured key.
-    from letta.cli.secrets_cli import report_unmarked_secret_rows
-
-    report_unmarked_secret_rows()
 
     # v0.16.40 (U-5/L-10): the image-fetch SSRF guard's operator escape hatch.
     # When on, image URLs may target private/loopback addresses — lab setups

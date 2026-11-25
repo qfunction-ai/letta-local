@@ -1,0 +1,13 @@
+# E-1 witness override: persist PG's anonymous volume across the gen-2
+# restart. The base compose's named volume covers /root/.letta only; the
+# pgvector image declares /var/lib/postgresql/data as a VOLUME, which compose
+# recreates empty on container recreation — the seeded gen-1 row vanished.
+# This override names it so `compose down` (no -v) keeps the data.
+services:
+  letta:
+    volumes:
+      - smoke-data:/root/.letta
+      - e1-pgdata:/var/lib/postgresql/data
+
+volumes:
+  e1-pgdata:

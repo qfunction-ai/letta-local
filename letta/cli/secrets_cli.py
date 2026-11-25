@@ -38,7 +38,7 @@ SECRET_TABLES: dict[str, list[tuple[str, str]]] = {
     "agent_environment_variables": [("value_enc", "value_enc")],
     "sandbox_environment_variables": [("value_enc", "value_enc")],
     "providers": [("api_key_enc", "api_key_enc"), ("access_key_enc", "access_key_enc")],
-    "mcp_servers": [("token_enc", "token_enc"), ("custom_headers_enc", "custom_headers_enc")],
+    "mcp_server": [("token_enc", "token_enc"), ("custom_headers_enc", "custom_headers_enc")],
     "mcp_oauth": [
         ("authorization_code_enc", "authorization_code_enc"),
         ("access_token_enc", "access_token_enc"),

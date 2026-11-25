@@ -25,6 +25,9 @@ services:
       # password. The rig FAILS if the server under test is insecure.
       - LETTA_SERVER_SECURE=true
       - LETTA_SERVER_PASSWORD=smoke-test-password
+      # v0.16.40 (E-1 witness): optional encryption key — set only by the
+      # e1_secrets_witness.sh second generation; unset means no key (gen 1).
+      - LETTA_ENCRYPTION_KEY=${LETTA_ENCRYPTION_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
