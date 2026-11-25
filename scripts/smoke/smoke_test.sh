@@ -579,7 +579,10 @@ echo "== check 20: L-3 localhost REST tripwire (full attack) =="
 R20_GATE="$(python3 - "${BASE}" <<'PYGATE'
 import json, os, re, sys, urllib.request
 base = sys.argv[1]
-m = re.search(r'__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"', open("letta/__init__.py").read())
+# The checkout version lives in pyproject.toml — letta/__init__.py has no
+# version literal by design (v0.16.40 review nit 3: a literal there goes
+# stale at the next release). pyproject is the single source of truth.
+m = re.search(r'version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', open("pyproject.toml").read())
 if not m:
     print("BAD:target-not-strict-numeric"); raise SystemExit
 target = tuple(int(x) for x in m.group(1).split("."))
@@ -600,15 +603,16 @@ if rig_target:
         print("BAD:rig-target-mismatch:server=" + server_raw + ",expected=" + rig_target); raise SystemExit
 # Classify by the SERVER version alone: the unfixed-first protocol
 # deliberately runs a pre-.38 image against this bumped checkout, so
-# server==target equality is wrong here. The checkout literal must still
-# be strict-numeric so the POST_38 release run cannot misclassify.
+# server==target equality is wrong here. The checkout version (pyproject,
+# since the __init__ literal was removed in v0.16.40) must still be
+# strict-numeric so the POST_38 release run cannot misclassify.
 print("PRE_38" if server < (0, 16, 38) else "POST_38")
 PYGATE
 )"
 R20_SC_ID=""
 case "${R20_GATE}" in
   "BAD:target-not-strict-numeric")
-    bad "20. L-3 tripwire (checkout version is not strict x.y.z — fix letta/__init__.py before releasing)" ;;
+    bad "20. L-3 tripwire (checkout version is not strict x.y.z — fix pyproject.toml before releasing)" ;;
   "BAD:server-version-not-strict-numeric:"*)
     bad "20. L-3 tripwire (server reports non-numeric version — ${R20_GATE#BAD:server-version-not-strict-numeric:})" ;;
   "BAD:image-version-mismatch:"*)
@@ -870,7 +874,7 @@ fi
 echo "== check 23: real public HTTPS image fetch (redirect + real cert chain) =="
 CTR="$(docker compose -f "${COMPOSE_FILE}" ps -q letta 2>/dev/null | head -1)"
 if [ -n "${CTR}" ]; then
-  if docker exec "$CTR" python - <<'PY23' > /tmp/rig_pubfetch.log 2>&1
+  if docker exec -i "$CTR" python - <<'PY23' > /tmp/rig_pubfetch.log 2>&1
 import asyncio, sys
 import letta.helpers.message_helper as mh
 from letta.helpers.message_helper import _fetch_image_from_url
