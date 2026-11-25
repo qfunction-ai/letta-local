@@ -389,6 +389,8 @@ pytest tests/integration_test_local_model_agent.py -v
 
 **Design consequence that remains:** authentication is now the only barrier for sandboxed tools reaching the local API, because tools can still *open connections* (L-8, open). **The server password must never be given to tools.** Agent-aware and multi-agent tools fail under secure mode with a visible 401 until scoped tool credentials exist (v0.16.39 design item).
 
+**U-7 note (Origin/Host guard):** the Host header check is advisory when the server binds a wildcard address (`0.0.0.0` — the container default). That is safe *because* U-6 forces secure mode in the container: a DNS-rebinding page hitting a wildcard bind still faces password authentication, and a browser rebinding attack has no password to present. Named (loopback) binds enforce the Host allowlist strictly.
+
 ### Closed in v0.16.40: L-10
 
 - **L-10 — SSRF in the server-side image fetch.** Any authenticated caller could put an arbitrary URL in an image message and the server would fetch it — loopback, RFC 1918, link-local, the cloud metadata address (169.254.169.254) — and feed the response to the model. Closed in v0.16.40: destination addresses are resolved and validated before connecting (the connection is pinned to the validated IP, closing DNS-rebinding), redirects are followed manually with re-validation at each hop (max 3), the content type must be `image/*`, and the body is capped at 10 MB with a streamed abort. Lab setups serving images internally can set `LETTA_IMAGE_FETCH_ALLOW_PRIVATE=true` (logs a startup note; defaults off).

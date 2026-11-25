@@ -49,6 +49,16 @@ password does not. This design must state plainly:
 - Operators running untrusted tools should use Landlock-capable hosts
   (Docker Desktop with kernel Landlock support) or E2B/Modal.
 
+### 1.5 R-7 scope follow-up (v0.16.40 review, should-fix)
+
+The embedder fail-closed (R-7) currently keys on the exact api.openai.com
+endpoint. The principle is broader: **no key + non-local endpoint = don't
+send**. A future widening should treat any embedding endpoint that doesn't
+resolve to loopback/private/docker-internal as "cloud" for that check
+(derive from the U-5 address-validation helpers). Deferred: the v0.16.40
+default fallback was OpenAI, so the exact-match covers today's reachable
+case; recorded here so B-5's credential-scoping design inherits the rule.
+
 ## 2. Design: scoped tool credentials (B-5)
 
 ### 2.1 Credential shape

@@ -107,12 +107,18 @@ async def _dry_run() -> dict:
 
 async def _apply(treat_ambiguous: bool) -> bool:
     """Re-encrypt plaintext + unmarked-encrypted rows. One transaction per
-    table; each row re-read and round-trip-confirmed before commit. Returns
-    True if any row changed."""
+    table. Round-trip confirmation runs per row, INSIDE the transaction
+    (a failure rolls the table back), and every rewritten row is re-read
+    post-commit and compared to its OWN expected plaintext (v0.16.40 review
+    V-1: the original confirmed only the last row per table, compared the
+    decrypted plaintext against the stored CIPHERTEXT for unmarked-encrypted
+    rows — failing on exactly the always-had-a-key install state, Delta's —
+    and ran after the commit). Returns True if any row changed."""
     from sqlalchemy import text
 
     changed_any = False
     # collect work per table first (classification is read-only)
+    # (table, col, row_id, expected_plain, row_class)
     work: dict[str, list[tuple[str, any, str, _RowClass]]] = {}
     async for table, col, row_id, value in _scan_tables():
         if value.startswith(ENCRYPTION_MARKER):
@@ -120,34 +126,46 @@ async def _apply(treat_ambiguous: bool) -> bool:
         cls = _classify(value)
         if cls == _RowClass.AMBIGUOUS and not treat_ambiguous:
             continue
-        work.setdefault(table, []).append((col, row_id, value, cls))
+        # expected plaintext: the stored value for plaintext/ambiguous rows;
+        # the DECRYPTED value for unmarked-encrypted rows
+        if cls == _RowClass.PLAINTEXT or (cls == _RowClass.AMBIGUOUS and treat_ambiguous):
+            expected_plain = value
+        else:
+            expected_plain = CryptoUtils.decrypt(value)
+        work.setdefault(table, []).append((col, row_id, expected_plain, cls))
 
     for table, rows in work.items():
+        # Phase 1: verify + rewrite, inside ONE transaction per table — a
+        # failed round-trip rolls the whole table back.
         async with db_registry.async_session() as session:
             async with session.begin():
-                for col, row_id, value, cls in rows:
-                    if cls == _RowClass.PLAINTEXT or (cls == _RowClass.AMBIGUOUS and treat_ambiguous):
-                        # re-encrypt from the stored plaintext (it IS the plaintext)
-                        new_value = CryptoUtils.encrypt(value)
-                    else:  # unmarked-encrypted: re-mark via decrypt->encrypt
-                        new_value = CryptoUtils.encrypt(CryptoUtils.decrypt(value))
+                for col, row_id, expected_plain, cls in rows:
+                    new_value = CryptoUtils.encrypt(expected_plain)
+                    # pre-commit round-trip proof for THIS row
+                    if not new_value.startswith(ENCRYPTION_MARKER):
+                        typer.echo(f"::error::encryption produced unmarked output for {table}.{col} id={row_id}")
+                        raise typer.Exit(1)
+                    if CryptoUtils.decrypt(new_value) != expected_plain:
+                        typer.echo(f"::error::round-trip mismatch for {table}.{col} id={row_id}")
+                        raise typer.Exit(1)
                     await session.execute(
                         text(f"UPDATE {table} SET {col} = :v WHERE id = :id"), {"v": new_value, "id": row_id}
                     )
-            # round-trip confirmation (post-commit read)
-            async with db_registry.async_session() as session:
+        # Phase 2: post-commit re-read of EVERY rewritten row, compared to
+        # its own expected plaintext.
+        async with db_registry.async_session() as session:
+            for col, row_id, expected_plain, cls in rows:
                 result = await session.execute(
                     text(f"SELECT {col} FROM {table} WHERE id = :id"), {"id": row_id}
                 )
                 stored = result.scalar_one_or_none()
                 if stored is None or not stored.startswith(ENCRYPTION_MARKER):
-                    typer.echo(f"::error::round-trip confirmation failed for {table}.{col} id={row_id}")
+                    typer.echo(f"::error::post-commit read failed for {table}.{col} id={row_id}")
                     raise typer.Exit(1)
-                re_plain = CryptoUtils.decrypt(stored)
-                if re_plain != value:
-                    typer.echo(f"::error::round-trip mismatch for {table}.{col} id={row_id}")
+                if CryptoUtils.decrypt(stored) != expected_plain:
+                    typer.echo(f"::error::post-commit round-trip mismatch for {table}.{col} id={row_id}")
                     raise typer.Exit(1)
-            changed_any = True
+        changed_any = True
     return changed_any
 
 

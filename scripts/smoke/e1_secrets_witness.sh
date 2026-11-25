@@ -44,7 +44,33 @@ wait_health() {
   return 1
 }
 
+echo "== gen 0: key from the START — seed UNMARKED ciphertext (the v0.16.39-style install / Delta upgrade path) =="
+export LETTA_ENCRYPTION_KEY="${KEY}"
+compose up -d letta
+wait_health
+AGENT_JSON=$(cat <<EOF2
+{
+  "name": "${NAME}-enc",
+  "llm_config": {"model": "ollama/nemotron-3-nano:4b", "model_endpoint_type": "openai", "model_endpoint": "http://host.docker.internal:11434/v1", "context_window": 128000, "embedding": "ollama/embeddinggemma:latest"},
+  "secrets": {"WITNESS_ENC": "witness-encrypted-legacy"}
+}
+EOF2
+)
+curl -s -f -X POST "$BASE/v1/agents/" -H "Authorization: Bearer ${PASSWORD}" -H "Content-Type: application/json" -d "$AGENT_JSON" > /tmp/e1_agent_enc.json
+AGENT_ENC_ID=$(python3 -c "import json; print(json.load(open('/tmp/e1_agent_enc.json'))['id'])")
+echo "enc agent: ${AGENT_ENC_ID}"
+# strip the marker: the row is now exactly a .39-style write
+CTR=$(compose ps -q letta)
+docker exec "$CTR" psql -U letta -d letta -tAc "UPDATE agent_environment_variables SET value_enc = SUBSTRING(value_enc FROM 8) WHERE key='WITNESS_ENC'" >/dev/null
+UNMARKED0=$(docker exec "$CTR" psql -U letta -d letta -tAc "SELECT LEFT(value_enc, 8) FROM agent_environment_variables WHERE key='WITNESS_ENC'")
+case "$UNMARKED0" in
+  enc:v1:*) echo "FAIL: marker strip failed"; exit 1 ;;
+  *) echo "PASS: gen-0 row is unmarked ciphertext (the Delta path)" ;;
+esac
+compose down 2>/dev/null || true
+
 echo "== gen 1: NO encryption key — seed a secret (stored plaintext) =="
+export LETTA_ENCRYPTION_KEY=""
 compose up -d letta
 wait_health
 
@@ -121,6 +147,21 @@ else
   echo "FAIL: unmarked rows remain ($UNMARKED)"
   exit 1
 fi
+
+# the gen-0 row (Delta's path): unmarked ciphertext -> marked + readable
+ENC_STORED=$(docker exec "$(compose ps -q letta)" psql -U letta -d letta -tAc \
+  "SELECT value_enc FROM agent_environment_variables WHERE key='WITNESS_ENC'")
+case "$ENC_STORED" in
+  enc:v1:*) echo "PASS: gen-0 unmarked-encrypted row is now marked" ;;
+  *) echo "FAIL: gen-0 row not marked (got: ${ENC_STORED:0:12})"; exit 1 ;;
+esac
+ENC_VAL="$ENC_STORED" docker exec -e ENC_VAL "$(compose ps -q letta)" python -c "
+import os
+from letta.helpers.crypto_utils import CryptoUtils
+v = CryptoUtils.decrypt(os.environ['ENC_VAL'])
+assert v == 'witness-encrypted-legacy', v
+print('PASS: gen-0 row round-trips to its original plaintext')
+" || exit 1
 
 # no-leak: command outputs and logs never contained the value
 if docker logs "$(compose ps -q letta)" 2>&1 | grep -q "witness-plaintext-value"; then

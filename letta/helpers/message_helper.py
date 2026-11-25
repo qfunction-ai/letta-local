@@ -85,6 +85,29 @@ def _pin_host_to_ip(url: str) -> str | None:
     return f"{parsed.scheme}://{ip_str}{port_part}{parsed.path}{'?' + parsed.query if parsed.query else ''}"
 
 
+def _request_extensions(original_url: str) -> dict:
+    """httpx request extensions for a pinned-IP fetch.
+
+    v0.16.40 review V-2: httpx takes SNI and certificate hostname
+    verification from the URL's host, NOT the Host header — a pinned-IP URL
+    with a Host header alone fails TLS against every public cert (no IP
+    SANs). Passing sni_hostname keeps the connection going to the validated
+    IP while TLS asks for, and verifies, the ORIGINAL hostname.
+    """
+    parsed = urlparse(original_url)
+    return {"sni_hostname": parsed.hostname} if parsed.hostname else {}
+
+
+def _hop_headers(original_url: str, pinned_url: str, base_headers: dict) -> dict:
+    """Headers + extensions for one request hop: Host header when pinned,
+    SNI extension always (V-2)."""
+    hop_headers = dict(base_headers)
+    if pinned_url != original_url:
+        parsed = urlparse(original_url)
+        hop_headers["Host"] = parsed.hostname + (f":{parsed.port}" if parsed.port else "")
+    return hop_headers
+
+
 async def _fetch_image_from_url(url: str, max_retries: int = 1, timeout_seconds: float = 5.0) -> tuple[bytes, str | None]:
     """
     Async helper to fetch image from URL without blocking the event loop.
@@ -92,8 +115,11 @@ async def _fetch_image_from_url(url: str, max_retries: int = 1, timeout_seconds:
 
     v0.16.40 (U-5/L-10): the fetch is SSRF-guarded — destination addresses
     are validated before connecting, redirects are followed manually with
-    re-validation at each hop (max 3), the content type must be image/*,
-    and the body is capped at 10 MB with a streamed abort.
+    re-validation at each hop (max 3), the content type must be image/*
+    (a MISSING content type is rejected too — review should-fix), and the
+    body is capped at 10 MB with a genuinely STREAMED abort (V-3:
+    client.stream + Content-Length precheck + per-chunk counting — a
+    multi-gigabyte or endless body aborts at the cap, never in memory).
 
     Args:
         url: URL of the image to fetch
@@ -109,27 +135,32 @@ async def _fetch_image_from_url(url: str, max_retries: int = 1, timeout_seconds:
     # Connect timeout is half of total timeout, capped at 3 seconds
     connect_timeout = min(timeout_seconds / 2, 3.0)
     timeout = httpx.Timeout(timeout_seconds, connect=connect_timeout)
-    headers = {"User-Agent": f"Letta/{__version__}"}
+    base_headers = {"User-Agent": f"Letta/{__version__}"}
 
     # SSRF guard: validate the destination BEFORE any request
     _validate_image_fetch_address(url)
     # Pin the connection to the validated IP (rebinding-proof), keep Host
+    # and SNI on the ORIGINAL hostname (V-2)
     pinned_url = _pin_host_to_ip(url) or url
-    if pinned_url != url:
-        parsed = urlparse(url)
-        host_header = parsed.hostname + (f":{parsed.port}" if parsed.port else "")
-        headers["Host"] = host_header
 
-    current_url, pinned_url = url, pinned_url
+    current_url, current_pinned = url, pinned_url
     last_exception = None
     for attempt in range(max_retries + 1):
         try:
-            async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=False) as client:
-                image_response = await client.get(pinned_url)
-                # Manual redirect handling: max 3 hops, re-validate each
+            async with httpx.AsyncClient(timeout=timeout, headers=base_headers, follow_redirects=False) as client:
+                hop_headers = _hop_headers(current_url, current_pinned, base_headers)
+                extensions = _request_extensions(current_url)
+                # V-3: ALL requests stream (stream=True) — headers are
+                # consumed for decisions, the body is read only from the
+                # final response, counted chunk by chunk. A hostile or
+                # endless body never buffers through the client.
                 hops = 0
-                while image_response.has_redirect_location and hops < _IMAGE_FETCH_MAX_REDIRECTS:
-                    location = image_response.headers.get("location", "")
+                request = client.build_request(
+                    "GET", current_pinned, headers=hop_headers, extensions=extensions
+                )
+                response = await client.send(request, stream=True)
+                while response.has_redirect_location and hops < _IMAGE_FETCH_MAX_REDIRECTS:
+                    location = response.headers.get("location", "")
                     if not location:
                         break
                     from urllib.parse import urljoin
@@ -137,28 +168,44 @@ async def _fetch_image_from_url(url: str, max_retries: int = 1, timeout_seconds:
                     next_url = urljoin(current_url, location)
                     _validate_image_fetch_address(next_url)
                     next_pinned = _pin_host_to_ip(next_url) or next_url
-                    next_parsed = urlparse(next_url)
-                    next_headers = dict(headers)
-                    if next_pinned != next_url:
-                        next_headers["Host"] = next_parsed.hostname + (f":{next_parsed.port}" if next_parsed.port else "")
-                    current_url, pinned_url = next_url, next_pinned
-                    image_response = await client.get(pinned_url, headers=next_headers)
+                    current_url, current_pinned = next_url, next_pinned
+                    hop_headers = _hop_headers(current_url, current_pinned, base_headers)
+                    extensions = _request_extensions(current_url)
+                    await response.aclose()  # release before the next hop
+                    request = client.build_request(
+                        "GET", current_pinned, headers=hop_headers, extensions=extensions
+                    )
+                    response = await client.send(request, stream=True)
                     hops += 1
-                if image_response.has_redirect_location:
-                    raise LettaImageFetchError(url=url, reason=f"Too many redirects (max {_IMAGE_FETCH_MAX_REDIRECTS})")
-                image_response.raise_for_status()
-                # Content-type must be image/*
-                media_type = image_response.headers.get("content-type", "")
-                if media_type and not media_type.split(";")[0].strip().lower().startswith("image/"):
-                    raise LettaImageFetchError(url=url, reason=f"refusing non-image content type: {media_type}")
-                # Streamed size cap: abort past 10 MB
-                image_bytes = b""
-                async for chunk in image_response.aiter_bytes():
-                    image_bytes += chunk
-                    if len(image_bytes) > _IMAGE_FETCH_MAX_BYTES:
-                        raise LettaImageFetchError(url=url, reason=f"image exceeds {_IMAGE_FETCH_MAX_BYTES} byte cap")
-                image_media_type = image_response.headers.get("content-type")
-                return image_bytes, image_media_type
+                try:
+                    if response.has_redirect_location:
+                        raise LettaImageFetchError(url=url, reason=f"Too many redirects (max {_IMAGE_FETCH_MAX_REDIRECTS})")
+                    response.raise_for_status()
+                    # Content type must be image/*; a MISSING content type
+                    # is rejected (review should-fix: never accept unknown
+                    # content blindly).
+                    media_type = response.headers.get("content-type", "")
+                    if not media_type:
+                        raise LettaImageFetchError(url=url, reason="refusing response with no content type")
+                    if not media_type.split(";")[0].strip().lower().startswith("image/"):
+                        raise LettaImageFetchError(url=url, reason=f"refusing non-image content type: {media_type}")
+                    # V-3: Content-Length precheck BEFORE reading
+                    declared = response.headers.get("content-length")
+                    if declared and declared.isdigit() and int(declared) > _IMAGE_FETCH_MAX_BYTES:
+                        raise LettaImageFetchError(
+                            url=url, reason=f"image exceeds {_IMAGE_FETCH_MAX_BYTES} byte cap (content-length)"
+                        )
+                    # V-3: streamed read with per-chunk counting
+                    image_bytes = b""
+                    async for chunk in response.aiter_bytes():
+                        image_bytes += chunk
+                        if len(image_bytes) > _IMAGE_FETCH_MAX_BYTES:
+                            raise LettaImageFetchError(
+                                url=url, reason=f"image exceeds {_IMAGE_FETCH_MAX_BYTES} byte cap"
+                            )
+                    return image_bytes, media_type
+                finally:
+                    await response.aclose()
         except httpx.TimeoutException as e:
             last_exception = e
             if attempt < max_retries:

@@ -2,7 +2,7 @@ import os
 from importlib.metadata import PackageNotFoundError, version
 
 try:
-    __version__ = version("letta")
+    __version__ = version("letta") or "0.16.40"
 except PackageNotFoundError:
     # Fallback for development installations
     __version__ = "0.16.40"
