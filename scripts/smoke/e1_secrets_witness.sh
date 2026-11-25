@@ -67,6 +67,10 @@ case "$UNMARKED0" in
   enc:v1:*) echo "FAIL: marker strip failed"; exit 1 ;;
   *) echo "PASS: gen-0 row is unmarked ciphertext (the Delta path)" ;;
 esac
+# Q-1 (release review): capture this generation's logs BEFORE the teardown —
+# the secret was CREATED in this container (the likeliest leak moment), and
+# compose down destroys the logs. The old check only ever saw gen 2.
+docker logs "$(compose ps -q letta)" > /tmp/e1_logs_gen0.txt 2>&1
 compose down 2>/dev/null || true
 
 echo "== gen 1: NO encryption key — seed a secret (stored plaintext) =="
@@ -96,13 +100,25 @@ fi
 echo "PASS: gen-1 secret stored as plaintext (the legacy condition)"
 
 echo "== gen 2: restart WITH encryption key =="
+# Q-1: same as gen 0 — the plaintext secret was submitted in THIS container.
+docker logs "$(compose ps -q letta)" > /tmp/e1_logs_gen1.txt 2>&1
 compose down 2>/dev/null || true
 export LETTA_ENCRYPTION_KEY="${KEY}"
 compose up -d letta
+# NOTE: this wait used to be `docker logs | grep -q ... && break` — under
+# `set -o pipefail` a MATCH SIGPIPEs docker logs and the pipeline FAILS, so
+# the loop never broke early and the PASS below printed unconditionally
+# (vacuous). File form + an explicit post-loop assertion.
+REPORT_SEEN=0
 for i in $(seq 1 60); do
-  docker logs "$(compose ps -q letta)" 2>&1 | grep -q "not yet marked-ciphertext" && break
+  docker logs "$(compose ps -q letta)" > /tmp/e1_logs_gen2.txt 2>&1
+  if grep -q "not yet marked-ciphertext" /tmp/e1_logs_gen2.txt; then REPORT_SEEN=1; break; fi
   sleep 2
 done
+if [ "$REPORT_SEEN" != "1" ]; then
+  echo "FAIL: startup report (unmarked-rows warning) never appeared in gen-2 logs"
+  exit 1
+fi
 wait_health
 echo "PASS: startup report fired (unmarked-rows warning in logs)"
 
@@ -120,7 +136,7 @@ echo "PASS: dry run classifies the plaintext row"
 # apply
 APPLY=$(docker exec "$(compose ps -q letta)" letta secrets reencrypt --apply --yes 2>&1)
 echo "apply output: ${APPLY}"
-echo "$APPLY" | grep -q "apply complete" || { echo "FAIL: apply did not complete"; exit 1; }
+grep -q "apply complete" <<<"$APPLY" || { echo "FAIL: apply did not complete"; exit 1; }
 echo "PASS: apply completed"
 
 # stored value now MARKED
@@ -133,7 +149,7 @@ esac
 
 # idempotent second apply
 APPLY2=$(docker exec "$(compose ps -q letta)" letta secrets reencrypt --apply --yes 2>&1)
-echo "$APPLY2" | grep -q "no changes" || { echo "FAIL: second apply changed something"; exit 1; }
+grep -q "no changes" <<<"$APPLY2" || { echo "FAIL: second apply changed something"; exit 1; }
 echo "PASS: second apply is a no-op (idempotent)"
 
 # the value SURVIVED: read it back through the API (agents endpoint returns
@@ -163,12 +179,57 @@ assert v == 'witness-encrypted-legacy', v
 print('PASS: gen-0 row round-trips to its original plaintext')
 " || exit 1
 
-# no-leak: command outputs and logs never contained the value
-if docker logs "$(compose ps -q letta)" 2>&1 | grep -q "witness-plaintext-value"; then
-  echo "FAIL: secret value leaked into server logs"
+# ---- no-leak (Q-1/Q-2, release review) ----
+# The old check was `docker logs | grep -q value` on the gen-2 container
+# only: under pipefail a REAL leak SIGPIPEs the pipeline and reports PASS,
+# and the gen-0/gen-1 containers (where the secrets were created) were
+# already torn down. Now: every generation's logs + the command outputs,
+# file-argument grep (no pipe), both secret values, positive controls so an
+# empty capture cannot read as clean, and a canary self-test proving the
+# check can fail.
+docker logs "$(compose ps -q letta)" > /tmp/e1_logs_gen2.txt 2>&1
+{
+  echo "== dry run =="; printf '%s\n' "$DRY"
+  echo "== apply =="; printf '%s\n' "$APPLY"
+  echo "== second apply =="; printf '%s\n' "$APPLY2"
+} > /tmp/e1_cmd_out.txt
+
+# Q-2 canary self-test: plant the value in a throwaway copy — the check MUST flag it
+cp /tmp/e1_logs_gen2.txt /tmp/e1_canary.txt
+printf '%s\n' "witness-plaintext-value" >> /tmp/e1_canary.txt
+if ! grep -q "witness-plaintext-value" /tmp/e1_canary.txt; then
+  echo "FAIL: leak check cannot detect a planted value (canary self-test)"
   exit 1
 fi
-echo "PASS: no secret value in server logs"
+echo "PASS: canary self-test — planted value is detected"
+
+# Q-2 positive controls + Q-1 leak check over EVERY capture.
+# Control lines: gen 0/1 -> uvicorn's startup banner (always present);
+# gen 2 -> the startup report we asserted above; cmd output -> apply complete.
+for spec in \
+  "/tmp/e1_logs_gen0.txt:Application startup complete" \
+  "/tmp/e1_logs_gen1.txt:Application startup complete" \
+  "/tmp/e1_logs_gen2.txt:not yet marked-ciphertext" \
+  "/tmp/e1_cmd_out.txt:apply complete"; do
+  f="${spec%%:*}"; marker="${spec#*:}"
+  sz=$(wc -c < "$f")
+  if [ "$sz" -eq 0 ]; then
+    echo "FAIL: $f is empty — log capture failed (compose ps -q empty?)"
+    exit 1
+  fi
+  if ! grep -q "$marker" "$f"; then
+    echo "FAIL: $f lacks its always-present line ('$marker') — capture incomplete"
+    exit 1
+  fi
+  for val in "witness-plaintext-value" "witness-encrypted-legacy"; do
+    if grep -q "$val" "$f"; then
+      echo "FAIL: secret value '$val' found in $f (${sz} bytes) — LEAK"
+      exit 1
+    fi
+  done
+  echo "PASS: $f clean (${sz} bytes, control line present, no secret value)"
+done
+echo "PASS: no secret value in any generation's logs or command output"
 
 echo
 echo "E-1 WITNESS: ALL PASS"
