@@ -966,13 +966,17 @@ echo "== check 24: Redis client initialized (no silent Noop fallback) =="
 CTR24="$(docker compose -f "${COMPOSE_FILE}" ps -q letta 2>/dev/null | head -1)"
 if [ -n "${CTR24}" ]; then
   R24_LOGS="$(docker logs "${CTR24}" 2>&1)"
-  if echo "${R24_LOGS}" | grep -q "Redis client initialized"; then
-    if echo "${R24_LOGS}" | grep -q "Failed to initialize Redis"; then
+  # NOTE: herestrings, NOT `echo | grep -q` — under `set -o pipefail`,
+  # grep -q's early exit SIGPIPEs the echo mid-write and pipefail flips a
+  # MATCH into a pipeline failure (observed: check found the line and
+  # reported "neither line found"). Herestring = no pipe = no EPIPE.
+  if grep -q "Redis client initialized" <<< "${R24_LOGS}"; then
+    if grep -q "Failed to initialize Redis" <<< "${R24_LOGS}"; then
       bad "24. Redis init (BOTH success and failure lines in logs — initialization is flapping)"
     else
       ok "24. Redis client initialized (no silent Noop fallback)"
     fi
-  elif echo "${R24_LOGS}" | grep -q "Failed to initialize Redis"; then
+  elif grep -q "Failed to initialize Redis" <<< "${R24_LOGS}"; then
     bad "24. Redis init FAILED (silent Noop fallback active — busy locks and Redis SSE dead; is the redis extra in the image?)"
   else
     bad "24. Redis init (neither success nor failure line found in logs — the init path never ran)"
