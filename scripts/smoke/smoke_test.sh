@@ -986,6 +986,109 @@ else
   bad "24. Redis init (smoke container not running)"
 fi
 
+# ---------------------------------------------------------------- check 25
+# check 25 (A-1, v0.16.40.1): the U-7 Host guard behaves per the K-1
+# corrected expectations on the container's wildcard bind.
+#   25a: service-name Host (letta:8283) -> 200
+#   25b: foreign Host (evil.example) -> 200 AND advisory warning in logs
+#   25c: foreign Origin -> 403 (enforced on EVERY bind)
+# Unfixed-first: on the published 0.16.40 image 25a returns 403 (A-1:
+# HOST was never exported so the guard saw bind "localhost").
+echo "== check 25: Host-header guard (A-1) =="
+S25_STATUS_A="$(curl -s -o /dev/null -w "%{http_code}" -H "Host: letta:${SMOKE_PORT}" "${BASE}/v1/health/")"
+S25_STATUS_B="$(curl -s -o /dev/null -w "%{http_code}" -H "Host: evil.example" "${BASE}/v1/health/")"
+S25_STATUS_C="$(curl -s -o /dev/null -w "%{http_code}" -H "Host: evil.example" -H "Origin: https://evil.example" "${BASE}/v1/health/")"
+if [ "${S25_STATUS_A}" = "200" ] && [ "${S25_STATUS_B}" = "200" ] && [ "${S25_STATUS_C}" = "403" ]; then
+  CTR25="$(docker compose -f "${COMPOSE_FILE}" ps -q letta 2>/dev/null | head -1)"
+  R25_LOGS="$(docker logs "${CTR25}" 2>&1)"
+  if grep -q "foreign Host header" <<< "${R25_LOGS}"; then
+    ok "25. Host guard (25a 200 / 25b 200+advisory log / 25c Origin 403)"
+  else
+    bad "25. Host guard (25b allowed but NO advisory log — the docstring's 'logged but allowed' is still silently false)"
+  fi
+else
+  bad "25. Host guard (25a=${S25_STATUS_A} want 200; 25b=${S25_STATUS_B} want 200; 25c=${S25_STATUS_C} want 403)"
+fi
+
+# ---------------------------------------------------------------- check 26
+# check 26 (S-1, v0.16.40.1): crafted-argument rejection, end-to-end
+# through the sandbox generator inside the CONTAINER (the same code path
+# the tool executor runs at request time). A crafted KEY executes as
+# code on 0.16.40 (reviewer-verified demo); it must be rejected by the
+# choke point. The serializer probes cover K-3 point 3 (array-as-string
+# decodes; hostile object string is rejected, not pasted). NOTE: no
+# apostrophes in probe strings — a heredoc inside $() breaks bash
+# parsing on them (v0.16.38 rig lesson).
+echo "== check 26: crafted tool-argument names rejected (S-1) =="
+R26_MARKER="/tmp/letta_pwned_marker"
+R26_VERDICT="$(docker compose -f "${COMPOSE_FILE}" exec -T letta python - << 'PY26'
+import sys
+sys.path.insert(0, "/app")
+from types import SimpleNamespace
+from letta.services.tool_sandbox.base import AsyncToolSandboxBase
+from letta.services.helpers.tool_parser_helper import convert_param_to_str_value
+
+ok = True
+detail = ""
+
+class _Concrete(AsyncToolSandboxBase):
+    async def run(self, *a, **k):
+        raise NotImplementedError
+
+sbx = object.__new__(_Concrete)
+sbx.tool_name = "rig_probe"
+# crafted key: bracket-injection via __import__ (apostrophe-free form)
+sbx.args = {"[__import__(chr(111)+chr(115)).system(chr(116)+chr(111)+chr(117)+chr(99)+chr(104))][0]": 1}
+sbx.tool = SimpleNamespace(
+    json_schema={"name": "rig_probe", "parameters": {"properties": {"query": {"type": "string"}}}},
+    args_json_schema=None,
+)
+try:
+    sbx._validate_tool_call_args()
+    ok = False
+    detail = "crafted-name-accepted"
+except ValueError:
+    pass
+
+# keyword name rejected
+sbx2 = object.__new__(_Concrete)
+sbx2.tool_name = "rig_probe"
+sbx2.args = {"import": 1}
+sbx2.tool = sbx.tool
+try:
+    sbx2._validate_tool_call_args()
+    ok = False
+    detail = "keyword-name-accepted"
+except ValueError:
+    pass
+
+# array-as-JSON-string decodes to a list (K-3 pt 3)
+try:
+    assert eval(convert_param_to_str_value("array", chr(91) + chr(34) + "a" + chr(34) + ", " + chr(34) + "b" + chr(34) + chr(93))) == ["a", "b"]
+except Exception:
+    ok = False
+    detail = "array-decode-broken"
+
+# hostile string for an object param: must be REJECTED (invalid JSON),
+# never str()-pasted into generated code
+try:
+    convert_param_to_str_value("object", "x-); __import__(os).system(touch)")
+    ok = False
+    detail = "hostile-object-string-accepted"
+except ValueError:
+    pass
+
+print("CLEAN" if ok else "LEAKY:" + detail)
+PY26
+)"
+if [ "${R26_VERDICT}" = "CLEAN" ] && [ ! -e "${R26_MARKER}" ]; then
+  ok "26. crafted tool-argument names rejected (choke point + serializer probes CLEAN, no marker file)"
+elif [ "${R26_VERDICT}" = "CLEAN" ]; then
+  bad "26. crafted-args (probes clean but ${R26_MARKER} EXISTS — code execution happened)"
+else
+  bad "26. crafted-args (probes LEAKY: ${R26_VERDICT#LEAKY:})"
+fi
+
 echo
 echo "== smoke: ${PASS} passed, ${FAIL} failed =="
 if [ "${FAIL}" -eq 0 ]; then exit 0; else exit 1; fi
