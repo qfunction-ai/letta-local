@@ -107,3 +107,12 @@ class TestStartServerGuard:
             # raising is what this test asserts — a RuntimeError naming
             # 'refuses to bind' would fail the test via pytest.fail below.
             pass
+        finally:
+            # v0.16.40.1 (T-2a): start_server records HOST into the process
+            # environment. This test drives the REAL path in-process, so the
+            # write outlives monkeypatch's snapshot (it never saw this key).
+            # Without this cleanup the value leaks into every later test's
+            # middleware re-resolution (caught by the u6→u7 suite order).
+            import os
+
+            os.environ.pop("HOST", None)

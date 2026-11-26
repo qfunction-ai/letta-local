@@ -110,7 +110,13 @@ class OriginHostGuardMiddleware(BaseHTTPMiddleware):
             return
         self._bind_host_resolved = True
         env_host = os.getenv("HOST")
-        if env_host is None or env_host.strip().lower() == self._constructor_bind_host.strip().lower():
+        # Empty/whitespace HOST is UNSET for our purposes: test teardowns and
+        # monkeypatch restores can leave HOST="" in the process env, and a
+        # stale empty value must never recompute enforcement away from the
+        # constructor's bind (suite pollution caught this — u6+u7 order).
+        if not env_host or not env_host.strip():
+            return
+        if env_host.strip().lower() == self._constructor_bind_host.strip().lower():
             return
         # start_server recorded a --host that differs from what the
         # constructor saw: recompute enforcement + allowed hosts from it.
