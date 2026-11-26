@@ -348,7 +348,7 @@ class TestT2CliHostReachesGuard:
         the --host into the environment before workers import the app."""
         import letta.server.rest_api.app as app_mod
 
-        monkeypatch.setenv("HOST", "")
+        monkeypatch.delenv("HOST", raising=False)
         monkeypatch.setenv("LETTA_SERVER_SECURE", "true")
         monkeypatch.setattr(app_mod, "_serve_with_uvicorn", None, raising=False)
 
