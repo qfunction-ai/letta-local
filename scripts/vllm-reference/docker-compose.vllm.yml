@@ -1,0 +1,105 @@
+# vLLM reference deployment — DRAFT (2026-11-26), untested: written without a GPU or Docker daemon.
+# Implements ER-8.4 as described in the "vLLM Testing Process" doc. Overlay on the LettaLocal smoke compose:
+#
+#   docker compose -f scripts/smoke/docker-compose.smoke.yml -f docker-compose.vllm.yml up -d
+#
+# Before first use, replace every PIN_ME_* value. Never deploy with a tag-only image reference.
+#
+# Topology:   letta ──(default net)──> vllm-proxy ──(inference net, internal)──> vllm
+#   - vllm is attached ONLY to the internal `inference` network: no route to the internet, unreachable from letta.
+#   - vllm-proxy is the only service on both networks; it allowlists two /v1 endpoints and 403s everything else.
+
+services:
+  letta:
+    # Do NOT set VLLM_API_BASE: the env-configured (base) vLLM provider in LettaLocal 0.16.40 has no API-key setting
+    # and sends OPENAI_API_KEY or "DUMMY_API_KEY" instead (see NOTES.md, N-1). Until that is fixed, register vLLM as a
+    # BYOK provider through the API (setup step in NOTES.md), which stores the proxy key encrypted in the database.
+    environment:
+      - OPENAI_API_KEY=   # must stay empty: LettaLocal falls back to it for OpenAI-compatible endpoints
+    networks: [default]
+
+  vllm-proxy:
+    image: nginxinc/nginx-unprivileged@sha256:PIN_ME_NGINX_DIGEST
+    entrypoint: ["/bin/sh", "/proxy/entrypoint.sh"]
+    volumes:
+      - ./proxy:/proxy:ro
+    secrets: [vllm_proxy_key, vllm_upstream_key]
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+      - /etc/nginx/conf.d:size=1m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    user: "101:101"
+    mem_limit: 256m
+    cpus: 0.5
+    networks: [default, inference]
+    depends_on:
+      vllm:
+        condition: service_healthy
+    # No `ports:` — the proxy is reachable only from containers on the compose default network.
+
+  vllm:
+    image: vllm/vllm-openai@sha256:PIN_ME_VLLM_DIGEST    # at or above the recorded version floor (ER-8.4e)
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        export VLLM_API_KEY="$$(cat /run/secrets/vllm_upstream_key)" &&
+        exec vllm serve /models/${VLLM_MODEL_DIR:?set VLLM_MODEL_DIR}
+        --served-model-name ${VLLM_SERVED_NAME:?set VLLM_SERVED_NAME}
+        --host 0.0.0.0 --port 8000
+        --max-model-len ${VLLM_MAX_MODEL_LEN:-32768}
+        --enable-auto-tool-choice --tool-call-parser ${VLLM_TOOL_PARSER:?set VLLM_TOOL_PARSER}
+        --limit-mm-per-prompt '{"image":0,"video":0,"audio":0}'
+        --uvicorn-log-level warning
+    environment:
+      # ER-8.4b: no remote code, no fetching at serve time. trust_remote_code is off unless passed; never pass it.
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      # ER-8.4d / ER-7.1: vLLM collects usage stats by default.
+      - VLLM_NO_USAGE_STATS=1
+      - DO_NOT_TRACK=1
+      # ER-8.4c: explicit "off" for the dangerous switches, so the stage-1 config check has something to read.
+      - VLLM_SERVER_DEV_MODE=0
+      - VLLM_ALLOW_RUNTIME_LORA_UPDATING=False
+      - VLLM_MEDIA_URL_ALLOW_REDIRECTS=0
+      # Read-only root filesystem: every cache goes to tmpfs.
+      - HOME=/tmp
+      - HF_HOME=/tmp/hf
+      - XDG_CACHE_HOME=/tmp/cache
+    volumes:
+      - ${VLLM_WEIGHTS_DIR:?set VLLM_WEIGHTS_DIR}:/models:ro    # filled by fetch_models.py, hashes verified
+    secrets: [vllm_upstream_key]
+    read_only: true
+    tmpfs:
+      - /tmp:size=8g
+    shm_size: 8g
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    user: "1000:1000"
+    mem_limit: 24g
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks: [inference]
+    healthcheck:
+      # /health is unauthenticated by design; it is reachable only on the internal network.
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).status == 200 else 1)"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 120s
+
+networks:
+  inference:
+    internal: true    # no external connectivity: vLLM cannot phone home even if misconfigured
+
+secrets:
+  vllm_proxy_key:       # what LettaLocal presents to the proxy (stored in LettaLocal as a BYOK provider key)
+    file: ${VLLM_SECRETS_DIR:?set VLLM_SECRETS_DIR}/proxy_key
+  vllm_upstream_key:    # what the proxy presents to vLLM; never leaves the inference side
+    file: ${VLLM_SECRETS_DIR}/upstream_key

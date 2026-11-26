@@ -1,0 +1,62 @@
+# vLLM reverse proxy — DRAFT. Rendered by entrypoint.sh; keys substituted at start.
+# Allowlist: exactly the two endpoints LettaLocal 0.16.40 calls for a vLLM provider
+#   GET  /v1/models             (provider model listing; needs max_model_len in the response)
+#   POST /v1/chat/completions   (inference, streaming and non-streaming)
+# Embeddings are NOT allowed: LettaLocal's vLLM provider does not support them (see NOTES.md, N-2).
+# Everything else returns 403, including vLLM's unauthenticated endpoints (/invocations, /pause, /pooling,
+# /classify, /score, /rerank, /tokenize, /metrics, /version, /collective_rpc, ...).
+
+server_tokens off;
+
+limit_req_zone $binary_remote_addr zone=vllm_rl:1m rate=10r/s;
+limit_conn_zone $binary_remote_addr zone=vllm_conn:1m;
+
+map $http_authorization $vllm_client_ok {
+    default                    0;
+    "Bearer __PROXY_KEY__"     1;
+}
+
+upstream vllm_backend {
+    server vllm:8000;
+    keepalive 16;
+}
+
+server {
+    listen 8080;
+    server_name _;
+
+    client_max_body_size 2m;        # prompt-size cap at the edge; vLLM's --max-model-len is the token cap
+    client_body_timeout 30s;
+    limit_conn vllm_conn 32;
+
+    access_log /dev/stdout;         # request line and status only; nginx doesn't log bodies or headers by default
+    error_log  /dev/stderr warn;
+
+    location = /v1/models {
+        limit_except GET { deny all; }
+        if ($vllm_client_ok = 0) { return 401; }
+        limit_req zone=vllm_rl burst=20 nodelay;
+
+        proxy_set_header Authorization "Bearer __UPSTREAM_KEY__";
+        proxy_set_header Host vllm;
+        proxy_pass http://vllm_backend;
+    }
+
+    location = /v1/chat/completions {
+        limit_except POST { deny all; }
+        if ($vllm_client_ok = 0) { return 401; }
+        limit_req zone=vllm_rl burst=20 nodelay;
+
+        proxy_set_header Authorization "Bearer __UPSTREAM_KEY__";
+        proxy_set_header Host vllm;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_buffering off;        # SSE streaming
+        proxy_read_timeout 600s;
+        proxy_pass http://vllm_backend;
+    }
+
+    location / {
+        return 403;
+    }
+}
