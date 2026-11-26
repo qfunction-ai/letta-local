@@ -1105,6 +1105,58 @@ else
   bad "26. crafted-args (probes LEAKY: ${R26_VERDICT#LEAKY:})"
 fi
 
+# 26d (C-1, REV3_CHECK): the END-TO-END path. 26a-c prove the validator
+# and serializer behave; they do NOT prove the validator is ON the path a
+# real tool call takes. POST /v1/tools/run drives run_tool_from_source ->
+# ToolExecutionManager.execute_tool_async -> sandbox.run ->
+# generate_execution_script -> the choke point. Expected: the request
+# FAILS with the choke-point error, and the marker file the crafted key
+# would create does NOT exist. Unfixed-first on 0.16.40: the marker IS
+# created (the real positive control).
+echo "== check 26d: crafted args rejected on the REQUEST path (C-1) =="
+R26D_MARKER="/tmp/letta_pwned_marker"
+R26D_RESP="$(mktemp)"
+command curl -s -X POST "${BASE}/v1/tools/run" \
+  -H "Authorization: Bearer ${SMOKE_PASSWORD}" \
+  -H "Content-Type: application/json" \
+  -o "${R26D_RESP}" -w "%{http_code}" \
+  --data @- << JSON26D
+{
+  "name": "rig_probe26d",
+  "source_code": "def rig_probe26d(query: str) -> str:\n    return \"ok:\" + query",
+  "json_schema": {
+    "name": "rig_probe26d",
+    "description": "probe",
+    "parameters": {
+      "type": "object",
+      "properties": {"query": {"type": "string"}}
+    }
+  },
+  "args": {"[__import__(chr(111)+chr(115)).system(chr(116)+chr(111)+chr(117)+chr(99)+chr(104)+chr(32)+chr(47)+chr(116)+chr(109)+chr(112)+chr(47)+chr(108)+chr(101)+chr(116)+chr(116)+chr(97)+chr(95)+chr(112)+chr(119)+chr(110)+chr(101)+chr(100)+chr(95)+chr(109)+chr(97)+chr(114)+chr(107)+chr(101)+chr(114))][0]": 1}
+}
+JSON26D
+S26D_HTTP="${R26D_RESP##*$'\n'}"
+R26D_BODY="$(cat "${R26D_RESP}")"
+rm -f "${R26D_RESP}"
+# The endpoint's run_tool_from_source wraps tool execution errors as HTTP
+# 200 + status:"error" in the ToolReturnMessage body (verified in source:
+# broad except -> get_friendly_error_msg -> status "error"). So the honest
+# verdict is: the tool must NOT have run (status error, empty tool_return)
+# AND the marker must not exist. A 200 with status:"success" or a present
+# marker is code execution.
+R26D_STATUS="$(python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status','missing'))" <<< "${R26D_BODY}" 2>/dev/null || echo unparseable)"
+R26D_RETURN="$(python3 -c "import json,sys; d=json.load(sys.stdin); print((d.get('tool_return') or '')[:20])" <<< "${R26D_BODY}" 2>/dev/null || echo unparseable)"
+if [ -e "${R26D_MARKER}" ]; then
+  bad "26d. request-path injection (${R26D_MARKER} EXISTS — code execution happened)"
+elif [ "${R26D_HTTP}" != "200" ]; then
+  # a 4xx/5xx is also a rejection (belt): fine as long as no marker
+  ok "26d. crafted args rejected on the request path (HTTP ${S26D_HTTP}, no marker)"
+elif [ "${R26D_STATUS}" = "error" ] && [ "${R26D_RETURN}" = "" ]; then
+  ok "26d. crafted args rejected on the request path (status=error, empty tool_return, no marker)"
+else
+  bad "26d. request-path injection (HTTP 200, status=${R26D_STATUS}, tool_return=${R26D_RETURN} — the crafted-args tool call SUCCEEDED)"
+fi
+
 echo
 echo "== smoke: ${PASS} passed, ${FAIL} failed =="
 if [ "${FAIL}" -eq 0 ]; then exit 0; else exit 1; fi
