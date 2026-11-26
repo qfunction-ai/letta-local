@@ -37,7 +37,8 @@ def convert_param_to_ts_value(param_type: Optional[str], raw_value: JsonValue) -
             return json.dumps(raw_value)
         if isinstance(raw_value, str):
             try:
-                parsed = float(raw_value)
+                # parity with the Python side: integer -> int(), number -> float()
+                parsed = int(raw_value) if param_type == "integer" else float(raw_value)
             except ValueError as exc:
                 raise ValueError(
                     f"Invalid {param_type} value (not numeric): {raw_value[:80]!r}"

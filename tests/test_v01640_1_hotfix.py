@@ -316,6 +316,15 @@ class TestT1TypescriptNumberInjection:
         out = convert_param_to_ts_value("integer", 7)
         assert out == "7"
 
+    def test_integer_string_parses_as_int(self):
+        out = convert_param_to_ts_value("integer", "3")
+        assert out == "3"
+
+    def test_integer_string_fraction_rejected(self):
+        """Parity with the Python side: int("3.5") raises there too."""
+        with pytest.raises(ValueError, match="not numeric"):
+            convert_param_to_ts_value("integer", "3.5")
+
     def test_bool_for_number_rejected(self):
         with pytest.raises(ValueError):
             convert_param_to_ts_value("integer", True)
