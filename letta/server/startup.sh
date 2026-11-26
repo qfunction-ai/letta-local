@@ -6,6 +6,7 @@ set -e  # Exit on any error
 # to /etc/resolv.conf at runtime.
 
 HOST="${HOST:-0.0.0.0}"
+export HOST  # v0.16.40.1 (A-1): without the export, app.py reads os.getenv("HOST") -> None -> "localhost" -> the U-7 guard treats a 0.0.0.0 bind as loopback and 403s every service-name request
 PORT="${PORT:-8283}"
 
 # v0.16.40 (U-6, review P-2): the CONTAINER requires secure mode. A 0.0.0.0

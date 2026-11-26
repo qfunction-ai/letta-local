@@ -252,6 +252,51 @@ class AsyncToolSandboxBase(ABC):
             return self.tool.source_type == ToolSourceType.typescript or self.tool.source_type == "typescript"
         return False
 
+    def _validate_tool_call_args(self) -> None:
+        """v0.16.40.1 (S-1, review K-3): the single choke point for argument names.
+
+        Every place the generated script interpolates an argument NAME as code
+        (the args_json_schema branch, the coercion block, invoke_function_call,
+        the TypeScript generator) draws from self.args — the MODEL-SUPPLIED
+        dict. A crafted key was raw code injection into the sandbox script.
+
+        Rules, enforced here before ANY script is generated:
+        - reserved params (request_heartbeat, inner_thoughts) are stripped
+          defensively (callers normally strip them earlier; this makes the
+          choke point safe for every caller);
+        - every remaining key must be a str, a valid Python identifier, and
+          not a keyword;
+        - if the tool's schema declares properties, the key must be one of
+          them. Schema-less tools get the identifier check only.
+        """
+        import keyword
+
+        from letta.constants import REQUEST_HEARTBEAT_PARAM
+        from letta.settings import INNER_THOUGHTS_KWARG
+
+        self.args.pop(REQUEST_HEARTBEAT_PARAM, None)
+        self.args.pop(INNER_THOUGHTS_KWARG, None)
+
+        properties = None
+        try:
+            params = (self.tool.json_schema or {}).get("parameters", {})
+            if isinstance(params.get("properties"), dict):
+                properties = set(params["properties"].keys())
+        except (AttributeError, TypeError):
+            properties = None
+
+        for name in self.args:
+            if not isinstance(name, str) or not name.isidentifier() or keyword.iskeyword(name):
+                raise ValueError(
+                    f"Rejected tool call for '{self.tool_name}': argument name "
+                    f"{name!r} is not a valid Python identifier"
+                )
+            if properties is not None and name not in properties:
+                raise ValueError(
+                    f"Rejected tool call for '{self.tool_name}': argument "
+                    f"{name!r} is not declared in the tool's schema"
+                )
+
     @trace_method
     async def generate_execution_script(self, agent_state: Optional[AgentState], wrap_print_with_markers: bool = False) -> str:
         """
@@ -259,6 +304,9 @@ class AsyncToolSandboxBase(ABC):
         then base64-encode/pickle the result. Constructs the python file (or TypeScript for TS tools).
         """
         await self._init_async()
+        # S-1 choke point: validate BEFORE either generator branch (Python
+        # schema branch, Python coercion block, or TypeScript) runs.
+        self._validate_tool_call_args()
 
         # Route to TypeScript generator for TypeScript tools
         if self.is_typescript_tool():
@@ -409,7 +457,7 @@ class AsyncToolSandboxBase(ABC):
                     "    __letta_coerced_args = coerce_dict_args_by_annotations(",
                     "        __letta_raw_args,",
                     "        __letta_annotations,",
-                    "        allow_unsafe_eval=True,",
+                    "        allow_unsafe_eval=False,",
                     "        extra_globals=__letta_func.__globals__,",
                     "    )",
                 ]

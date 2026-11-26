@@ -95,6 +95,7 @@ ARG LETTA_ENVIRONMENT=DEV
 ENV LETTA_ENVIRONMENT=${LETTA_ENVIRONMENT} \
     VIRTUAL_ENV="/app/.venv" \
     PATH="/app/.venv/bin:$PATH" \
+    HOST=0.0.0.0 \
     POSTGRES_USER=letta \
     POSTGRES_PASSWORD=letta \
     POSTGRES_DB=letta

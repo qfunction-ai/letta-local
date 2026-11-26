@@ -66,13 +66,29 @@ def convert_param_to_str_value(param_type: str, raw_value: JsonValue) -> str:
         if isinstance(raw_value, str) and raw_value.strip().lower() in ("true", "false"):
             return raw_value.strip().lower().capitalize()
         raise ValueError(f"Invalid boolean value: {raw_value}")
-    if param_type == "array":
-        pass  # need more testing here
-        # if isinstance(raw_value, str):
-        #     if raw_value.strip()[0] != "[" or raw_value.strip()[-1] != "]":
-        #         raise ValueError(f'Invalid array value: "{raw_value}"')
-        #     return raw_value.strip()
-    return str(raw_value)
+    if param_type in ("array", "object"):
+        # v0.16.40.1 (S-1, review K-3): models often send array/object values
+        # as JSON STRINGS. Decode first (rejecting invalid JSON of the wrong
+        # shape), then repr() the decoded value — never str() a model-supplied
+        # string into generated code.
+        import json as _json
+
+        if isinstance(raw_value, str):
+            try:
+                decoded = _json.loads(raw_value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid {param_type} value (not valid JSON): {raw_value[:80]!r}"
+                ) from exc
+            if param_type == "array" and not isinstance(decoded, list):
+                raise ValueError(f"Invalid array value (JSON decoded to {type(decoded).__name__}): {raw_value[:80]!r}")
+            if param_type == "object" and not isinstance(decoded, dict):
+                raise ValueError(f"Invalid object value (JSON decoded to {type(decoded).__name__}): {raw_value[:80]!r}")
+            return repr(decoded)
+        return repr(raw_value)
+    # fallback: repr(), never str() — str() of a model-supplied string is
+    # pasted into the generated script as code (S-1 vector 2)
+    return repr(raw_value)
 
 
 def runtime_override_tool_json_schema(

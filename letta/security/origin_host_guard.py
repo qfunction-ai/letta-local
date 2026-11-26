@@ -25,6 +25,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+import time
+
 from letta.log import get_logger
 
 logger = get_logger(__name__)
@@ -59,6 +61,7 @@ class OriginHostGuardMiddleware(BaseHTTPMiddleware):
             self.allowed_hosts |= {h.strip().lower() for h in extra_hosts.split(",") if h.strip()}
         # wildcard bind: Host checking is advisory (log only)
         self.host_enforced = bind_host.strip().lower() not in ("0.0.0.0", "*", "::")
+        self._last_foreign_host_log = 0.0  # rate limit for the advisory log
 
     async def dispatch(self, request: Request, call_next):
         origin = request.headers.get("origin")
@@ -77,4 +80,17 @@ class OriginHostGuardMiddleware(BaseHTTPMiddleware):
                     "DNS-rebinding signature). Extend LETTA_ALLOWED_HOSTS if this name is yours."
                 )
                 return JSONResponse({"detail": "Host not allowed"}, status_code=403)
+        elif host is not None and not self.host_enforced:
+            # v0.16.40.1 (review K-1): wildcard binds allow foreign Hosts by
+            # design, but the class docstring says "logged but allowed" — make
+            # that true. Rate-limited so a hostile client can't flood the log.
+            host_name = _host_only(host.strip().lower())
+            if host_name not in self.allowed_hosts and host.strip().lower() not in self.allowed_hosts:
+                now = time.monotonic()
+                if now - self._last_foreign_host_log > 60.0:
+                    self._last_foreign_host_log = now
+                    logger.warning(
+                        "Advisory (allowed, wildcard bind): request with foreign Host header "
+                        f"{host!r} (U-7 Origin/Host guard). Extend LETTA_ALLOWED_HOSTS to silence."
+                    )
         return await call_next(request)

@@ -582,22 +582,23 @@ base = sys.argv[1]
 # The checkout version lives in pyproject.toml — letta/__init__.py has no
 # version literal by design (v0.16.40 review nit 3: a literal there goes
 # stale at the next release). pyproject is the single source of truth.
-m = re.search(r'version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', open("pyproject.toml").read())
+m = re.search(r'version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)"', open("pyproject.toml").read())
 if not m:
     print("BAD:target-not-strict-numeric"); raise SystemExit
 target = tuple(int(x) for x in m.group(1).split("."))
 req = urllib.request.Request(base + "/v1/health/", headers={"User-Agent": "letta-client/1.0"})
 server_raw = json.loads(urllib.request.urlopen(req).read()).get("version", "")
-if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", server_raw):
+if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?", server_raw):
     print("BAD:server-version-not-strict-numeric:" + server_raw); raise SystemExit
 server = tuple(int(x) for x in server_raw.split("."))
+# K-2 (v0.16.40.1): versions may be 3- or 4-segment (hotfix releases).
 # B-11: optional RIG_TARGET pins the expected server version for release
 # runs. When set, any mismatch is a hard FAIL — the release must be tested
 # against the exact image it ships. When unset, behavior is unchanged
 # (the unfixed-first protocol runs pre-release images deliberately).
 rig_target = os.environ.get("RIG_TARGET", "").strip()
 if rig_target:
-    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", rig_target):
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?", rig_target):
         print("BAD:rig-target-not-strict-numeric:" + rig_target); raise SystemExit
     if server != tuple(int(x) for x in rig_target.split(".")):
         print("BAD:rig-target-mismatch:server=" + server_raw + ",expected=" + rig_target); raise SystemExit
