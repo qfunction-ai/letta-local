@@ -1170,14 +1170,25 @@ R26D_RETURN="$(python3 -c "import json,sys; d=json.load(sys.stdin); print((d.get
 # injection was stopped by the choke point on the request path. Anything
 # else (marker, success status, or an error NOT naming the rejection) is
 # either code execution or an unrelated failure masquerading as a pass.
-if grep -q "RIG26D_INJECTION_EXECUTED" <<< "${R26D_RETURN}${R26D_BODY}"; then
-  bad "26d. request-path INJECTION CONFIRMED (sentinel RuntimeError surfaced — the crafted name executed as code)"
+# ORDER MATTERS: the choke point's rejection message QUOTES the crafted
+# name (its repr embeds the sentinel text), so the sentinel alone is
+# ambiguous — rejection wins when both appear. The injection verdict
+# requires the sentinel to surface as the raised error type
+# ("RuntimeError: RIG26D_INJECTION_EXECUTED" in the error text), which only
+# happens if the crafted name EXECUTED; a mere quoted repr in a rejection
+# message does not carry the "RuntimeError:" prefix form.
+R26D_REJECTED=0
+grep -q "Rejected tool call" <<< "${R26D_RETURN}${R26D_BODY}" && R26D_REJECTED=1
+R26D_RAISED=0
+grep -q "RuntimeError: RIG26D_INJECTION_EXECUTED" <<< "${R26D_RETURN}${R26D_BODY}" && R26D_RAISED=1
+if [ "${R26D_REJECTED}" = "1" ] && [ "${S26D_HTTP}" = "200" ] && [ "${R26D_STATUS}" = "error" ]; then
+  ok "26d. crafted args rejected ON THE REQUEST PATH (status=error, choke-point message present)"
+elif [ "${R26D_RAISED}" = "1" ]; then
+  bad "26d. request-path INJECTION CONFIRMED (sentinel RuntimeError RAISED — the crafted name executed as code)"
 elif [ "${S26D_HTTP}" != "200" ]; then
   bad "26d. request-path probe (unexpected HTTP ${S26D_HTTP} — investigate; not the endpoint's normal error shape)"
-elif [ "${R26D_STATUS}" = "error" ] && grep -q "Rejected tool call" <<< "${R26D_RETURN}${R26D_BODY}"; then
-  ok "26d. crafted args rejected ON THE REQUEST PATH (status=error, choke-point message present)"
 else
-  bad "26d. request-path wrong-reason failure (status=${R26D_STATUS}, tool_return=${R26D_RETURN:0:120} — neither injection sentinel nor choke-point rejection; investigate)"
+  bad "26d. request-path wrong-reason failure (status=${R26D_STATUS}, tool_return=${R26D_RETURN:0:120} — neither choke-point rejection nor sentinel raise; investigate)"
 fi
 
 echo
