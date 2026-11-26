@@ -17,3 +17,11 @@
 **Nabla:** stays on 0.16.38 through filming (unchanged plan). At re-pin: run the reencrypt command if the install ever ran keyless. The dependency upgrades (urllib3/aiohttp/pypdf/pillow) arrive as a deliberate re-pin.
 
 **Epsilon** (pinned 0.16.36): unaffected by the extras trim. Its tools are its own stdlib-only sources plus LettaLocal's file and archival base tools, and its compose sets `LETTA_REDIS_HOST` (covered by the restored `redis` extra). At re-pin, the v0.16.38 secure-mode and password-header changes apply, plus `letta secrets reencrypt` if it ever ran without a key. Run its suite against the v0.16.40 digest before adopting.
+
+---
+
+## ADDENDUM (2026-11-26): do not adopt 0.16.40 — wait for 0.16.40.1
+
+**Don't adopt 0.16.40. Wait for 0.16.40.1.** If you must, set `HOST=0.0.0.0` in the letta service environment, or every request by service name returns 403. (Epsilon is the consumer that would hit this at its re-pin.)
+
+Two defects found by independent review after the tag: (1) the container's Host guard treats the 0.0.0.0 bind as loopback because `startup.sh` never exports `HOST`, so any client reaching the server by its compose service name gets 403; (2) the tool sandbox's script generator pastes model-supplied argument names and values into the generated script as code (argument injection inside the sandbox). Both are fixed in 0.16.40.1. Also note: the Origin/Host bullet above saying "SDK clients that send neither are unaffected" is wrong as written — every HTTP/1.1 client sends a Host header; the correction ships with .40.1.
