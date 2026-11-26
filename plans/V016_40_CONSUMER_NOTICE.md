@@ -25,3 +25,7 @@
 **Don't adopt 0.16.40. Wait for 0.16.40.1.** If you must, set `HOST=0.0.0.0` in the letta service environment, or every request by service name returns 403. (Epsilon is the consumer that would hit this at its re-pin.)
 
 Two defects found by independent review after the tag: (1) the container's Host guard treats the 0.0.0.0 bind as loopback because `startup.sh` never exports `HOST`, so any client reaching the server by its compose service name gets 403; (2) the tool sandbox's script generator pastes model-supplied argument names and values into the generated script as code (argument injection inside the sandbox). Both are fixed in 0.16.40.1. Also note: the Origin/Host bullet above saying "SDK clients that send neither are unaffected" is wrong as written — every HTTP/1.1 client sends a Host header; the correction ships with .40.1.
+
+**Bare-metal note (T-2, same family as (1)):** `letta server --host 0.0.0.0` (pip installs) had the same misclassification — the CLI flag never reached the guard. 0.16.40.1 records the host before the server starts. If you run bare-metal with `--host`, re-pin to 0.16.40.1.
+
+**E2B note (T-1):** the TypeScript tool path had the sibling of (2) — numeric argument strings were emitted verbatim into generated code. Only deployments using E2B (TypeScript tools) were affected. Fixed in 0.16.40.1.
