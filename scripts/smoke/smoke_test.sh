@@ -1078,6 +1078,22 @@ try:
 except ValueError:
     pass
 
+# T-1 (interim review): the TypeScript number branch had the same str()
+# injection — hostile numeric strings must be REJECTED, parsed numbers
+# json.dumps-d
+from letta.services.tool_sandbox.typescript_generator import convert_param_to_ts_value
+try:
+    convert_param_to_ts_value("integer", "0; require(child_process).execSync(id); 0")
+    ok = False
+    detail = "ts-number-injection-accepted"
+except ValueError:
+    pass
+try:
+    assert convert_param_to_ts_value("number", "3.5") == "3.5"
+except Exception:
+    ok = False
+    detail = "ts-number-parse-broken"
+
 print("CLEAN" if ok else "LEAKY:" + detail)
 PY26
 )"

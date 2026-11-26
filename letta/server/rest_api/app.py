@@ -970,6 +970,13 @@ def start_server(
     reload: bool = False,
 ):
     """Convenience method to start the server from within Python"""
+    # v0.16.40.1 (T-2): record the effective bind host BEFORE the workers
+    # import app.py. The Origin/Host guard is constructed at import time
+    # and reads os.getenv("HOST"); `letta server --host 0.0.0.0` used to
+    # never reach it, so the guard misclassified the bind as loopback and
+    # 403'd every LAN client (same class as the container A-1 bug).
+    if host:
+        os.environ["HOST"] = host
     # v0.16.40 (U-6): insecure mode + non-loopback bind refuses to start.
     if os.getenv("LETTA_SERVER_SECURE", "true").lower() == "false":
         from letta.security.server_credentials import check_insecure_bind_host

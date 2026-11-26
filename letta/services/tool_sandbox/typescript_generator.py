@@ -26,7 +26,24 @@ def convert_param_to_ts_value(param_type: Optional[str], raw_value: JsonValue) -
         # Use JSON.stringify for proper string escaping
         return json.dumps(raw_value)
     if param_type in ("number", "integer"):
-        return str(raw_value)
+        # v0.16.40.1 (T-1, sibling of the S-1 str() fix): accept only real
+        # numbers or strings that PARSE as numbers, then json.dumps the
+        # parsed value. The old str(raw_value) emitted a model-supplied
+        # string verbatim into TypeScript code (same injection class as the
+        # Python fallback fixed in this release).
+        if isinstance(raw_value, bool):
+            raise ValueError(f"Invalid {param_type} value: {raw_value}")
+        if isinstance(raw_value, (int, float)):
+            return json.dumps(raw_value)
+        if isinstance(raw_value, str):
+            try:
+                parsed = float(raw_value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid {param_type} value (not numeric): {raw_value[:80]!r}"
+                ) from exc
+            return json.dumps(parsed)
+        raise ValueError(f"Invalid {param_type} value: {raw_value!r}")
     if param_type == "boolean":
         if isinstance(raw_value, bool):
             return "true" if raw_value else "false"

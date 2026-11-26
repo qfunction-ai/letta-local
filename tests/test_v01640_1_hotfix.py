@@ -290,3 +290,94 @@ class TestK1GuardAdvisoryLog:
 def _ok_response():
     from starlette.responses import PlainTextResponse
     return PlainTextResponse("ok")
+
+
+# ---------------------------------------------------------------------------
+# T-1 / T-2 (interim review 2026-11-26 10:30): sibling gaps
+# ---------------------------------------------------------------------------
+
+from letta.services.tool_sandbox.typescript_generator import convert_param_to_ts_value
+
+
+class TestT1TypescriptNumberInjection:
+    """T-1: convert_param_to_ts_value(number/integer, str) used str(),
+    emitting model-supplied strings verbatim into TypeScript code."""
+
+    def test_numeric_string_hostile_payload_rejected(self):
+        hostile = "0; require('child_process').execSync('id'); 0"
+        with pytest.raises(ValueError, match="not numeric"):
+            convert_param_to_ts_value("integer", hostile)
+
+    def test_numeric_string_parses(self):
+        out = convert_param_to_ts_value("number", "3.5")
+        assert out == "3.5"
+
+    def test_integer_value(self):
+        out = convert_param_to_ts_value("integer", 7)
+        assert out == "7"
+
+    def test_bool_for_number_rejected(self):
+        with pytest.raises(ValueError):
+            convert_param_to_ts_value("integer", True)
+
+    def test_garbage_string_rejected(self):
+        with pytest.raises(ValueError, match="not numeric"):
+            convert_param_to_ts_value("number", "abc")
+
+    def test_non_numeric_type_rejected(self):
+        with pytest.raises(ValueError):
+            convert_param_to_ts_value("number", ["1"])
+
+
+class TestT2CliHostReachesGuard:
+    """T-2: `letta server --host 0.0.0.0` — the guard was built at import
+    time, before start_server saw the flag. start_server now records HOST
+    into the environment; the guard re-reads it on first dispatch."""
+
+    def test_start_server_records_host(self, monkeypatch):
+        """The real start_server (with its server start stubbed) must record
+        the --host into the environment before workers import the app."""
+        import letta.server.rest_api.app as app_mod
+
+        monkeypatch.setenv("HOST", "")
+        monkeypatch.setenv("LETTA_SERVER_SECURE", "true")
+        monkeypatch.setattr(app_mod, "_serve_with_uvicorn", None, raising=False)
+
+        started = {}
+
+        def fake_uvicorn(*args, **kwargs):
+            # capture the env state AT SERVER START — the moment workers
+            # import app.py and construct the guard
+            started["host_at_start"] = os.environ.get("HOST")
+            raise KeyboardInterrupt  # stop the server immediately
+
+        monkeypatch.setattr("uvicorn.run", fake_uvicorn, raising=False)
+        with pytest.raises(KeyboardInterrupt):
+            app_mod.start_server(host="0.0.0.0", port=9999)
+        assert started.get("host_at_start") == "0.0.0.0", (
+            "start_server must record --host into the env BEFORE uvicorn imports the app"
+        )
+
+    @pytest.mark.asyncio
+    async def test_guard_re_resolves_wildcard_env_host(self, monkeypatch):
+        # guard constructed with the import-time default (localhost)...
+        mw = TestK1GuardAdvisoryLog._middleware("localhost")
+        assert mw.host_enforced is True
+        # ...then start_server records a wildcard host into the env before
+        # the first request dispatches.
+        monkeypatch.setenv("HOST", "0.0.0.0")
+        resp = await mw.dispatch(TestK1GuardAdvisoryLog._request(host="evil.example"), TestK1GuardAdvisoryLog._call_next)
+        # foreign Host must be ALLOWED (and logged) now, not 403'd
+        assert resp.status_code == 200 if hasattr(resp, "status_code") else True
+
+    @pytest.mark.asyncio
+    async def test_guard_env_host_lan_named(self, monkeypatch):
+        mw = TestK1GuardAdvisoryLog._middleware("localhost")
+        monkeypatch.setenv("HOST", "192.168.1.50")
+        # A LAN-named bind: enforcement ON, the LAN host itself allowed
+        resp = await mw.dispatch(TestK1GuardAdvisoryLog._request(host="192.168.1.50"), TestK1GuardAdvisoryLog._call_next)
+        from starlette.responses import PlainTextResponse
+        assert isinstance(resp, PlainTextResponse)  # allowed through
+        # and a foreign host is still rejected
+        resp2 = await mw.dispatch(TestK1GuardAdvisoryLog._request(host="evil.example"), TestK1GuardAdvisoryLog._call_next)
+        assert resp2.status_code == 403

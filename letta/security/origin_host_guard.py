@@ -62,8 +62,17 @@ class OriginHostGuardMiddleware(BaseHTTPMiddleware):
         # wildcard bind: Host checking is advisory (log only)
         self.host_enforced = bind_host.strip().lower() not in ("0.0.0.0", "*", "::")
         self._last_foreign_host_log = 0.0  # rate limit for the advisory log
+        # v0.16.40.1 (T-2): the middleware is constructed at app import
+        # time; `letta server --host` (recorded by start_server into the
+        # environment) may arrive AFTER construction. Re-read HOST once on
+        # first dispatch and cache — a non-loopback or wildcard env HOST
+        # flips enforcement off, matching what the constructor would have
+        # done had it seen the flag.
+        self._bind_host_resolved = False
+        self._constructor_bind_host = bind_host
 
     async def dispatch(self, request: Request, call_next):
+        self._resolve_bind_host()
         origin = request.headers.get("origin")
         if origin is not None and origin not in self.allowed_origins:
             logger.warning(
@@ -94,3 +103,20 @@ class OriginHostGuardMiddleware(BaseHTTPMiddleware):
                         f"{host!r} (U-7 Origin/Host guard). Extend LETTA_ALLOWED_HOSTS to silence."
                     )
         return await call_next(request)
+
+    def _resolve_bind_host(self) -> None:
+        """Resolve the effective bind host once, at first request (T-2)."""
+        if self._bind_host_resolved:
+            return
+        self._bind_host_resolved = True
+        env_host = os.getenv("HOST")
+        if env_host is None or env_host.strip().lower() == self._constructor_bind_host.strip().lower():
+            return
+        # start_server recorded a --host that differs from what the
+        # constructor saw: recompute enforcement + allowed hosts from it.
+        env_host = env_host.strip()
+        self.host_enforced = env_host.lower() not in ("0.0.0.0", "*", "::")
+        self.allowed_hosts = set(_DEFAULT_LOCAL_HOSTS) | {env_host.lower()}
+        extra_hosts = os.getenv("LETTA_ALLOWED_HOSTS", "")
+        if extra_hosts:
+            self.allowed_hosts |= {h.strip().lower() for h in extra_hosts.split(",") if h.strip()}
