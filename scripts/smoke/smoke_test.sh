@@ -1114,7 +1114,6 @@ fi
 # would create does NOT exist. Unfixed-first on 0.16.40: the marker IS
 # created (the real positive control).
 echo "== check 26d: crafted args rejected on the REQUEST path (C-1) =="
-R26D_MARKER="/tmp/letta_pwned_marker"
 # Write the JSON payload to a file FIRST (python3, so no bash quoting at
 # all — the v0.16.38 heredoc-in-substitution trap), then curl --data @file.
 # curl output goes to a body file; -w writes the code to stdout, captured
@@ -1125,10 +1124,16 @@ R26D_RESP="$(mktemp)"
 python3 - "${R26D_REQ}" << 'PY26D'
 import json, sys
 
-marker = "".join(chr(c) for c in [116, 111, 117, 99, 104, 32, 47, 116, 109, 112, 47,
-                                   108, 101, 116, 116, 97, 95, 112, 119, 110, 101,
-                                   100, 95, 109, 97, 114, 107, 101, 114])
-crafted = "[__import__(chr(111)+chr(115)).system(" + json.dumps(marker) + ")][0]"
+# The CONTROL is a distinctive raise, not a file write: injected code runs
+# INSIDE the container under Landlock, where filesystem grants make marker
+# writes fail silently (the first 26d control never fired for this reason —
+# verified: the unfixed 0.16.40 run created NO marker although the hostile
+# name WAS pasted into the generated script). A sentinel raise in the
+# crafted name proves code execution in the RESPONSE BODY itself: on
+# unfixed code the RuntimeError message surfaces in the tool error; on
+# fixed code the choke point rejects the name before generation.
+sentinel = "RIG26D_INJECTION_EXECUTED"
+crafted = "[exec(\"raise RuntimeError('" + sentinel + "')\")][0]"
 payload = {
     "name": "rig_probe26d",
     "source_code": "def rig_probe26d(query: str) -> str:\n    return \"ok:\" + query",
@@ -1165,14 +1170,14 @@ R26D_RETURN="$(python3 -c "import json,sys; d=json.load(sys.stdin); print((d.get
 # injection was stopped by the choke point on the request path. Anything
 # else (marker, success status, or an error NOT naming the rejection) is
 # either code execution or an unrelated failure masquerading as a pass.
-if [ -e "${R26D_MARKER}" ]; then
-  bad "26d. request-path injection (${R26D_MARKER} EXISTS — code execution happened)"
+if grep -q "RIG26D_INJECTION_EXECUTED" <<< "${R26D_RETURN}${R26D_BODY}"; then
+  bad "26d. request-path INJECTION CONFIRMED (sentinel RuntimeError surfaced — the crafted name executed as code)"
 elif [ "${S26D_HTTP}" != "200" ]; then
   bad "26d. request-path probe (unexpected HTTP ${S26D_HTTP} — investigate; not the endpoint's normal error shape)"
 elif [ "${R26D_STATUS}" = "error" ] && grep -q "Rejected tool call" <<< "${R26D_RETURN}${R26D_BODY}"; then
-  ok "26d. crafted args rejected ON THE REQUEST PATH (status=error, choke-point message present, no marker)"
+  ok "26d. crafted args rejected ON THE REQUEST PATH (status=error, choke-point message present)"
 else
-  bad "26d. request-path injection or wrong-reason failure (status=${R26D_STATUS}, tool_return=${R26D_RETURN:0:120} — no marker but no choke-point rejection either)"
+  bad "26d. request-path wrong-reason failure (status=${R26D_STATUS}, tool_return=${R26D_RETURN:0:120} — neither injection sentinel nor choke-point rejection; investigate)"
 fi
 
 echo
