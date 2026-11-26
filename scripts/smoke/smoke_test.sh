@@ -1156,16 +1156,23 @@ rm -f "${R26D_RESP}" "${R26D_REQ}"
 # AND the marker must not exist. A 200 with status:"success" or a present
 # marker is code execution.
 R26D_STATUS="$(python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status','missing'))" <<< "${R26D_BODY}" 2>/dev/null || echo unparseable)"
-R26D_RETURN="$(python3 -c "import json,sys; d=json.load(sys.stdin); print((d.get('tool_return') or '')[:20])" <<< "${R26D_BODY}" 2>/dev/null || echo unparseable)"
+R26D_RETURN="$(python3 -c "import json,sys; d=json.load(sys.stdin); print((d.get('tool_return') or '')[:300])" <<< "${R26D_BODY}" 2>/dev/null || echo unparseable)"
+# The verdict must prove rejection FOR THE RIGHT REASON (C-1's rule): the
+# choke point raises ValueError("Rejected tool call for '<name>': argument
+# name ... is not a valid Python identifier"), which the endpoint wraps as
+# HTTP 200 + status:"error" + a friendly message EMBEDDING that text. So:
+# no marker + status error + "Rejected tool call" in tool_return = the
+# injection was stopped by the choke point on the request path. Anything
+# else (marker, success status, or an error NOT naming the rejection) is
+# either code execution or an unrelated failure masquerading as a pass.
 if [ -e "${R26D_MARKER}" ]; then
   bad "26d. request-path injection (${R26D_MARKER} EXISTS — code execution happened)"
 elif [ "${S26D_HTTP}" != "200" ]; then
-  # a 4xx/5xx is also a rejection (belt): fine as long as no marker
-  ok "26d. crafted args rejected on the request path (HTTP ${S26D_HTTP}, no marker)"
-elif [ "${R26D_STATUS}" = "error" ] && [ "${R26D_RETURN}" = "" ]; then
-  ok "26d. crafted args rejected on the request path (status=error, empty tool_return, no marker)"
+  bad "26d. request-path probe (unexpected HTTP ${S26D_HTTP} — investigate; not the endpoint's normal error shape)"
+elif [ "${R26D_STATUS}" = "error" ] && grep -q "Rejected tool call" <<< "${R26D_RETURN}${R26D_BODY}"; then
+  ok "26d. crafted args rejected ON THE REQUEST PATH (status=error, choke-point message present, no marker)"
 else
-  bad "26d. request-path injection (HTTP ${S26D_HTTP}, status=${R26D_STATUS}, tool_return=${R26D_RETURN} — the crafted-args tool call SUCCEEDED)"
+  bad "26d. request-path injection or wrong-reason failure (status=${R26D_STATUS}, tool_return=${R26D_RETURN:0:120} — no marker but no choke-point rejection either)"
 fi
 
 echo
