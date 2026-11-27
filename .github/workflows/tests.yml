@@ -1,0 +1,35 @@
+name: Tests
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Install dependencies
+        shell: bash
+        run: uv sync --extra sqlite --extra external-tools --extra dev
+
+      - name: Run test suites
+        shell: bash
+        run: |
+          uv run --frozen pytest -q \
+            tests/test_v041_r2a1_canonicalization.py \
+            tests/test_v041_w1_traversal_probe.py \
+            tests/test_v01640_1_hotfix.py \
+            tests/test_policy_engine.py \
+            tests/test_approval_binding_behavioral.py
