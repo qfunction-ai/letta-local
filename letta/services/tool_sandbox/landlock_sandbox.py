@@ -151,38 +151,16 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
         code = await self.generate_execution_script(agent_state=agent_state, wrap_print_with_markers=True)
 
         exec_dir = await asyncio.to_thread(tempfile.mkdtemp, dir=sandbox_dir, prefix="exec-")
-        # v0.16.41 (interim-4 G-4): the sandbox uid must be able to REACH the
-        # exec dir (every parent traversable by uid 1000). On a pre-.41
-        # /root/.letta volume, /root is mode 700 — the subprocess would die
-        # opaquely at exec. Fail HERE with the named error instead.
-        try:
-            _pw_check = _pwd.getpwnam("letta")
-            _probe = os.path.join(exec_dir, ".uid_probe")
-            await asyncio.to_thread(open, _probe, "w").close()
-            await asyncio.to_thread(os.chown, _probe, _pw_check.pw_uid, _pw_check.pw_gid)
-            # simulate the sandbox uid reaching the file
-            import subprocess as _sp
-
-            _r = await asyncio.to_thread(
-                _sp.run,
-                ["setpriv", "--reuid", str(_pw_check.pw_uid), "--regid", str(_pw_check.pw_gid),
-                 "--clear-groups", "cat", _probe],
-                capture_output=True,
-            )
-            await asyncio.to_thread(os.remove, _probe)
-            if _r.returncode != 0:
-                raise PermissionError(_r.stderr.decode()[:200] if _r.stderr else "traversal failed")
-        except FileNotFoundError:
-            # setpriv absent (e.g. macOS dev): skip the probe; the container
-            # always has it (util-linux).
-            pass
-        except PermissionError as exc:
-            raise RuntimeError(
-                "Sandbox exec directory is unreachable by the sandbox uid (an old "
-                "/root/.letta volume mount? /root is mode 700 — the sandbox uid cannot "
-                "traverse it). Move the volume to /data/letta per the startup banner; "
-                f"tool execution is disabled until then. Detail: {exc}"
-            ) from exc
+        # v0.16.41 (interim-4 G-4, interim-5 note): the sandbox uid must be
+        # able to REACH the exec dir (every parent traversable by uid 1000).
+        # On a pre-.41 /root/.letta volume, /root is mode 700 — the
+        # subprocess would die opaquely at exec. Fail HERE with the named
+        # error instead. Cached per process: /root's mode doesn't change
+        # while the server runs, and the probe spawns setpriv+cat — once
+        # is enough (one process spawn per SERVER lifetime, not per call).
+        if not getattr(self, "_traversal_probe_passed", False):
+            await self._traversal_probe(exec_dir)
+            self._traversal_probe_passed = True
         # v0.16.41 (S-2/U-5): the exec dir is the sandbox subprocess's
         # HOME/TMPDIR — it must be owned by the sandbox uid. A failure here
         # is a REFUSAL, not a warning: the subprocess would run as uid 1000
@@ -361,6 +339,42 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
             if not settings.debug:
                 await asyncio.to_thread(os.remove, temp_file_path)
                 await asyncio.to_thread(shutil.rmtree, exec_dir, True)
+
+    async def _traversal_probe(self, exec_dir: str) -> None:
+        """G-4: prove the sandbox uid can traverse to (and read from) the
+        exec dir. A named RuntimeError (with the migration instruction) on
+        failure; silent pass on success. setpriv absence (macOS dev) also
+        passes — the container always has it."""
+        import pwd as _pwd
+        import subprocess as _sp
+
+        try:
+            _pw = _pwd.getpwnam("letta")
+        except KeyError:
+            return  # U-5's named refusal fires later in the exec path
+        _probe = os.path.join(exec_dir, ".uid_probe")
+        try:
+            await asyncio.to_thread(open, _probe, "w").close()
+            await asyncio.to_thread(os.chown, _probe, _pw.pw_uid, _pw.pw_gid)
+            _r = await asyncio.to_thread(
+                _sp.run,
+                ["setpriv", "--reuid", str(_pw.pw_uid), "--regid", str(_pw.pw_gid),
+                 "--clear-groups", "cat", _probe],
+                capture_output=True,
+            )
+            if _r.returncode != 0:
+                raise PermissionError(_r.stderr.decode()[:200] if _r.stderr else "traversal failed")
+        except FileNotFoundError:
+            return  # setpriv absent (macOS dev)
+        except PermissionError as exc:
+            raise RuntimeError(
+                "Sandbox exec directory is unreachable by the sandbox uid (an old "
+                "/root/.letta volume mount? /root is mode 700 — the sandbox uid cannot "
+                "traverse it). Move the volume to /data/letta per the startup banner; "
+                f"tool execution is disabled until then. Detail: {exc}"
+            ) from exc
+        finally:
+            await asyncio.to_thread(os.remove, _probe)
 
     async def _prepare_venv(self, landlock_config, venv_path: str, env: Dict[str, str]):
         """Prepare virtual environment asynchronously (in a background thread).

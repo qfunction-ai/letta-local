@@ -131,6 +131,20 @@ else
     export POSTGRES_HOST_AUTH_METHOD="${POSTGRES_HOST_AUTH_METHOD:-scram-sha-256}"
     export POSTGRES_INITDB_ARGS="${POSTGRES_INITDB_ARGS:---auth-local=scram-sha-256 --auth-host=scram-sha-256}"
 
+    # v0.16.41 (interim-5 V-1): record whether the DATABASE predates this
+    # boot BEFORE starting Postgres — initdb runs only when PGDATA is
+    # absent, so PG_EXISTED=1 means the db user's password and pg_hba.conf
+    # are whatever the volume was created with. (The previous gate — the
+    # LETTA_DIR password file — was always written a few lines above, so
+    # the convergence never ran. The marker below lives IN PGDATA, so it
+    # also handles a pre-.41 database volume paired with a fresh LETTA_DIR,
+    # which is exactly the old-mount migration case.)
+    PGDATA_DIR="${PGDATA:-/var/lib/postgresql/data}"
+    PG_EXISTED=0
+    if [ -f "$PGDATA_DIR/PG_VERSION" ]; then
+        PG_EXISTED=1
+    fi
+
     # Start PostgreSQL using the base image's entrypoint script.
     # v0.16.41 (interim-4 G-3.1): loopback only — the image default is '*'.
     # listen_addresses is not a secret; the command line is fine (U-3).
@@ -139,53 +153,63 @@ else
     # Wait for PostgreSQL to be ready
     wait_for_postgres
 
-    # v0.16.41 (interim-4 G-2): on a PRE-.41 volume, initdb never re-runs,
-    # so the database user's password is whatever the volume was created
-    # with (the old default 'letta'), and pg_hba.conf keeps its old auth
-    # lines. After the server starts, converge BOTH to the .41 posture:
-    # ALTER USER to the generated password, and scram-sha-256 in pg_hba.
-    # psql reads the old password via PGPASSWORD (env — never argv, U-3).
-    if [ -f "${LETTA_DIR:-/data/letta}/pg_password" ]; then
-        # Fresh .41 volume: the password was applied at initdb. Nothing to do.
-        :
-    else
-        # Pre-.41 volume (or an unexplained absence): converge now.
-        PGDATA_DIR="${PGDATA:-/var/lib/postgresql/data}"
-        if [ -d "$PGDATA_DIR" ] && [ -f "$PGDATA_DIR/PG_VERSION" ]; then
-            echo "Pre-v0.16.41 Postgres volume detected: converging auth to scram + generated password"
-            PGPASSWORD="${LEGACY_PG_PASSWORD:-letta}" psql -h localhost -U "${POSTGRES_USER:-letta}" -d postgres >/dev/null 2>&1 <<'PSQLSQL'
-DO $$
-BEGIN
-    RAISE NOTICE 'connected';
-END $$;
-PSQLSQL
+    # v0.16.41 (interim-4 G-2, interim-5 V-1): on a pre-.41 DATABASE, initdb
+    # never re-runs — converge auth to the .41 posture: ALTER USER to the
+    # generated password (statement via STDIN — V-2: never argv; PGPASSWORD
+    # env carries the old one), and scram-sha-256 in pg_hba. The marker
+    # (.letta_v041_scram) lives in PGDATA so the database's own state
+    # decides, and idempotent re-runs skip.
+    if [ "${PG_EXISTED}" = "1" ] && [ ! -f "$PGDATA_DIR/.letta_v041_scram" ]; then
+        echo "Pre-v0.16.41 Postgres volume detected: converging auth to scram + generated password"
+        PGPASSWORD="${LEGACY_PG_PASSWORD:-letta}" psql -h localhost -U "${POSTGRES_USER:-letta}" -d postgres >/dev/null 2>&1 <<'PSQLPROBE'
+SELECT 1;
+PSQLPROBE
+        if [ $? -eq 0 ]; then
+            # V-2: the ALTER statement goes through stdin — the new password
+            # never appears in /proc/<pid>/cmdline.
+            PGPASSWORD="${LEGACY_PG_PASSWORD:-letta}" psql -h localhost -U "${POSTGRES_USER:-letta}" -d postgres >/dev/null 2>&1 <<PSQLALTER
+ALTER USER ${POSTGRES_USER:-letta} WITH PASSWORD '${POSTGRES_PASSWORD}';
+PSQLALTER
             if [ $? -eq 0 ]; then
-                PGPASSWORD="${LEGACY_PG_PASSWORD:-letta}" psql -h localhost -U "${POSTGRES_USER:-letta}" -d postgres >/dev/null 2>&1 -c "ALTER USER ${POSTGRES_USER:-letta} WITH PASSWORD '${POSTGRES_PASSWORD}';"
-                if [ $? -eq 0 ]; then
-                    echo "  ALTER USER applied"
-                    # Rewrite pg_hba.conf: scram for local + host
-                    HBA="$PGDATA_DIR/pg_hba.conf"
-                    if [ -f "$HBA" ]; then
-                        sed -i -E 's/^(local\s+all\s+all\s+)(peer|trust|md5|password|scram-sha-256)\b/\1scram-sha-256/' "$HBA"
-                        sed -i -E 's/^(host\s+all\s+all\s+[^\s]+\s+)(trust|md5|password|scram-sha-256)\b/\1scram-sha-256/' "$HBA"
-                        # Any 'trust' entries are the real risk — force scram
-                        sed -i -E 's/\btrust\b/scram-sha-256/g' "$HBA"
-                        pg_ctl reload -D "$PGDATA_DIR" >/dev/null 2>&1 || psql -h localhost -U "${POSTGRES_USER:-letta}" -d postgres -c "SELECT pg_reload_conf();" >/dev/null 2>&1 || true
-                        echo "  pg_hba.conf converged to scram-sha-256"
-                    fi
-                    # Persist the password file so subsequent boots take the fresh-volume path
+                echo "  ALTER USER applied"
+                # Rewrite pg_hba.conf: scram for local + host lines (the
+                # method column only — comments mentioning 'trust' are left
+                # alone).
+                HBA="$PGDATA_DIR/pg_hba.conf"
+                if [ -f "$HBA" ]; then
+                    sed -i -E 's/^(local[[:space:]]+all[[:space:]]+all[[:space:]]+)(peer|trust|md5|password|scram-sha-256)\b/\1scram-sha-256/' "$HBA"
+                    sed -i -E 's/^(host[[:space:]]+all[[:space:]]+all[[:space:]]+[^[:space:]]+[[:space:]]+)(trust|md5|password|scram-sha-256)\b/\1scram-sha-256/' "$HBA"
+                    # Residual 'trust' anywhere on a RULE line (non-comment) is
+                    # the real risk — force scram on lines that look like rules.
+                    sed -i -E '/^[[:space:]]*(local|host)/ s/\btrust\b/scram-sha-256/g' "$HBA"
+                    # Reload via SQL (pg_reload_conf) — pg_ctl as root
+                    # cannot touch the postgres-owned data dir; the SQL
+                    # path runs as the connected user and actually takes
+                    # effect. Verified by the V-1 witness: without an
+                    # effective reload the running server kept the OLD
+                    # (trust) hba in memory and the old password still
+                    # authenticated.
+                    PGPASSWORD="${LEGACY_PG_PASSWORD:-letta}" psql -h localhost -U "${POSTGRES_USER:-letta}" -d postgres -tAc "SELECT pg_reload_conf();" >/dev/null 2>&1 || true
+                    echo "  pg_hba.conf converged to scram-sha-256 (reloaded)"
+                fi
+                # Marker IN the database dir: the db's own auth state now
+                # matches .41. Idempotent for every later boot.
+                touch "$PGDATA_DIR/.letta_v041_scram"
+                # Keep the LETTA_DIR password file in sync (a fresh LETTA_DIR
+                # paired with an old db volume needs it for later boots).
+                if [ ! -f "${LETTA_DIR:-/data/letta}/pg_password" ]; then
                     mkdir -p "${LETTA_DIR:-/data/letta}"
                     printf '%s' "$POSTGRES_PASSWORD" > "${LETTA_DIR:-/data/letta}/pg_password"
                     chmod 600 "${LETTA_DIR:-/data/letta}/pg_password"
-                else
-                    echo "  WARNING: could not ALTER USER (old password not 'letta'?)."
-                    echo "  Set LEGACY_PG_PASSWORD to the volume's actual password and re-run."
-                    echo "  The server will try the generated password and may fail to connect."
                 fi
             else
-                echo "  WARNING: cannot connect with the legacy default password."
+                echo "  WARNING: could not ALTER USER (old password not 'letta'?)."
                 echo "  Set LEGACY_PG_PASSWORD to the volume's actual password and re-run."
+                echo "  The server will try the generated password and may fail to connect."
             fi
+        else
+            echo "  WARNING: cannot connect with the legacy default password."
+            echo "  Set LEGACY_PG_PASSWORD to the volume's actual password and re-run."
         fi
     fi
 
