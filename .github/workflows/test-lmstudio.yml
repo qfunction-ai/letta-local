@@ -13,12 +13,9 @@ on:
       - '**'
       - '.github/workflows/test-lmstudio.yml'
       - '.github/workflows/reusable-test-workflow.yml'
-  pull_request_target:
-    types: [labeled]
-    paths:
-      - '**'
-      - '.github/workflows/test-lmstudio.yml'
-      - '.github/workflows/reusable-test-workflow.yml'
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -26,12 +23,12 @@ concurrency:
 
 jobs:
   test-lmstudio:
-    # Run on pull_request OR on pull_request_target only when labeled "safe to test"
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe to test'))
+    # Run on pull_request (fork PRs run without repo secrets — the safe default)
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     uses: ./.github/workflows/reusable-test-workflow.yml
     with:
       test-type: "integration"
-      is-external-pr: ${{ github.event_name == 'pull_request_target' && !contains(github.event.pull_request.labels.*.name, 'safe to test') }}
+      is-external-pr: false
       install-args: "--extra postgres --extra external-tools --extra dev --extra cloud-tool-sandbox"
       test-command: "uv run pytest -svv tests/"
       timeout-minutes: 60
