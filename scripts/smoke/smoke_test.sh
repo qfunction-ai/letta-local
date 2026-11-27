@@ -55,77 +55,143 @@ trap cleanup EXIT
 ok()  { echo "  PASS  $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL  $1"; FAIL=$((FAIL + 1)); }
 
-# ---------------------------------------------------------------- check 0
-# C2 (v0.16.41): rig self-test. Negative checks must be able to FAIL for
-# the RIGHT reason. This mode plants a known-leak payload in the exact
-# variable each negative check reads and asserts the check's verdict
-# logic fires. It runs with SMOKE_SELF_TEST=1 BEFORE the stack boots and
-# exits — no container, no LLM, pure verdict-logic validation.
-# Precedent: check 26d's three verdict bugs (all caught by the rig), the
-# e1 witness's match-to-failure inversion, and the P-2 review rule.
-if [ "${SMOKE_SELF_TEST:-0}" = "1" ]; then
-  echo "== check 0: rig self-test (verdict logic on planted leaks) =="
-  SELF_FAIL=0
+# ---------------------------------------------------------------------------
+# C2 (v0.16.41): VERDICT FUNCTIONS — the single implementation each
+# negative check uses. The real checks and the SMOKE_SELF_TEST=1 check-0
+# probes call the SAME functions (interim-1 review: the self-test must
+# not run its own copy of the logic — a drifted pattern or a reintroduced
+# ordering bug would pass a self-test that greps its own hand-written
+# copy). Each function takes the captured value and emits PASS/FAIL.
+# ---------------------------------------------------------------------------
 
-  self_check() {
-    # $1: description; $2: planted-variable name; $3: payload;
-    # $4: grep pattern the check uses; expects the check to MATCH (fail).
-    local __desc="$1" __var="$2" __payload="$3" __pat="$4"
-    if printf '%s' "${__payload}" | grep -q -- "${__pat}"; then
+verdict_check3() {
+  # $1: the captured non-streaming response. PASS iff assistant_message
+  # is present.
+  if grep -q '"assistant_message"' <<< "${1}"; then
+    ok "3. non-streaming message"
+  else
+    bad "3. non-streaming message (no assistant_message in response)"
+  fi
+}
+
+verdict_check47_canary() {
+  # $1: the assistant-stream text. Three-way verdict: raw canary leak /
+  # redacted / neither.
+  if grep -q "${SMOKE_CANARY}" <<< "${1}"; then
+    bad "4.7 canary redacted in stream (RAW CANARY LEAKED in assistant chunks)"
+  elif grep -q "REDACTED_CANARY" <<< "${1}"; then
+    ok "4.7 canary redacted in stream"
+  else
+    bad "4.7 canary (no disclosure and no redaction — model did not comply; investigate before release)"
+  fi
+}
+
+verdict_check26d() {
+  # $1: the full response body string; $2: the HTTP status; $3: the
+  # status field; $4: the tool_return field. ORDERED verdict (the
+  # af678822c lesson): the rejection check wins when both signals appear
+  # (the choke point QUOTES the crafted name, whose repr embeds the
+  # sentinel); the injection verdict requires the sentinel as the RAISED
+  # error type.
+  local __body="${1}" __http="${2}" __status="${3}" __return="${4}"
+  local __rejected=0 __raised=0
+  grep -q "Rejected tool call" <<< "${__body}${__return}" && __rejected=1
+  grep -q "RuntimeError: RIG26D_INJECTION_EXECUTED" <<< "${__body}${__return}" && __raised=1
+  if [ "${__rejected}" = "1" ] && [ "${__http}" = "200" ] && [ "${__status}" = "error" ]; then
+    ok "26d. crafted args rejected ON THE REQUEST PATH (status=error, choke-point message present)"
+  elif [ "${__raised}" = "1" ]; then
+    bad "26d. request-path INJECTION CONFIRMED (sentinel RuntimeError RAISED — the crafted name executed as code)"
+  elif [ "${__http}" != "200" ]; then
+    bad "26d. request-path probe (unexpected HTTP ${__http} — investigate; not the endpoint's normal error shape)"
+  else
+    bad "26d. request-path wrong-reason failure (status=${__status}, tool_return=${__return:0:120} — neither choke-point rejection nor sentinel raise; investigate)"
+  fi
+}
+
+verdict_skip_is_failure() {
+  # A-10 rule, executable: a SKIP must produce a FAIL verdict, which
+  # makes the run exit non-zero. Runs the REAL verdict emission on a
+  # planted SKIP.
+  local __planted="${1:-"SKIP: tool report not found in response — skip counts as failure"}"
+  bad "${__planted}"
+}
+
+# ---------------------------------------------------------------- check 0
+# C2: rig self-test — plants known-leak payloads and drives them through
+# the SAME verdict functions the real checks use. Runs with
+# SMOKE_SELF_TEST=1 before the stack boots; exits — no container, no
+# LLM, pure verdict-logic validation. Precedent: check 26d's three
+# verdict bugs, the e1 witness inversion, the P-2 review rule.
+if [ "${SMOKE_SELF_TEST:-0}" = "1" ]; then
+  echo "== check 0: rig self-test (verdict functions on planted leaks) =="
+  # Run each probe with PASS/FAIL redirected so the self-test can assert
+  # the verdict EMITTED (not the pattern matched). A planted leak that
+  # produces a PASS verdict line is a broken verdict function.
+  _probe() {
+    local __desc="$1"; shift
+    local __out
+    __out="$("$@" 2>&1)"
+    if printf '%s' "${__out}" | grep -q "^  FAIL"; then
       echo "  PASS  0. ${__desc}"
     else
-      echo "  FAIL  0. ${__desc} (planted leak did NOT trip the verdict)"
+      echo "  FAIL  0. ${__desc} (planted leak did NOT produce a FAIL verdict)"
       SELF_FAIL=$((SELF_FAIL + 1))
     fi
   }
+  _probe_clean() {
+    local __desc="$1"; shift
+    local __out
+    __out="$("$@" 2>&1)"
+    if printf '%s' "${__out}" | grep -q "^  PASS"; then
+      echo "  PASS  0. ${__desc}"
+    else
+      echo "  FAIL  0. ${__desc} (planted clean input did NOT produce a PASS verdict)"
+      SELF_FAIL=$((SELF_FAIL + 1))
+    fi
+  }
+  SELF_FAIL=0
 
-  # check 3's shape: assistant_message must be ABSENT — planted present.
-  self_check "check 3 verdict (planted assistant_message trips FAIL logic)" \
-    R3 '{"messages":[{"message_type":"assistant_message"}]}' '"assistant_message"'
+  # check 3: the success direction is assistant_message PRESENT (PASS);
+  # its failure direction (no assistant_message) emits FAIL. Probe both
+  # through the real function.
+  _probe_clean "check 3 verdict fn (assistant_message present emits PASS)" \
+    verdict_check3 '{"messages":[{"message_type":"assistant_message"}]}'
+  _probe "check 3 verdict fn (no assistant_message emits FAIL)" \
+    verdict_check3 '{"messages":[{"message_type":"reasoning_message"}]}'
 
-  # check 4.7 canary: the assistant stream must NOT carry the raw canary.
-  self_check "check 4.7 verdict (planted raw canary trips the leak branch)" \
-    R47_ASSISTANT "data: CANARY-SMOKE-PROBE-2026 leaked" "CANARY-SMOKE-PROBE-2026"
+  # check 4.7: planted raw canary -> REAL verdict function emits the
+  # LEAK branch (FAIL).
+  _probe "check 4.7 verdict fn (planted raw canary emits leak-FAIL)" \
+    verdict_check47_canary "data: ${SMOKE_CANARY} leaked"
+  # clean: redacted marker present -> PASS verdict.
+  _probe_clean "check 4.7 verdict fn (redacted marker emits PASS)" \
+    verdict_check47_canary "assistant text [REDACTED_CANARY] more text"
+  # neither -> FAIL (investigate branch).
+  _probe "check 4.7 verdict fn (neither leak nor redaction emits FAIL)" \
+    verdict_check47_canary "totally clean text"
 
-  # check 4.7 redaction: the REDACTED_CANARY marker must be present on
-  # SUCCESS — planted absent means the redaction branch fails.
-  if printf '%s' 'no redaction marker here' | grep -q "REDACTED_CANARY"; then
-    echo "  FAIL  0. check 4.7 redaction-branch (marker present in planted-clean output — grep logic inverted)"
-    SELF_FAIL=$((SELF_FAIL + 1))
-  else
-    echo "  PASS  0. check 4.7 redaction-branch (clean output correctly not matching)"
-  fi
+  # check 26d via the REAL verdict function:
+  # (a) sentinel RAISED (no rejection) -> INJECTION CONFIRMED (FAIL).
+  _probe "check 26d verdict fn (sentinel raise emits INJECTION-FAIL)" \
+    verdict_check26d "RuntimeError: RIG26D_INJECTION_EXECUTED" "200" "error" ""
+  # (b) rejection quoting the crafted name (repr embeds the sentinel but
+  # NOT as the raised form) + HTTP 200 + status error -> PASS verdict
+  # (the ORDER guard: the af678822c false-positive must NOT fire).
+  _probe_clean "check 26d verdict fn (ordered rejection emits PASS)" \
+    verdict_check26d "Rejected tool call: name '[exec(\"raise RuntimeError('RIG26D_INJECTION_EXECUTED')\")][0]' invalid" "200" "error" "Error executing function"
+  # (c) neither rejection nor sentinel -> wrong-reason FAIL.
+  _probe "check 26d verdict fn (no signals emits wrong-reason FAIL)" \
+    verdict_check26d "ordinary error text" "200" "error" "Error executing function"
 
-  # check 26d's ordered verdict: sentinel-RAISED must trip the injection
-  # branch even when a rejection message also quotes the crafted name.
-  _planted_26d="RuntimeError: RIG26D_INJECTION_EXECUTED in tool_return"
-  if printf '%s' "${_planted_26d}" | grep -q "RuntimeError: RIG26D_INJECTION_EXECUTED"; then
-    echo "  PASS  0. check 26d injection-branch (planted sentinel raise detected)"
-  else
-    echo "  FAIL  0. check 26d injection-branch (planted sentinel NOT detected)"
-    SELF_FAIL=$((SELF_FAIL + 1))
-  fi
-
-  # the ordered-rejection side: rejection message quoting the name must
-  # NOT count as the raised form (the af678822c bug class).
-  _planted_rej="Rejected tool call: argument name '[exec(\"raise RuntimeError('RIG26D_INJECTION_EXECUTED')\")][0]' is not a valid Python identifier"
-  if printf '%s' "${_planted_rej}" | grep -q "RuntimeError: RIG26D_INJECTION_EXECUTED"; then
-    echo "  FAIL  0. check 26d order-guard (quoted repr in a REJECTION matched the raised form — the af678822c bug is back)"
-    SELF_FAIL=$((SELF_FAIL + 1))
-  else
-    echo "  PASS  0. check 26d order-guard (quoted repr in rejection correctly NOT matched)"
-  fi
-
-  # A-10 rule: SKIPs must be countable; check 20's SKIP verdict text exists.
-  grep -q "SKIP: tool report not found in response — skip counts as failure" "${SCRIPT_DIR}/smoke_test.sh" \
-    && echo "  PASS  0. check 20 SKIP-as-failure text present" \
-    || { echo "  FAIL  0. check 20 SKIP-as-failure text missing"; SELF_FAIL=$((SELF_FAIL + 1)); }
+  # A-10: a planted SKIP through the REAL bad() emission.
+  _probe "skip-is-failure verdict fn (planted SKIP emits FAIL)" \
+    verdict_skip_is_failure
 
   if [ "${SELF_FAIL}" -eq 0 ]; then
-    echo "== self-test: all planted leaks tripped their verdicts =="
+    echo "== self-test: all planted leaks tripped their verdict functions =="
     exit 0
   else
-    echo "== self-test: ${SELF_FAIL} verdict(s) failed on planted payloads =="
+    echo "== self-test: ${SELF_FAIL} verdict function(s) failed on planted payloads =="
     exit 1
   fi
 fi
@@ -199,11 +265,7 @@ if [ "${OLLAMA_UP}" -eq 0 ]; then
     -H "Content-Type: application/json" \
     -H "User-Agent: letta-client/1.0" \
     -d '{"messages": [{"role": "user", "content": "Say the word apple"}], "stream": false}' || true)"
-  if grep -q '"assistant_message"' <<< "${R3}"; then
-    ok "3. non-streaming message"
-  else
-    bad "3. non-streaming message (no assistant_message in response)"
-  fi
+  verdict_check3 "${R3}"
 
   echo "== check 4: streaming message =="
   R4="$(curl -s -N --max-time 120 -X POST "${BASE}/v1/agents/${AGENT_ID}/messages" \
@@ -268,13 +330,7 @@ for line in sys.stdin:
         elif isinstance(c, list):
             out.extend(str(p.get("text", "")) for p in c if isinstance(p, dict))
 print("".join(out))')"
-  if grep -q "${SMOKE_CANARY}" <<< "${R47_ASSISTANT}"; then
-    bad "4.7 canary redacted in stream (RAW CANARY LEAKED in assistant chunks)"
-  elif grep -q "REDACTED_CANARY" <<< "${R47_ASSISTANT}"; then
-    ok "4.7 canary redacted in stream"
-  else
-    bad "4.7 canary (no disclosure and no redaction — model did not comply; investigate before release)"
-  fi
+  verdict_check47_canary "${R47_ASSISTANT}"
 
   # check 4.9: prompt-mode empty-step nudge (v0.16.27). nemotron
   # intermittently stops mid-task after narrating intent — the turn
@@ -1257,26 +1313,9 @@ R26D_RETURN="$(python3 -c "import json,sys; d=json.load(sys.stdin); print((d.get
 # injection was stopped by the choke point on the request path. Anything
 # else (marker, success status, or an error NOT naming the rejection) is
 # either code execution or an unrelated failure masquerading as a pass.
-# ORDER MATTERS: the choke point's rejection message QUOTES the crafted
-# name (its repr embeds the sentinel text), so the sentinel alone is
-# ambiguous — rejection wins when both appear. The injection verdict
-# requires the sentinel to surface as the raised error type
-# ("RuntimeError: RIG26D_INJECTION_EXECUTED" in the error text), which only
-# happens if the crafted name EXECUTED; a mere quoted repr in a rejection
-# message does not carry the "RuntimeError:" prefix form.
-R26D_REJECTED=0
-grep -q "Rejected tool call" <<< "${R26D_RETURN}${R26D_BODY}" && R26D_REJECTED=1
-R26D_RAISED=0
-grep -q "RuntimeError: RIG26D_INJECTION_EXECUTED" <<< "${R26D_RETURN}${R26D_BODY}" && R26D_RAISED=1
-if [ "${R26D_REJECTED}" = "1" ] && [ "${S26D_HTTP}" = "200" ] && [ "${R26D_STATUS}" = "error" ]; then
-  ok "26d. crafted args rejected ON THE REQUEST PATH (status=error, choke-point message present)"
-elif [ "${R26D_RAISED}" = "1" ]; then
-  bad "26d. request-path INJECTION CONFIRMED (sentinel RuntimeError RAISED — the crafted name executed as code)"
-elif [ "${S26D_HTTP}" != "200" ]; then
-  bad "26d. request-path probe (unexpected HTTP ${S26D_HTTP} — investigate; not the endpoint's normal error shape)"
-else
-  bad "26d. request-path wrong-reason failure (status=${R26D_STATUS}, tool_return=${R26D_RETURN:0:120} — neither choke-point rejection nor sentinel raise; investigate)"
-fi
+# C2 (interim-1): the verdict lives in verdict_check26d — the SAME
+# function the self-test drives on planted payloads.
+verdict_check26d "${R26D_BODY}" "${S26D_HTTP}" "${R26D_STATUS}" "${R26D_RETURN}"
 
 echo
 echo "== smoke: ${PASS} passed, ${FAIL} failed =="
