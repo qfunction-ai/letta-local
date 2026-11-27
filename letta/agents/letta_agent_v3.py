@@ -2027,6 +2027,11 @@ class LettaAgentV3(LettaAgentV2):
         Unified approach: treats single and multi-tool calls uniformly to reduce code duplication.
         """
 
+        # interim-3: normalize — None means the EMPTY set, never
+        # "exempt everything". A caller that forgets the argument gets the
+        # fail-closed behavior (no call is approved).
+        approved_tool_call_ids = approved_tool_call_ids or set()
+
         # v0.16.37 (A8): per-step blocked-call tracker. Populated by _run_one
         # (canary / policy deny) and the step-2 approval gate (canary-bearing
         # approval candidates); consumed by the streaming chunk holdback and
@@ -2225,9 +2230,15 @@ class LettaAgentV3(LettaAgentV2):
             except Exception:
                 _tool_schema = None
             canonical_args[tc.id] = canonicalize_tool_args(_raw_args, _tool_schema)
+            # interim-3 (F-6 layer 2): waive_approval applies ONLY to the
+            # approved call ids. A pending parallel passenger never gets its
+            # approval rule waived — nobody approved it. (Previously the
+            # step-wide waiver exempted every call in an approval-response
+            # step, including the passengers.)
+            _tc_waive = bool(is_approval_response) and tc.id in (approved_tool_call_ids or set())
             policy_decisions[tc.id] = await _sec.check_policy(
                 self, tc.function.name, canonical_args[tc.id], step_id, run_id,
-                waive_approval=bool(is_approval_response),
+                waive_approval=_tc_waive,
             )
 
         # 2. Check whether tool call requires approval (includes client-side tools)
@@ -2423,15 +2434,35 @@ class LettaAgentV3(LettaAgentV2):
                 exec_specs.append(retry_spec)
                 continue
 
-            # Validate against allowed tools.
-            # F-6 (round-2 'not covered' note, traced real): on an
-            # approval-response step, the exemption from tool-rule
-            # violation must apply ONLY to the APPROVED calls. The pending
-            # parallel calls (_maybe_get_pending_tool_call_message) ride
-            # along unapproved — a model ignoring parallel_tool_calls=false
-            # could otherwise execute tools the current tool rules don't
-            # permit, and the approver never saw them.
-            if is_approval_response and (approved_tool_call_ids is None or call_id in (approved_tool_call_ids or set())):
+            # interim-3 (F-6, all layers): on an approval-response step,
+            # ONLY the approved call ids execute. Pending parallel calls
+            # (_maybe_get_pending_tool_call_message) ride along unapproved —
+            # previously they inherited the step-wide approval exemptions
+            # (tool rules, policy waive, the step-2 gate). Any non-approved
+            # call is rejected with a named error the model can retry
+            # normally. None approved_tool_call_ids exempts NOTHING.
+            if is_approval_response and call_id not in (approved_tool_call_ids or set()):
+                exec_specs.append(
+                    {
+                        "id": call_id,
+                        "name": name,
+                        "args": {},
+                        "violated": False,
+                        "error": (
+                            f"Tool call {name} was not part of the approved set and cannot execute in "
+                            "this approval step. Resubmit it as a normal tool call."
+                        ),
+                    }
+                )
+                self.logger.warning(
+                    f"F-6: rejecting unapproved passenger tool call {name} ({call_id}) "
+                    "on an approval-response step"
+                )
+                continue
+            # Approved calls are exempt from the tool-rule check (the human
+            # approved exactly this call; the rules gate re-entry, not the
+            # approved execution).
+            if is_approval_response:
                 tool_rule_violated = False
             else:
                 tool_rule_violated = name not in valid_tool_names
@@ -2495,9 +2526,11 @@ class LettaAgentV3(LettaAgentV2):
             if policy_decision is None:
                 # Defensive fallback for specs built outside the normal loop
                 # (e.g. retry specs): check now.
+                # interim-3 (F-6 layer 2): same scoping as the main loop —
+                # waive only if this SPEC's call id is approved.
                 policy_decision = await _sec.check_policy(
                     self, spec["name"], spec.get("args"), step_id, run_id,
-                    waive_approval=bool(is_approval_response),
+                    waive_approval=bool(is_approval_response) and spec.get("id") in (approved_tool_call_ids or set()),
                 )
 
             # Security: canary check on tool arguments — FIRST, before any
