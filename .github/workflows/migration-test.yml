@@ -4,6 +4,9 @@ on:
     paths:
       - '**.py'
   workflow_dispatch:
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

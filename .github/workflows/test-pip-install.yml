@@ -2,6 +2,9 @@ name: Test Package Installation
 
 on: [push, pull_request, workflow_dispatch]
 
+permissions:
+  contents: read
+
 jobs:
   test-install:
     runs-on: ubuntu-latest

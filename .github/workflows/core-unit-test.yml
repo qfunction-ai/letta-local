@@ -4,10 +4,9 @@ on:
   pull_request:
     branches:
       - main
-  pull_request_target:
-    branches:
-      - main
-    types: [labeled]
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -15,13 +14,13 @@ concurrency:
 
 jobs:
   unit-tests:
-    # Run on pull_request OR on pull_request_target only when labeled "safe to test"
-    if: github.event_name == 'pull_request' || (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe to test'))
+    # Run on pull_request (fork PRs run without repo secrets — the safe default)
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/reusable-test-workflow.yml
     with:
       test-type: 'unit'
       use-redis: true
-      is-external-pr: ${{ github.event_name == 'pull_request_target' && !contains(github.event.pull_request.labels.*.name, 'safe to test') }}
+      is-external-pr: false
       changed-files-pattern: |
         **
         .github/workflows/reusable-test-workflow.yml
