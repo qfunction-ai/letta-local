@@ -151,6 +151,17 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
         code = await self.generate_execution_script(agent_state=agent_state, wrap_print_with_markers=True)
 
         exec_dir = await asyncio.to_thread(tempfile.mkdtemp, dir=sandbox_dir, prefix="exec-")
+        # F-5 SPIKE: the sandbox subprocess runs as the `letta` uid; the
+        # exec dir is also its HOME/TMPDIR, so it must be owned by that uid.
+        import pwd as _pwd
+
+        try:
+            _pw = _pwd.getpwnam("letta")
+            await asyncio.to_thread(os.chown, exec_dir, _pw.pw_uid, _pw.pw_gid)
+        except KeyError:
+            pass  # spike mode: no letta user in the image (e.g. macOS dev)
+        except PermissionError:
+            logger.warning(f"F-5: could not chown exec dir {exec_dir} to the sandbox uid")
 
         async def write_temp_file(dir, content):
             def _write():
@@ -225,6 +236,15 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                 staging_dir = os.path.join(base, self.agent_id, ".staging")
                 # Ensure staging dir exists so Landlock can grant write access
                 os.makedirs(staging_dir, exist_ok=True)
+                # F-5 SPIKE: the sandbox uid writes here; the promotion
+                # (server-side, root) still reads it after the run.
+                try:
+                    import pwd as _pwd
+
+                    _pw = _pwd.getpwnam("letta")
+                    os.chown(staging_dir, _pw.pw_uid, _pw.pw_gid)
+                except (KeyError, PermissionError):
+                    pass
                 staging_write_paths = [staging_dir]
                 # file_read/file_list need READ access to the agent's promoted
                 # files dir (without this, Path.exists() swallows the Landlock
@@ -349,7 +369,43 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
             log_event(name="start landlock subprocess")
 
             # Launch wrapper via asyncio.create_subprocess_exec with close_fds=True
-            # The wrapper applies Landlock + seccomp, then execs the tool script
+            # The wrapper applies Landlock + seccomp, then execs the tool script.
+            #
+            # F-5 SPIKE (v0.16.41): drop the sandbox subprocess to the
+            # non-root `letta` uid (1000) BEFORE Landlock/seccomp apply.
+            # The server stays root (it owns /root/.letta, the Postgres
+            # socket dir, the venv). The sandboxed code running as a
+            # separate uid cannot: read the server's /proc environ, read
+            # the Postgres socket dir or data files, chmod/chown/truncate
+            # server-owned files (R2A-3), or connect to the internal
+            # datastores by file permission. Requires the exec_dir and
+            # staging dir to be owned by the sandbox uid (chowned at
+            # creation below). Fail-closed: if the drop cannot be
+            # configured, run WITHOUT it but log loudly (spike mode —
+            # the release turns this into a refusal).
+            import pwd
+
+            sandbox_uid_gid = None
+            try:
+                pw = pwd.getpwnam("letta")
+                sandbox_uid_gid = (pw.pw_uid, pw.pw_gid)
+            except KeyError:
+                logger.warning(
+                    "F-5 sandbox-uid drop unavailable: no 'letta' user in the image; "
+                    "sandbox runs as the server uid (spike mode)"
+                )
+
+            def _drop_to_sandbox_uid():
+                if sandbox_uid_gid is None:
+                    return
+                uid, gid = sandbox_uid_gid
+                if os.getuid() != uid:
+                    # setgid first (dropping uid loses the privilege to set gid)
+                    os.setgid(gid)
+                    os.setuid(uid)
+
+            preexec = _drop_to_sandbox_uid if sandbox_uid_gid else None
+
             process = await asyncio.create_subprocess_exec(
                 python_executable,
                 wrapper_path,
@@ -375,6 +431,7 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                 env=env,
                 cwd=cwd,
                 close_fds=True,  # CRITICAL: prevent FD leakage
+                preexec_fn=preexec,  # F-5: drop to the sandbox uid
             )
 
             try:
