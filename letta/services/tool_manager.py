@@ -164,11 +164,15 @@ def modal_tool_wrapper(tool: PydanticTool, actor: PydanticUser, sandbox_env_vars
                     from letta.functions.ast_parsers import coerce_dict_args_by_annotations
 
                     annotations = getattr(tool_func, "__annotations__", {})
+                    # v0.16.41 (R2A-1 sibling scan): allow_unsafe_eval removed —
+                    # eval-ing tool-annotation STRINGS with function globals was
+                    # the S-1 vector-3 class, alive in the Modal wrapper. The
+                    # wrapper has no current consumer; if Modal returns, it
+                    # follows the same no-unsafe-eval rule as every other path.
                     kwargs = coerce_dict_args_by_annotations(
                         kwargs,
                         annotations,
-                        allow_unsafe_eval=True,
-                        extra_globals=tool_func.__globals__,
+                        allow_unsafe_eval=False,
                     )
                 except Exception:
                     pass

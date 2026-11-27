@@ -143,8 +143,14 @@ def coerce_dict_args_by_annotations(
                 else:
                     arg_type = annotation_value
 
-                # Always parse strings using literal_eval or json if possible
-                if isinstance(value, str):
+                # R2A-1/F-3 (v0.16.41): str-typed parameters are NEVER
+                # decoded — the string IS the value. Previously every
+                # string went through json.loads/literal_eval regardless
+                # of the target type, which is the rewrite the policy
+                # engine never saw (a value like '"\\u0044ROP TABLE users"'
+                # became 'DROP TABLE users' in the tool while the rules
+                # saw the escaped form).
+                if isinstance(value, str) and arg_type is not str:
                     try:
                         value = json.loads(value)
                     except json.JSONDecodeError:

@@ -305,10 +305,31 @@ def _coerce_type(value: Any, target: Any) -> Any:
     return value
 
 
-def _evaluate_condition(condition: PolicyCondition, context: Dict[str, Any], rule: PolicyRule) -> bool:
+# R2A-1/F-3 (v0.16.41): TYPE MISMATCH sentinel. A type mismatch NEVER
+# lets an ALLOW-rule match, and ALWAYS makes a deny/approval rule match.
+# Rationale: an argument the canonicalizer couldn't normalize (a string
+# where the schema says number, a mis-shaped object) is exactly the
+# ambiguity an attacker (or a sloppy local model) injects to slip past
+# argument-level rules. Rules fail CLOSED.
+TYPE_MISMATCH = "__letta_type_mismatch__"
+
+
+def _type_mismatch(value: Any, expected: type) -> bool:
+    """True when value's type is incompatible with what the operator needs."""
+    return not isinstance(value, expected) and value is not None
+
+
+def _evaluate_condition(condition: PolicyCondition, context: Dict[str, Any], rule: PolicyRule):
     """Evaluate a single policy condition against the evaluation context.
 
-    Returns True if the condition matches, False otherwise.
+    Returns True if the condition matches, False otherwise, or
+    TYPE_MISMATCH when the field's type makes the comparison meaningless
+    (the caller interprets that per rule action — fail closed).
+
+    v0.16.41 (R2A-1/F-3): numeric comparisons against non-numbers and
+    string operations against non-strings return TYPE_MISMATCH instead
+    of quietly returning False. The canonical-form rule means values
+    arrive typed; a mismatch is suspicious, not absent.
     """
     field_value = _resolve_field(context, condition.field)
 
@@ -326,25 +347,33 @@ def _evaluate_condition(condition: PolicyCondition, context: Dict[str, Any], rul
     elif op == PolicyOperator.NE:
         return field_value != compare_value
     elif op == PolicyOperator.GT:
+        if _type_mismatch(field_value, (int, float)) or isinstance(field_value, bool):
+            return TYPE_MISMATCH
         try:
             return field_value > compare_value
         except TypeError:
-            return False
+            return TYPE_MISMATCH
     elif op == PolicyOperator.LT:
+        if _type_mismatch(field_value, (int, float)) or isinstance(field_value, bool):
+            return TYPE_MISMATCH
         try:
             return field_value < compare_value
         except TypeError:
-            return False
+            return TYPE_MISMATCH
     elif op == PolicyOperator.GTE:
+        if _type_mismatch(field_value, (int, float)) or isinstance(field_value, bool):
+            return TYPE_MISMATCH
         try:
             return field_value >= compare_value
         except TypeError:
-            return False
+            return TYPE_MISMATCH
     elif op == PolicyOperator.LTE:
+        if _type_mismatch(field_value, (int, float)) or isinstance(field_value, bool):
+            return TYPE_MISMATCH
         try:
             return field_value <= compare_value
         except TypeError:
-            return False
+            return TYPE_MISMATCH
     elif op == PolicyOperator.IN:
         if isinstance(compare_value, (list, tuple, set)):
             return field_value in compare_value
@@ -363,13 +392,17 @@ def _evaluate_condition(condition: PolicyCondition, context: Dict[str, Any], rul
                 return False
         if isinstance(field_value, str):
             return bool(pattern.search(field_value))
-        return bool(pattern.search(str(field_value)))
+        # R2A-1/F-3: matching against a non-string (e.g. a dict where a
+        # string was expected) is a mismatch, not a quiet non-match.
+        return TYPE_MISMATCH
     elif op == PolicyOperator.CONTAINS:
         if isinstance(field_value, str) and isinstance(compare_value, str):
             return compare_value in field_value
         if isinstance(field_value, (list, tuple)):
             return compare_value in field_value
-        return False
+        # R2A-1/F-3: contains against a type that can't contain is a
+        # mismatch (fail closed), not a quiet non-match.
+        return TYPE_MISMATCH
     elif op == PolicyOperator.CONTAINS_SECRET:
         # Check all tool_args values for secrets using entropy + regex
         # Recursively walk nested dicts/lists to find secrets at any depth
@@ -544,7 +577,34 @@ class PolicyChecker:
             sorted_rules = sorted(self.policy.rules, key=lambda r: r.priority, reverse=True)
 
             for rule in sorted_rules:
-                if _evaluate_condition(rule.condition, eval_context, rule):
+                _cond_result = _evaluate_condition(rule.condition, eval_context, rule)
+                if _cond_result == TYPE_MISMATCH:
+                    # R2A-1/F-3 fail-closed: a type mismatch makes DENY and
+                    # REQUIRE_APPROVAL rules MATCH (the call is rejected or
+                    # gated), and ALLOW rules NOT match (a mismatch can
+                    # never produce an allow).
+                    if rule.action in (PolicyAction.DENY, PolicyAction.REQUIRE_APPROVAL):
+                        entry = {
+                            "tool_name": tool_name,
+                            "matched_rule": rule.name,
+                            "operator": str(rule.condition.operator.value if hasattr(rule.condition.operator, "value") else rule.condition.operator),
+                            "action": rule.action.value,
+                            "reason": (rule.message or f"Matched rule '{rule.name}'") + " (type mismatch — fail closed)",
+                        }
+                        collected_audit_entries.append(entry)
+                        # DENY -> not allowed; REQUIRE_APPROVAL -> allowed=False
+                        # with action=require_approval (the caller drives the
+                        # approval flow; same shape as a normal rule match).
+                        return PolicyDecision(
+                            allowed=False,
+                            action=rule.action,
+                            matched_rule=rule.name,
+                            reason=entry["reason"],
+                            audit_entries=collected_audit_entries,
+                        )
+                    # ALLOW/AUDIT rules: mismatch = no match; keep evaluating.
+                    continue
+                if _cond_result:
                     # Condition matched — check pattern if present
                     if rule.pattern is not None and rule._compiled_pattern is not None:
                         # Pattern matches against the tool's string representation.

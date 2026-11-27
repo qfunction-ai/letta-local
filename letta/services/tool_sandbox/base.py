@@ -445,26 +445,14 @@ class AsyncToolSandboxBase(ABC):
         if tool_source_code:
             lines.append(tool_source_code.rstrip())
 
-        if self.args:
-            raw_args = ", ".join([f"{name!r}: {name}" for name in self.args])
-            lines.extend(
-                [
-                    f"__letta_raw_args = {{{raw_args}}}",
-                    "try:",
-                    "    from letta.functions.ast_parsers import coerce_dict_args_by_annotations",
-                    f"    __letta_func = {self.tool.name}",
-                    "    __letta_annotations = getattr(__letta_func, '__annotations__', {})",
-                    "    __letta_coerced_args = coerce_dict_args_by_annotations(",
-                    "        __letta_raw_args,",
-                    "        __letta_annotations,",
-                    "        allow_unsafe_eval=False,",
-                    "        extra_globals=__letta_func.__globals__,",
-                    "    )",
-                ]
-            )
-            for name in self.args:
-                lines.append(f"    {name} = __letta_coerced_args.get({name!r}, {name})")
-            lines.extend(["except Exception:", "    pass"])
+        # R2A-1/F-3 (v0.16.41): the in-sandbox coercion block is REMOVED.
+        # The agent loops now canonicalize arguments server-side BEFORE the
+        # policy/canary/approval checks, and the sandbox receives already-
+        # typed values rendered by the S-1 serializer. A retained in-sandbox
+        # rewriter could re-decode a value the policy already approved —
+        # the R2A-1 bypass mechanism, one layer down. The one remaining
+        # server-side coercion (tool_manager, in-process builtin tools) is
+        # annotated-typed and feeds no policy checks.
 
         if not self.is_async_function:
             # sync variant

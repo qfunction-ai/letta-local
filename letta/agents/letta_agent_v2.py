@@ -18,6 +18,7 @@ from letta.agents.helpers import (
     _safe_load_tool_call_str,
     generate_step_id,
 )
+from letta.security.arg_canonicalizer import canonicalize_tool_args
 from letta.constants import DEFAULT_MAX_STEPS, NON_USER_MSG_PREFIX, REQUEST_HEARTBEAT_PARAM
 from letta.errors import ContextWindowExceededError, InsufficientCreditsError, LLMError
 from letta.helpers import ToolRulesSolver
@@ -1281,6 +1282,17 @@ class LettaAgentV2(BaseAgentV2):
         tool_call_name: str = tool_call.function.name
 
         tool_args = _safe_load_tool_call_str(tool_call.function.arguments)
+        # R2A-1 (v0.16.41): canonicalize BEFORE the canary check, the
+        # policy check, the approval request and execution — the executor's
+        # rewrite used to decode values the checks never saw.
+        _v2_tool_schema = None
+        try:
+            _t = next((t for t in agent_state.tools if t.name == tool_call_name), None)
+            if _t is not None and _t.json_schema:
+                _v2_tool_schema = _t.json_schema
+        except Exception:
+            _v2_tool_schema = None
+        tool_args = canonicalize_tool_args(tool_args, _v2_tool_schema)
         request_heartbeat: bool = _pop_heartbeat(tool_args)
         tool_args.pop(INNER_THOUGHTS_KWARG, None)
 

@@ -21,6 +21,7 @@ from letta.agents.helpers import (
     merge_and_validate_prefilled_args,
 )
 from letta.agents.letta_agent_v2 import LettaAgentV2
+from letta.security.arg_canonicalizer import canonicalize_tool_args
 from letta.constants import DEFAULT_MAX_STEPS, NON_USER_MSG_PREFIX, REQUEST_HEARTBEAT_PARAM
 from letta.errors import (
     ContextWindowExceededError,
@@ -2192,10 +2193,25 @@ class LettaAgentV3(LettaAgentV2):
         # Decisions are stashed on the exec specs so _run_one does not
         # re-check (double audit events) — one check per call, ever.
         policy_decisions: Dict[str, Any] = {}
+        # R2A-1 (v0.16.41): canonicalize the arguments ONCE, BEFORE every
+        # consumer — policy, canary, approval, execution. The executor used
+        # to rewrite args after the checks (coerce_dict_args_by_annotations
+        # JSON-decodes every string), so stringified/escaped values bypassed
+        # every argument-level rule. The canonical dict is now the ONLY
+        # form that flows downstream.
+        canonical_args: Dict[str, Dict[str, Any]] = {}
         for tc in tool_calls:
-            _pd_args = _safe_load_tool_call_str(tc.function.arguments, llm_config=active_llm_config)
+            _raw_args = _safe_load_tool_call_str(tc.function.arguments, llm_config=active_llm_config)
+            _tool_schema = None
+            try:
+                _t = next((t for t in self.agent_state.tools if t.name == tc.function.name), None)
+                if _t is not None and _t.json_schema:
+                    _tool_schema = _t.json_schema
+            except Exception:
+                _tool_schema = None
+            canonical_args[tc.id] = canonicalize_tool_args(_raw_args, _tool_schema)
             policy_decisions[tc.id] = await _sec.check_policy(
-                self, tc.function.name, _pd_args, step_id, run_id,
+                self, tc.function.name, canonical_args[tc.id], step_id, run_id,
                 waive_approval=bool(is_approval_response),
             )
 
@@ -2206,9 +2222,11 @@ class LettaAgentV3(LettaAgentV2):
 
             # Canary-bearing calls are NEVER approval candidates (P-13) — they
             # flow to _run_one where the canary branch blocks them.
+            # R2A-1: the canary check consumes the CANONICAL args (a canary
+            # smuggled as a stringified value would otherwise be invisible
+            # to the check while still decoded at execution).
             def _canary_bearing(tc) -> bool:
-                _cb_args = _safe_load_tool_call_str(tc.function.arguments, llm_config=active_llm_config)
-                return self.canary_checker.check(_cb_args)
+                return self.canary_checker.check(canonical_args.get(tc.id, {}))
 
             # Tools requiring approval: requires_approval tools, client-side
             # tools, OR policy require_approval matches
@@ -2350,7 +2368,10 @@ class LettaAgentV3(LettaAgentV2):
             call_id = tc.id or f"call_{uuid.uuid4().hex[:8]}"
             name = tc.function.name
             raw_args_str = tc.function.arguments or ""
-            args = _safe_load_tool_call_str(tc.function.arguments, llm_config=active_llm_config)
+            # R2A-1: execution consumes the CANONICAL dict (already
+            # policy-checked in this exact form). The executor's own
+            # re-coercion is REMOVED — see sandbox_tool_executor.
+            args = dict(canonical_args.get(tc.id) or _safe_load_tool_call_str(tc.function.arguments, llm_config=active_llm_config))
             args.pop(REQUEST_HEARTBEAT_PARAM, None)
             args.pop(INNER_THOUGHTS_KWARG, None)
 
