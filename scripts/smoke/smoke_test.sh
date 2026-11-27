@@ -131,7 +131,7 @@ if [ "${SMOKE_SELF_TEST:-0}" = "1" ]; then
     local __desc="$1"; shift
     local __out
     __out="$("$@" 2>&1)"
-    if printf '%s' "${__out}" | grep -q "^  FAIL"; then
+    if grep -q "^  FAIL" <<< "${__out}"; then
       echo "  PASS  0. ${__desc}"
     else
       echo "  FAIL  0. ${__desc} (planted leak did NOT produce a FAIL verdict)"
@@ -142,7 +142,7 @@ if [ "${SMOKE_SELF_TEST:-0}" = "1" ]; then
     local __desc="$1"; shift
     local __out
     __out="$("$@" 2>&1)"
-    if printf '%s' "${__out}" | grep -q "^  PASS"; then
+    if grep -q "^  PASS" <<< "${__out}"; then
       echo "  PASS  0. ${__desc}"
     else
       echo "  FAIL  0. ${__desc} (planted clean input did NOT produce a PASS verdict)"

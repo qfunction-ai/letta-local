@@ -1696,6 +1696,19 @@ class LettaAgentV3(LettaAgentV2):
                     tool_calls = [tool_calls[0]]
 
             # get the new generated `Message` objects from handling the LLM response
+            # F-6: the ids the approval response actually APPROVED. Only
+            # these get the tool-rule exemption in _handle_ai_response;
+            # pending parallel passengers stay subject to the rules.
+            _approved_ids: set[str] = set()
+            if approval_response is not None and approval_response.approvals:
+                from letta.schemas.letta_message import ApprovalReturn
+
+                _req_first_id = approval_request.tool_calls[0].id if approval_request and approval_request.tool_calls else None
+                _approved_ids = {
+                    (_req_first_id if a.tool_call_id.startswith("message-") else a.tool_call_id)
+                    for a in approval_response.approvals
+                    if isinstance(a, ApprovalReturn) and a.approve
+                }
             new_messages, self.should_continue, self.stop_reason = await self._handle_ai_response(
                 tool_calls=tool_calls,
                 valid_tool_names=[tool["name"] for tool in valid_tools],
@@ -1718,6 +1731,7 @@ class LettaAgentV3(LettaAgentV2):
                 tool_returns=tool_returns,
                 finish_reason=llm_adapter.finish_reason,
                 active_llm_config=active_llm_config,
+                approved_tool_call_ids=_approved_ids,
             )
             enforce_budget_override(self)
 
@@ -2004,6 +2018,7 @@ class LettaAgentV3(LettaAgentV2):
         tool_returns: list[ToolReturn] = [],
         finish_reason: str | None = None,
         active_llm_config: object = None,
+        approved_tool_call_ids: set[str] | None = None,
     ) -> tuple[list[Message], bool, LettaStopReason | None]:
         """
         Handle the final AI response once streaming completes, execute / validate tool calls,
@@ -2368,10 +2383,34 @@ class LettaAgentV3(LettaAgentV2):
             call_id = tc.id or f"call_{uuid.uuid4().hex[:8]}"
             name = tc.function.name
             raw_args_str = tc.function.arguments or ""
-            # R2A-1: execution consumes the CANONICAL dict (already
-            # policy-checked in this exact form). The executor's own
-            # re-coercion is REMOVED — see sandbox_tool_executor.
-            args = dict(canonical_args.get(tc.id) or _safe_load_tool_call_str(tc.function.arguments, llm_config=active_llm_config))
+            # R2A-1 (interim-2 R-1): execution consumes the CANONICAL dict
+            # — the exact form the policy checked. A missing entry is a BUG
+            # (a path reached execution without canonicalization): reject
+            # the call with a named error rather than re-parsing the raw
+            # arguments — a raw re-parse is the R2A-1 bypass kept alive as
+            # a fallback. Both entry paths (normal LLM step and
+            # approval-resume) run through _handle_ai_response's
+            # canonicalization loop above, so a miss cannot legitimately
+            # happen.
+            if tc.id not in canonical_args:
+                exec_specs.append(
+                    {
+                        "id": call_id,
+                        "name": name,
+                        "args": {},
+                        "violated": False,
+                        "error": (
+                            f"Internal security error: tool call {name} reached execution without "
+                            "argument canonicalization (R2A-1 invariant violation). The call is rejected."
+                        ),
+                    }
+                )
+                self.logger.error(
+                    f"R2A-1 invariant violation: tool call {name} ({tc.id}) reached the exec-spec "
+                    "builder without a canonical_args entry — rejected."
+                )
+                continue
+            args = dict(canonical_args[tc.id])
             args.pop(REQUEST_HEARTBEAT_PARAM, None)
             args.pop(INNER_THOUGHTS_KWARG, None)
 
@@ -2384,8 +2423,18 @@ class LettaAgentV3(LettaAgentV2):
                 exec_specs.append(retry_spec)
                 continue
 
-            # Validate against allowed tools
-            tool_rule_violated = name not in valid_tool_names and not is_approval_response
+            # Validate against allowed tools.
+            # F-6 (round-2 'not covered' note, traced real): on an
+            # approval-response step, the exemption from tool-rule
+            # violation must apply ONLY to the APPROVED calls. The pending
+            # parallel calls (_maybe_get_pending_tool_call_message) ride
+            # along unapproved — a model ignoring parallel_tool_calls=false
+            # could otherwise execute tools the current tool rules don't
+            # permit, and the approver never saw them.
+            if is_approval_response and (approved_tool_call_ids is None or call_id in (approved_tool_call_ids or set())):
+                tool_rule_violated = False
+            else:
+                tool_rule_violated = name not in valid_tool_names
 
             # Handle prefilled args if present
             if not tool_rule_violated:

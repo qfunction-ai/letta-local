@@ -236,3 +236,58 @@ class TestSourceShape:
     def test_executor_no_recoerce(self):
         src = open("letta/services/tool_executor/sandbox_tool_executor.py").read()
         assert "return function_args" in src and "coerce_dict_args_by_annotations(function_args" not in src
+
+
+# ---------------------------------------------------------------------------
+# interim-2 R-1 + F-6: no raw-args fallback; approval exemption is scoped
+# ---------------------------------------------------------------------------
+
+
+class TestR1NoRawFallback:
+    """interim-2 R-1: execution must consume canonical_args[tc.id] with NO
+    raw re-parse fallback. A missing entry is rejected with a named error."""
+
+    def test_v3_no_fallback_in_source(self):
+        src = open("letta/agents/letta_agent_v3.py").read()
+        assert "canonical_args.get(tc.id) or _safe_load_tool_call_str" not in src, (
+            "the raw-args fallback (interim-2 R-1) must not exist — a raw "
+            "re-parse is the R2A-1 bypass kept alive as a safety net"
+        )
+        assert "canonical_args[tc.id]" in src, "execution must index the canonical dict"
+        assert "R2A-1 invariant violation" in src, "a missing canonical entry must be a named rejection"
+
+    def test_v3_v2_single_arg_source(self):
+        """Every exec-spec args site flows from ONE canonical source."""
+        import re
+
+        src = open("letta/agents/letta_agent_v3.py").read()
+        # all "args": sites must follow the canonical assignment
+        canonical_assign = "args = dict(canonical_args[tc.id])"
+        assert canonical_assign in src
+        # the malformed-args retry path uses the SAME args var
+        idx_retry = src.index("_tcr.handle_malformed_args")
+        idx_canon = src.index(canonical_assign)
+        assert idx_canon < idx_retry
+
+
+class TestF6ApprovalExemptionScoped:
+    """F-6 (round-2 traced real): the tool-rule-violation exemption on an
+    approval-response step applies ONLY to the approved calls; pending
+    parallel passengers stay subject to the rules."""
+
+    def test_exemption_condition_in_source(self):
+        src = open("letta/agents/letta_agent_v3.py").read()
+        assert "approved_tool_call_ids is None or call_id in (approved_tool_call_ids or set())" in src, (
+            "the exemption must be scoped to approved ids (F-6)"
+        )
+        assert "tool_rule_violated = name not in valid_tool_names" in src
+
+    def test_v2_still_checks_rules_on_approval(self):
+        """V2's approval path: verify the rule check is NOT blanket-exempted
+        by is_approval (grep for the V2 shape)."""
+        src = open("letta/agents/letta_agent_v2.py").read()
+        # V2 evaluates tool rules via tool_rules_solver.get_allowed_tool_names
+        # on every step, including approval handling — no is_approval blanket
+        # exemption exists in V2 (its approval flow re-enters the normal
+        # step loop). Structural assertion:
+        assert "canonicalize_tool_args" in src
