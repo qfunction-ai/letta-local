@@ -1,23 +1,35 @@
 #!/bin/bash
-# v0.16.41 PG upgrade witness (V-1/G-2/X-3/Z-2): a pre-.41 Postgres volume
-# (password 'letta', trust-everywhere hba) booted through the REAL .41
-# startup.sh must converge auth, keep data, reject the old password — and
-# both failure branches must fail closed THROUGH THE SCRIPT.
+# v0.16.41 PG upgrade witness (V-1/G-2/X-3/Z-2 + AA-1/AA-2): a pre-.41
+# Postgres volume (password 'letta', trust-everywhere hba) booted through
+# the REAL .41 startup.sh must converge auth, keep data, reject the old
+# password — and both failure branches must fail closed THROUGH THE SCRIPT.
+#
+# Every check asserts and accumulates FAIL; the script exits non-zero on any
+# failure. docker logs are CAPTURED then grepped (a pipe into grep -q under
+# pipefail can SIGPIPE the writer and invert a match — AA-1).
 #
 # Usage:
 #   docker build -t letta-local:v041-dev .
-#   bash scripts/witness/v041_pg_upgrade.sh          # the happy path
-#   MODE=restart bash scripts/witness/v041_pg_upgrade.sh   # X-3 restart branch (broken reload)
-#   MODE=exit bash scripts/witness/v041_pg_upgrade.sh      # X-3 exit branch (failed restart)
+#   bash scripts/witness/v041_pg_upgrade.sh               # happy path
+#   MODE=restart bash scripts/witness/v041_pg_upgrade.sh  # X-3 restart branch
+#   MODE=exit bash scripts/witness/v041_pg_upgrade.sh     # X-3 exit branch
 set -uo pipefail
 MODE="${MODE:-happy}"
 IMG="${WITNESS_IMAGE:-letta-local:v041-dev}"
 NET=w041net
+FAIL=0
+
+w_fail() { echo "  CHECK FAILED: $1"; FAIL=$((FAIL + 1)); }
+w_pass() { echo "  PASS: $1"; }
+
 docker network create $NET 2>/dev/null || true
 cleanup() {
   docker rm -f w-old w-new >/dev/null 2>&1 || true
   docker network rm $NET >/dev/null 2>&1 || true
-  docker volume rm w041-pgdata w041-letta-data w041-pgdata-x >/dev/null 2>&1 || true
+  docker volume rm w041-pgdata w041-letta-data >/dev/null 2>&1 || true
+  # AA-2 nit: remove the derived witness images too (leaving them was
+  # cluttering the host with multi-GB layers).
+  docker image rm w041-brokenreload w041-brokenrestart >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 # Pre-clean stale containers from prior runs (a leftover w-new blocks the
@@ -35,32 +47,30 @@ docker exec w-old psql -U letta -d letta -c "CREATE TABLE witness (id int, note 
 echo "seeded: rows=$(docker exec w-old psql -U letta -d letta -tAc 'SELECT count(*) FROM witness' | tr -d ' ')"
 docker rm -f w-old >/dev/null
 
-# Optional: modify the startup script INSIDE a derived image for the branch
-# modes (witness-only edits; never committed as test knobs).
-BOOT_ARGS=""
+# Branch modes build derived images with witness-only seds (never committed
+# as test knobs). Each gains a TOOK guard — a stale sed pattern silently
+# no-ops and the mode boots the normal path (the exit-mode lesson).
 if [ "$MODE" = "restart" ]; then
   echo "=== MODE=restart: swapping the reload query for SELECT 1/0 (broken reload) ==="
   IMG=w041-brokenreload
-  docker build -t $IMG -f - . <<DOCKERFILE
+  docker build -t $IMG -f - . <<'DOCKERFILE'
 FROM letta-local:v041-dev
 RUN sed -i "s/SELECT pg_reload_conf();/SELECT 1\/0;/" /app/letta/server/startup.sh
 DOCKERFILE
+  docker run --rm $IMG sh -c 'grep -q "SELECT 1/0" /app/letta/server/startup.sh' \
+    || { echo "SED DID NOT APPLY (stale pattern)"; exit 1; }
+  w_pass "took-guard: the broken-reload sed is in the image"
 elif [ "$MODE" = "exit" ]; then
-  echo "=== MODE=exit: pointing the restart at a wrong -D (failed restart) ==="
+  echo "=== MODE=exit: broken reload AND broken restart (the composition is REQUIRED) ==="
   IMG=w041-brokenrestart
-  # NOTE: the sed target tracks the CURRENT restart line (Z-1 removed the
-  # >/dev/null redirect — the first version of this sed matched the old
-  # form, silently no-opped, and the mode booted happily).
-  # NOTE: the exit branch requires BOTH breaks — the broken RELOAD (to
-  # enter the restart path) AND the broken RESTART (to fail it). A broken
-  # restart alone never runs: the normal reload succeeds and the restart
-  # branch is never entered (hit on the first standalone-restart-sed run:
-  # the sed applied, the server booted happily).
   docker build -t $IMG -f - . <<'DOCKERFILE'
 FROM letta-local:v041-dev
 RUN sed -i "s/SELECT pg_reload_conf();/SELECT 1\/0;/" /app/letta/server/startup.sh && \
     sed -i 's|pg_ctl -D "$PGDATA_DIR" restart|pg_ctl -D /var/lib/postgresql/data_WRONG restart|' /app/letta/server/startup.sh
 DOCKERFILE
+  docker run --rm $IMG sh -c 'grep -q "data_WRONG" /app/letta/server/startup.sh' \
+    || { echo "SED DID NOT APPLY (stale pattern)"; exit 1; }
+  w_pass "took-guard: both seds are in the image"
 fi
 
 echo "=== PHASE 2: boot the .41 image through the REAL startup.sh ==="
@@ -72,52 +82,110 @@ docker run -d --name w-new --network $NET \
   $IMG >/dev/null
 
 if [ "$MODE" = "exit" ]; then
-  # Guard: the sed must have taken (a no-op sed silently boots happy —
-  # hit on the first exit-mode run when the pattern went stale).
-  docker run --rm $IMG sh -c 'grep -q "data_WRONG" /app/letta/server/startup.sh'     || { echo "SED DID NOT APPLY (stale pattern — the image boots happy)"; exit 1; }
-  # The container must EXIT non-zero with the named ERROR, server never up
+  # The container must EXIT non-zero with the NAMED ERROR, server never up.
+  # (AA-2: requiring the named line means an unrelated crash does NOT pass.)
+  EXIT_CODE=""
   for i in $(seq 1 120); do
     STATE=$(docker inspect -f '{{.State.Status}}' w-new 2>/dev/null)
-    [ "$STATE" = "exited" ] && break
-    # capture the exit code the MOMENT we see exited (a later inspect may
-    # race with removal)
-    [ "$STATE" = "exited" ] && EXIT_CODE=$(docker inspect -f '{{.State.ExitCode}}' w-new 2>/dev/null)
+    if [ "$STATE" = "exited" ]; then
+      EXIT_CODE=$(docker inspect -f '{{.State.ExitCode}}' w-new 2>/dev/null)
+      break
+    fi
     sleep 1
   done
-  EXIT_CODE=${EXIT_CODE:-$(docker inspect -f '{{.State.ExitCode}}' w-new 2>/dev/null)}
-  echo "container state: $(docker inspect -f '{{.State.Status}}' w-new)"
-  echo "container exit code: ${EXIT_CODE}"
-  docker logs w-new 2>&1 | grep -E "ERROR: postgres restart|refusing to start|trust auth" | head -4
-  docker logs w-new 2>&1 | grep -c "Application startup complete" | xargs echo "server started (must be 0):"
-  if [ "${EXIT_CODE}" != "0" ] && ! docker logs w-new 2>&1 | grep -q "Application startup complete"; then
-    echo "X-3 EXIT BRANCH: PASS (named error, non-zero exit, no server)"
+  LOGS=$(docker logs w-new 2>&1)
+  echo "container state: $(docker inspect -f '{{.State.Status}}' w-new 2>/dev/null)"
+  echo "container exit code: ${EXIT_CODE:-unknown}"
+  grep -q "ERROR: postgres restart after hba convergence failed" <<< "$LOGS" \
+    && w_pass "the named ERROR line printed" \
+    || w_fail "the named ERROR line is MISSING (an unrelated crash must not pass)"
+  grep -q "Refusing to start" <<< "$LOGS" \
+    && w_pass "the refuse-to-start line printed" || w_fail "refuse line missing"
+  STARTUPS=$(grep -c "Application startup complete" <<< "$LOGS")
+  [ "$STARTUPS" = "0" ] && w_pass "server never started" || w_fail "server started ($STARTUPS)"
+  [ -n "$EXIT_CODE" ] && [ "$EXIT_CODE" != "0" ] \
+    && w_pass "non-zero exit code" || w_fail "exit code is 0 or unknown"
+  if [ "$FAIL" -eq 0 ]; then
+    echo "X-3 EXIT BRANCH: PASS"
+    exit 0
   else
-    echo "X-3 EXIT BRANCH: FAIL"
+    echo "X-3 EXIT BRANCH: FAIL (${FAIL} checks)"
     exit 1
   fi
-  exit 0
 fi
 
-# happy + restart modes: wait for migration
+# happy + restart modes: wait for migration (AA-1: capture, no pipe-grep).
+# NOTE: the server takes ~20s MORE after migration completes before
+# 'Application startup complete' — the checks below must not race it, so
+# the server gets its own wait loop right before its check.
 for i in $(seq 1 120); do
-  docker logs w-new 2>&1 | grep -q "Database migration completed" && break
+  LOGS=$(docker logs w-new 2>&1)
+  grep -q "Database migration completed" <<< "$LOGS" && break
   STATE=$(docker inspect -f '{{.State.Status}}' w-new 2>/dev/null)
-  [ "$STATE" = "exited" ] && { echo "UNEXPECTED EXIT: $(docker inspect -f '{{.State.ExitCode}}' w-new)"; docker logs w-new 2>&1 | tail -8; exit 1; }
+  [ "$STATE" = "exited" ] && { echo "UNEXPECTED EXIT: $(docker inspect -f '{{.State.ExitCode}}' w-new)"; echo "$LOGS" | tail -8; exit 1; }
   sleep 1
 done
 echo "--- convergence lines (through startup.sh) ---"
-docker logs w-new 2>&1 | grep -E "Pre-v0.16.41|ALTER USER|converged|reloaded|restart|restarting" | head -8
-echo "--- Z-1: post-restart postgres logs present? ---"
-docker logs w-new 2>&1 | grep -cE "checkpoint|database system is ready|LOG:" | xargs echo "postgres log lines:"
-GENPW=$(docker exec w-new cat /data/letta/pg_password 2>/dev/null || echo "")
-if [ -n "$GENPW" ]; then
-  docker exec w-new sh -c "PGPASSWORD='letta' psql -h 127.0.0.1 -U letta -d letta -tAc 'SELECT 1'" >/dev/null 2>&1 \
-    && echo "old password WORKS (BAD)" || echo "old password rejected (good)"
-  docker exec w-new sh -c "PGPASSWORD='${GENPW}' psql -h 127.0.0.1 -U letta -d letta -tAc 'SELECT count(*) FROM witness'" 2>/dev/null | tr -d ' ' | xargs echo "rows via generated pw:"
-  docker exec w-new sh -c "PGPASSWORD='${GENPW}' psql -h 127.0.0.1 -U letta -d letta -tAc \"SELECT setting, source FROM pg_settings WHERE name='listen_addresses';\"" 2>/dev/null
+grep -E "Pre-v0.16.41|ALTER USER|converged|reloaded|restart|restarting" <<< "$LOGS" | head -8
+
+if [ "$MODE" = "restart" ]; then
+  # AA-2: prove the restart branch RAN (not just that the boot succeeded).
+  grep -q "pg_reload_conf() failed — restarting postgres" <<< "$LOGS" \
+    && w_pass "the restart branch line printed" \
+    || w_fail "restart branch line MISSING (stale sed would boot the normal path)"
 fi
-# Capture the server-state verdict BEFORE any exit path (the trap removes
-# the container; checks after cleanup see a ghost and report DOWN wrongly —
-# caught on the first run of this script).
-SERVER_UP=$(docker logs w-new 2>&1 | grep -c "Application startup complete")
-[ "${SERVER_UP}" -ge 1 ] && echo "server up (good)" || echo "SERVER DOWN (BAD for happy/restart modes)"
+
+# AA-2 #3: isolate POST-RESTART postgres logs (the first postmaster also
+# emits LOG: lines — counting all of them proves nothing about the redirect).
+POST_RESTART_READY=$(awk '/restarting postgres to load the new hba/{seen=1} seen && /database system is ready to accept connections/{print; exit}' <<< "$LOGS")
+if [ "$MODE" = "restart" ]; then
+  [ -n "$POST_RESTART_READY" ] \
+    && w_pass "postgres READY line AFTER the restart marker (Z-1: post-restart logs flow)" \
+    || w_fail "no postgres READY line after the restart marker (Z-1 broken?)"
+else
+  w_pass "postgres log lines present: $(grep -c "LOG:" <<< "$LOGS")"
+fi
+
+# NOTE (AA-2 nit): PGPASSWORD on the docker exec command line is acceptable
+# ONLY for this throwaway witness volume — never copy this pattern into the
+# rig or product code (U-3: /proc/<pid>/cmdline is world-readable).
+GENPW=$(docker exec w-new cat /data/letta/pg_password 2>/dev/null || echo "")
+if [ -z "$GENPW" ]; then
+  w_fail "generated password file missing"
+else
+  w_pass "generated password file present"
+  if docker exec w-new sh -c "PGPASSWORD='letta' psql -h 127.0.0.1 -U letta -d letta -tAc 'SELECT 1'" >/dev/null 2>&1; then
+    w_fail "OLD PASSWORD STILL WORKS"
+  else
+    w_pass "old password rejected"
+  fi
+  ROWS=$(docker exec w-new sh -c "PGPASSWORD='${GENPW}' psql -h 127.0.0.1 -U letta -d letta -tAc 'SELECT count(*) FROM witness'" 2>/dev/null | tr -d ' ')
+  [ "$ROWS" = "1" ] && w_pass "data survived (rows=1)" || w_fail "rows=${ROWS:-none} (expected 1)"
+  LA=$(docker exec w-new sh -c "PGPASSWORD='${GENPW}' psql -h 127.0.0.1 -U letta -d letta -tAc \"SELECT setting, source FROM pg_settings WHERE name='listen_addresses';\"" 2>/dev/null)
+  grep -q "127.0.0.1|command line" <<< "$LA" \
+    && w_pass "listen_addresses: 127.0.0.1 (command line)" \
+    || w_fail "listen_addresses wrong: ${LA:-none}"
+fi
+
+# The server's own wait: startup completes AFTER migration (+~20s). Without
+# this the check races the boot and reports DOWN on a healthy container —
+# caught by the restructured script's first run (the old script printed the
+# same race as a line and ignored it).
+for i in $(seq 1 90); do
+  if docker logs w-new 2>&1 | grep -q "Application startup complete"; then break; fi
+  STATE=$(docker inspect -f '{{.State.Status}}' w-new 2>/dev/null)
+  [ "$STATE" = "exited" ] && break
+  sleep 1
+done
+STARTUPS=$(docker logs w-new 2>&1 | grep -c "Application startup complete")
+[ "$STARTUPS" -ge 1 ] && w_pass "server up" || w_fail "SERVER DOWN"
+# (no pipe-grep verdict: grep -c has no early-exit problem; the wait-loop
+# pipe above breaks on match and its exit status is discarded, not tested)
+
+if [ "$FAIL" -eq 0 ]; then
+  echo "WITNESS MODE=${MODE}: PASS"
+  exit 0
+else
+  echo "WITNESS MODE=${MODE}: FAIL (${FAIL} checks failed)"
+  exit 1
+fi
