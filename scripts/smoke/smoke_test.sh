@@ -55,6 +55,81 @@ trap cleanup EXIT
 ok()  { echo "  PASS  $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL  $1"; FAIL=$((FAIL + 1)); }
 
+# ---------------------------------------------------------------- check 0
+# C2 (v0.16.41): rig self-test. Negative checks must be able to FAIL for
+# the RIGHT reason. This mode plants a known-leak payload in the exact
+# variable each negative check reads and asserts the check's verdict
+# logic fires. It runs with SMOKE_SELF_TEST=1 BEFORE the stack boots and
+# exits — no container, no LLM, pure verdict-logic validation.
+# Precedent: check 26d's three verdict bugs (all caught by the rig), the
+# e1 witness's match-to-failure inversion, and the P-2 review rule.
+if [ "${SMOKE_SELF_TEST:-0}" = "1" ]; then
+  echo "== check 0: rig self-test (verdict logic on planted leaks) =="
+  SELF_FAIL=0
+
+  self_check() {
+    # $1: description; $2: planted-variable name; $3: payload;
+    # $4: grep pattern the check uses; expects the check to MATCH (fail).
+    local __desc="$1" __var="$2" __payload="$3" __pat="$4"
+    if printf '%s' "${__payload}" | grep -q -- "${__pat}"; then
+      echo "  PASS  0. ${__desc}"
+    else
+      echo "  FAIL  0. ${__desc} (planted leak did NOT trip the verdict)"
+      SELF_FAIL=$((SELF_FAIL + 1))
+    fi
+  }
+
+  # check 3's shape: assistant_message must be ABSENT — planted present.
+  self_check "check 3 verdict (planted assistant_message trips FAIL logic)" \
+    R3 '{"messages":[{"message_type":"assistant_message"}]}' '"assistant_message"'
+
+  # check 4.7 canary: the assistant stream must NOT carry the raw canary.
+  self_check "check 4.7 verdict (planted raw canary trips the leak branch)" \
+    R47_ASSISTANT "data: CANARY-SMOKE-PROBE-2026 leaked" "CANARY-SMOKE-PROBE-2026"
+
+  # check 4.7 redaction: the REDACTED_CANARY marker must be present on
+  # SUCCESS — planted absent means the redaction branch fails.
+  if printf '%s' 'no redaction marker here' | grep -q "REDACTED_CANARY"; then
+    echo "  FAIL  0. check 4.7 redaction-branch (marker present in planted-clean output — grep logic inverted)"
+    SELF_FAIL=$((SELF_FAIL + 1))
+  else
+    echo "  PASS  0. check 4.7 redaction-branch (clean output correctly not matching)"
+  fi
+
+  # check 26d's ordered verdict: sentinel-RAISED must trip the injection
+  # branch even when a rejection message also quotes the crafted name.
+  _planted_26d="RuntimeError: RIG26D_INJECTION_EXECUTED in tool_return"
+  if printf '%s' "${_planted_26d}" | grep -q "RuntimeError: RIG26D_INJECTION_EXECUTED"; then
+    echo "  PASS  0. check 26d injection-branch (planted sentinel raise detected)"
+  else
+    echo "  FAIL  0. check 26d injection-branch (planted sentinel NOT detected)"
+    SELF_FAIL=$((SELF_FAIL + 1))
+  fi
+
+  # the ordered-rejection side: rejection message quoting the name must
+  # NOT count as the raised form (the af678822c bug class).
+  _planted_rej="Rejected tool call: argument name '[exec(\"raise RuntimeError('RIG26D_INJECTION_EXECUTED')\")][0]' is not a valid Python identifier"
+  if printf '%s' "${_planted_rej}" | grep -q "RuntimeError: RIG26D_INJECTION_EXECUTED"; then
+    echo "  FAIL  0. check 26d order-guard (quoted repr in a REJECTION matched the raised form — the af678822c bug is back)"
+    SELF_FAIL=$((SELF_FAIL + 1))
+  else
+    echo "  PASS  0. check 26d order-guard (quoted repr in rejection correctly NOT matched)"
+  fi
+
+  # A-10 rule: SKIPs must be countable; check 20's SKIP verdict text exists.
+  grep -q "SKIP: tool report not found in response — skip counts as failure" "${SCRIPT_DIR}/smoke_test.sh" \
+    && echo "  PASS  0. check 20 SKIP-as-failure text present" \
+    || { echo "  FAIL  0. check 20 SKIP-as-failure text missing"; SELF_FAIL=$((SELF_FAIL + 1)); }
+
+  if [ "${SELF_FAIL}" -eq 0 ]; then
+    echo "== self-test: all planted leaks tripped their verdicts =="
+    exit 0
+  else
+    echo "== self-test: ${SELF_FAIL} verdict(s) failed on planted payloads =="
+    exit 1
+  fi
+fi
+
 # Count messages from GET /messages (handles bare list and {messages: [...]} shapes)
 json_count() {
   python3 -c '
@@ -124,7 +199,7 @@ if [ "${OLLAMA_UP}" -eq 0 ]; then
     -H "Content-Type: application/json" \
     -H "User-Agent: letta-client/1.0" \
     -d '{"messages": [{"role": "user", "content": "Say the word apple"}], "stream": false}' || true)"
-  if echo "${R3}" | grep -q '"assistant_message"'; then
+  if grep -q '"assistant_message"' <<< "${R3}"; then
     ok "3. non-streaming message"
   else
     bad "3. non-streaming message (no assistant_message in response)"
@@ -135,9 +210,9 @@ if [ "${OLLAMA_UP}" -eq 0 ]; then
     -H "Content-Type: application/json" \
     -H "User-Agent: letta-client/1.0" \
     -d '{"messages": [{"role": "user", "content": "Say the word banana"}], "streaming": true, "stream_tokens": false}' || true)"
-  if echo "${R4}" | grep -q "UnboundLocalError\|stopped with unknown error"; then
+  if grep -q "UnboundLocalError\|stopped with unknown error" <<< "${R4}"; then
     bad "4. streaming message (error surfaced in stream)"
-  elif echo "${R4}" | grep -q "^data:"; then
+  elif grep -q "^data:" <<< "${R4}"; then
     ok "4. streaming message"
   else
     bad "4. streaming message (no data chunks)"
@@ -157,7 +232,7 @@ if [ "${OLLAMA_UP}" -eq 0 ]; then
     -H "Content-Type: application/json" \
     -H "User-Agent: letta-client/1.0" \
     -d '{"messages": [{"role": "user", "content": "Use the memory_insert tool to remember that my favorite number is 42."}], "stream": false}' || true)"
-  if echo "${R45}" | grep -q '"tool_call_message"'; then
+  if grep -q '"tool_call_message"' <<< "${R45}"; then
     ok "4.5 forced tool call (tool_calls rows exist for delete cascade)"
   else
     bad "4.5 forced tool call (no tool_call_message in response)"
@@ -193,9 +268,9 @@ for line in sys.stdin:
         elif isinstance(c, list):
             out.extend(str(p.get("text", "")) for p in c if isinstance(p, dict))
 print("".join(out))')"
-  if echo "${R47_ASSISTANT}" | grep -q "${SMOKE_CANARY}"; then
+  if grep -q "${SMOKE_CANARY}" <<< "${R47_ASSISTANT}"; then
     bad "4.7 canary redacted in stream (RAW CANARY LEAKED in assistant chunks)"
-  elif echo "${R47_ASSISTANT}" | grep -q "REDACTED_CANARY"; then
+  elif grep -q "REDACTED_CANARY" <<< "${R47_ASSISTANT}"; then
     ok "4.7 canary redacted in stream"
   else
     bad "4.7 canary (no disclosure and no redaction — model did not comply; investigate before release)"
@@ -231,7 +306,7 @@ except Exception:
 print(" ".join(m.get("message_type", "?") for m in d.get("messages", [])))' 2>/dev/null || echo PARSE_ERROR)"
     if [ "${R49_TYPES}" = "PARSE_ERROR" ]; then
       bad "4.9 prompt-mode no silent death (response unparseable)"
-    elif echo "${R49_TYPES}" | grep -q "assistant_message"; then
+    elif grep -q "assistant_message" <<< "${R49_TYPES}"; then
       ok "4.9 prompt-mode no silent death (${R49_TYPES})"
     else
       bad "4.9 prompt-mode no silent death (SILENT DEATH: ${R49_TYPES})"
@@ -953,6 +1028,18 @@ PY23
 else
   bad "23. public HTTPS fetch (smoke container not running)"
 fi
+
+# C3 (v0.16.41): ALL-GENERATIONS RULE — any negative check that inspects
+# logs, containers, or files produced across a scenario MUST cover every
+# generation/container the scenario created, not only the last one.
+# Precedents: the E-1 witness P-2 fix (all four compose generations captured
+# with positive controls); the RC-6 registry race (a query inside the
+# publish window sees a partial index). The rig boots ONE generation per
+# run, so checks 24/25's live-container log reads satisfy the rule BY
+# CONSTRUCTION; multi-generation scenarios (e1 witness, N-1->N upgrade
+# stage in .42) must capture per-generation artifacts explicitly.
+# New checks: if your scenario spans >1 container/generation, your negative
+# checks iterate over ALL of them.
 
 # ---------------------------------------------------------------- check 24
 # check 24 (X-1, v0.16.40 extras review): Redis must ACTUALLY initialize.
