@@ -151,17 +151,26 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
         code = await self.generate_execution_script(agent_state=agent_state, wrap_print_with_markers=True)
 
         exec_dir = await asyncio.to_thread(tempfile.mkdtemp, dir=sandbox_dir, prefix="exec-")
-        # F-5 SPIKE: the sandbox subprocess runs as the `letta` uid; the
-        # exec dir is also its HOME/TMPDIR, so it must be owned by that uid.
+        # v0.16.41 (S-2/U-5): the exec dir is the sandbox subprocess's
+        # HOME/TMPDIR — it must be owned by the sandbox uid. A failure here
+        # is a REFUSAL, not a warning: the subprocess would run as uid 1000
+        # unable to write its own working dir.
         import pwd as _pwd
 
         try:
             _pw = _pwd.getpwnam("letta")
             await asyncio.to_thread(os.chown, exec_dir, _pw.pw_uid, _pw.pw_gid)
-        except KeyError:
-            pass  # spike mode: no letta user in the image (e.g. macOS dev)
-        except PermissionError:
-            logger.warning(f"F-5: could not chown exec dir {exec_dir} to the sandbox uid")
+        except KeyError as exc:
+            raise RuntimeError(
+                "Sandbox uid unavailable (exec dir chown): the 'letta' user does not "
+                "exist. Sandboxed tool execution requires the separate sandbox uid "
+                "(S-2/U-5); refusing to run tools with a root-owned exec dir."
+            ) from exc
+        except PermissionError as exc:
+            raise RuntimeError(
+                f"Cannot chown exec dir {exec_dir} to the sandbox uid (running "
+                "unprivileged?). Refusing to run the tool with an unwritable exec dir."
+            ) from exc
 
         async def write_temp_file(dir, content):
             def _write():
@@ -236,16 +245,29 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                 staging_dir = os.path.join(base, self.agent_id, ".staging")
                 # Ensure staging dir exists so Landlock can grant write access
                 os.makedirs(staging_dir, exist_ok=True)
-                # F-5 SPIKE: the sandbox uid writes here; the promotion
-                # (server-side, root) still reads it after the run.
-                try:
-                    import pwd as _pwd
+                # v0.16.41 (S-2/U-5): the sandbox uid writes here; the
+                # promotion (server-side, root) still reads it after the
+                # run. Chown failure = refusal (same rule as exec_dir).
+                import pwd as _pwd
 
+                try:
                     _pw = _pwd.getpwnam("letta")
                     os.chown(staging_dir, _pw.pw_uid, _pw.pw_gid)
-                except (KeyError, PermissionError):
-                    pass
-                staging_write_paths = [staging_dir]
+                except KeyError as exc:
+                    raise RuntimeError(
+                        "Sandbox uid unavailable (staging chown): the 'letta' user "
+                        "does not exist. Refusing (S-2/U-5)."
+                    ) from exc
+                except PermissionError as exc:
+                    # Staging is optional (file-persistence tools only): a
+                    # permission failure means no staging WRITE grant, but
+                    # the tool can still run without file persistence. Log
+                    # loudly and continue WITHOUT granting staging.
+                    logger.warning(
+                        f"Cannot chown staging dir {staging_dir} to the sandbox uid; "
+                        "file-persistence staging will be unavailable for this agent"
+                    )
+                staging_write_paths = [staging_dir] if os.stat(staging_dir).st_uid == _pw.pw_uid else []
                 # file_read/file_list need READ access to the agent's promoted
                 # files dir (without this, Path.exists() swallows the Landlock
                 # EACCES as False and the tools silently return empty/missing)
@@ -371,40 +393,38 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
             # Launch wrapper via asyncio.create_subprocess_exec with close_fds=True
             # The wrapper applies Landlock + seccomp, then execs the tool script.
             #
-            # F-5 SPIKE (v0.16.41): drop the sandbox subprocess to the
-            # non-root `letta` uid (1000) BEFORE Landlock/seccomp apply.
-            # The server stays root (it owns /root/.letta, the Postgres
-            # socket dir, the venv). The sandboxed code running as a
-            # separate uid cannot: read the server's /proc environ, read
-            # the Postgres socket dir or data files, chmod/chown/truncate
-            # server-owned files (R2A-3), or connect to the internal
-            # datastores by file permission. Requires the exec_dir and
-            # staging dir to be owned by the sandbox uid (chowned at
-            # creation below). Fail-closed: if the drop cannot be
-            # configured, run WITHOUT it but log loudly (spike mode —
-            # the release turns this into a refusal).
+            # v0.16.41 (S-2, F-5 + U-1/U-2/U-5): the sandbox subprocess runs
+            # as the non-root `letta` uid (1000) via user=/group=/extra_groups
+            # — applied in C after fork (thread-safe; preexec_fn ran Python
+            # between fork and exec, unsafe with the parent's asyncio threads
+            # — U-2). extra_groups=[] also drops the server's supplementary
+            # groups (root's gid-0 membership kept 640 root:root secrets
+            # group-readable — U-1). The server stays root (it owns the
+            # Postgres socket dir, the venv, the data). The sandboxed code
+            # cannot: read the server's /proc environ, reach the datastore
+            # socket dirs, or chmod/chown/truncate server-owned files.
+            #
+            # U-5: REFUSE, don't fall back. If the image lacks the `letta`
+            # user (or we cannot determine the drop), the tool call fails
+            # with a named error — never silently runs as root.
             import pwd
 
-            sandbox_uid_gid = None
+            sandbox_uid = None
+            sandbox_gid = None
             try:
                 pw = pwd.getpwnam("letta")
-                sandbox_uid_gid = (pw.pw_uid, pw.pw_gid)
+                sandbox_uid, sandbox_gid = pw.pw_uid, pw.pw_gid
             except KeyError:
-                logger.warning(
-                    "F-5 sandbox-uid drop unavailable: no 'letta' user in the image; "
-                    "sandbox runs as the server uid (spike mode)"
+                raise RuntimeError(
+                    "Sandbox uid unavailable: the 'letta' user does not exist in this "
+                    "environment. Sandboxed tool execution requires the separate sandbox "
+                    "uid (S-2/U-5); refusing to run tools as the server uid. Use the "
+                    "published container image, or create the user (uid 1000) first."
                 )
-
-            def _drop_to_sandbox_uid():
-                if sandbox_uid_gid is None:
-                    return
-                uid, gid = sandbox_uid_gid
-                if os.getuid() != uid:
-                    # setgid first (dropping uid loses the privilege to set gid)
-                    os.setgid(gid)
-                    os.setuid(uid)
-
-            preexec = _drop_to_sandbox_uid if sandbox_uid_gid else None
+            if os.getuid() == sandbox_uid:
+                # Already unprivileged (e.g. the whole server runs as uid 1000):
+                # no drop needed, but supplementary groups still get cleared.
+                pass
 
             process = await asyncio.create_subprocess_exec(
                 python_executable,
@@ -431,7 +451,9 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                 env=env,
                 cwd=cwd,
                 close_fds=True,  # CRITICAL: prevent FD leakage
-                preexec_fn=preexec,  # F-5: drop to the sandbox uid
+                user=sandbox_uid,
+                group=sandbox_gid,
+                extra_groups=[],  # U-1: no supplementary groups (esp. gid 0)
             )
 
             try:

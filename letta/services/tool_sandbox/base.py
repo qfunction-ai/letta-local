@@ -178,9 +178,31 @@ class AsyncToolSandboxBase(ABC):
         promoted = 0
         rejected = 0
 
-        for dirpath, dirnames, filenames in os.walk(staging_dir):
+        for dirpath, dirnames, filenames in os.walk(staging_dir, followlinks=False):
             for fname in filenames:
                 src_path = os.path.join(dirpath, fname)
+
+                # v0.16.41 (U-note, defense in depth): the staging dir is
+                # owned by the sandbox uid and the server (root) reads and
+                # promotes from it. Landlock already denies the sandbox
+                # MAKE_SYM/REFER rights (it cannot plant symlinks — round-2
+                # confirmed), but promotion ALSO refuses symlinks directly:
+                # a symlinked src or an lstat mismatch is rejected, and the
+                # rename uses the realpath-validated destination.
+                if os.path.islink(src_path) or os.path.islink(dirpath):
+                    logger.warning(f"Staging file rejected (symlink): {src_path}")
+                    rejected += 1
+                    continue
+                try:
+                    _st = os.lstat(src_path)
+                    if not os.path.stat.S_ISREG(_st.st_mode):
+                        logger.warning(f"Staging file rejected (not a regular file): {src_path}")
+                        rejected += 1
+                        continue
+                except OSError:
+                    logger.warning(f"Staging file rejected (cannot lstat): {src_path}")
+                    rejected += 1
+                    continue
 
                 # Compute relative path from staging_dir
                 rel_path = os.path.relpath(src_path, staging_dir)
@@ -682,6 +704,15 @@ class AsyncToolSandboxBase(ABC):
         # Override with additional runtime env vars (highest priority)
         if additional_env_vars:
             env.update(additional_env_vars)
+
+        # v0.16.41 (F-2): DNS-over-TCP by default. The seccomp socket-family
+        # filter denies SOCK_DGRAM (UDP) for network-enabled tools, and
+        # glibc's resolver uses UDP by default — without this, every
+        # hostname-using network tool breaks. RES_OPTIONS=use-vc forces the
+        # TCP resolver path. A consumer who needs UDP DNS can override the
+        # env var explicitly.
+        if "RES_OPTIONS" not in env:
+            env["RES_OPTIONS"] = "use-vc"
 
         # Inject agent, project, and tool IDs as environment variables
         if self.agent_id:

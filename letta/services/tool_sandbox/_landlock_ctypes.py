@@ -249,6 +249,18 @@ def apply_seccomp_filter(blocked_syscalls, block_fork=True, allow_network=False)
     except OSError:
         libseccomp = ctypes.CDLL(ctypes.util.find_library("seccomp"), use_errno=True)
 
+    # v0.16.41 (R-2 condition 2): scmp_arg_cmp struct for argument rules.
+    class _ScmpArgCmp(ctypes.Structure):
+        _fields_ = [
+            ("arg", ctypes.c_uint),
+            ("op", ctypes.c_int),
+            ("datum_a", ctypes.c_uint64),
+            ("datum_b", ctypes.c_uint64),
+        ]
+
+    _SCMP_CMP_EQ = 4        # equal comparator (seccomp.h enum scmp_compare)
+    _SCMP_CMP_MASKED_EQ = 7  # (arg & datum_a) == datum_b — for masked type fields
+
     # Set argtypes/restype — REQUIRED on aarch64 where default conversion
     # mangles arguments. Without these, seccomp_rule_add silently fails
     # and the filter does nothing.
@@ -256,6 +268,12 @@ def apply_seccomp_filter(blocked_syscalls, block_fork=True, allow_network=False)
     libseccomp.seccomp_init.argtypes = [ctypes.c_uint32]
     libseccomp.seccomp_rule_add.restype = ctypes.c_int
     libseccomp.seccomp_rule_add.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint]
+    # v0.16.41 (R-2 condition 2): argument-compare rules.
+    libseccomp.seccomp_rule_add_array.restype = ctypes.c_int
+    libseccomp.seccomp_rule_add_array.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint,
+        ctypes.POINTER(_ScmpArgCmp),
+    ]
     libseccomp.seccomp_load.restype = ctypes.c_int
     libseccomp.seccomp_load.argtypes = [ctypes.c_void_p]
     libseccomp.seccomp_release.restype = None
@@ -300,6 +318,42 @@ def apply_seccomp_filter(blocked_syscalls, block_fork=True, allow_network=False)
             for name in ("socket", "connect", "bind", "listen",
                          "accept", "sendto", "recvfrom"):
                 _block_syscall(ctx, name)
+        else:
+            # v0.16.41 (R-2 condition 2, revised): network-enabled tools get
+            # a SOCKET-FAMILY filter, not a free pass. Landlock's TCP rules
+            # cover only TCP connect/bind — a network-enabled tool could
+            # otherwise open AF_UNIX (Postgres socket!), SOCK_DGRAM (UDP to
+            # anywhere — the README's "Landlock blocks UDP" was FALSE for
+            # exactly these tools), or SOCK_RAW (root + CAP_NET_RAW).
+            # Deny by explicit family/type match (each rule ORed):
+            _socket_nr = libseccomp.seccomp_syscall_resolve_name(b"socket")
+            if _socket_nr >= 0:
+                _families = {
+                    "AF_UNIX": 1, "AF_PACKET": 17, "AF_NETLINK": 16,
+                }
+                for _label, _fam in _families.items():
+                    _rule = (_ScmpArgCmp * 1)(_ScmpArgCmp(arg=0, op=_SCMP_CMP_EQ, datum_a=_fam, datum_b=0))
+                    ret = libseccomp.seccomp_rule_add_array(
+                        ctx, SCMP_ACT_ERRNO | 13, _socket_nr, 1, _rule
+                    )
+                    if ret != 0:
+                        raise OSError(ctypes.get_errno(), f"seccomp socket-family rule failed ({_label})")
+                # SOCK_DGRAM / SOCK_RAW: deny by MASKED compare on the type
+                # field (arg & SOCK_TYPE_MASK) — the kernel type argument
+                # carries OR-flag bits (SOCK_CLOEXEC=0x80000 etc.), so a
+                # plain EQ compare misses real DGRAM/Raw sockets (verified
+                # live: socket(AF_INET, SOCK_DGRAM) was ALLOWED under the
+                # EQ form because Python passes SOCK_DGRAM|SOCK_CLOEXEC).
+                _SOCK_TYPE_MASK = 0xF
+                for _label, _ty in {"SOCK_DGRAM": 2, "SOCK_RAW": 3}.items():
+                    _rule = (_ScmpArgCmp * 1)(
+                        _ScmpArgCmp(arg=1, op=_SCMP_CMP_MASKED_EQ, datum_a=_SOCK_TYPE_MASK, datum_b=_ty)
+                    )
+                    ret = libseccomp.seccomp_rule_add_array(
+                        ctx, SCMP_ACT_ERRNO | 13, _socket_nr, 1, _rule
+                    )
+                    if ret != 0:
+                        raise OSError(ctypes.get_errno(), f"seccomp {_label} rule failed")
 
         # Load the filter
         ret = libseccomp.seccomp_load(ctx)

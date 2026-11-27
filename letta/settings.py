@@ -373,6 +373,9 @@ class Settings(BaseSettings):
 
     redis_host: Optional[str] = Field(default=None, description="Host for Redis instance")
     redis_port: Optional[int] = Field(default=6379, description="Port for Redis instance")
+    # v0.16.41 (S-2/U-3): internal Redis runs with a generated password
+    # (loopback bind). The env var is LETTA_REDIS_PASSWORD.
+    redis_password: Optional[str] = Field(default=None, description="Password for Redis instance")
 
     plugin_register: Optional[str] = None
 

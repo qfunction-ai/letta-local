@@ -125,7 +125,7 @@ RUN groupadd --gid 1000 letta && \
 # Copy initialization SQL if it exists
 COPY init.sql /docker-entrypoint-initdb.d/
 
-EXPOSE 8283 5432 6379 4317 4318
+EXPOSE 8283
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["./letta/server/startup.sh"]
