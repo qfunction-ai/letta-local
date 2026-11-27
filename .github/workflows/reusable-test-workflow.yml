@@ -74,6 +74,9 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+
 jobs:
   changed-files:
     runs-on: ${{ fromJSON(inputs.runner) }}
@@ -129,6 +132,9 @@ jobs:
     if: |
       needs.cache-check.outputs.cache_hit != 'true'
     timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      checks: read
+      contents: read
     runs-on: ${{ fromJSON(inputs.runner) }}
     name: block-until-sdk-preview-finishes
     steps:
