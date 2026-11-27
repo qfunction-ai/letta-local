@@ -69,6 +69,9 @@ def _log_interpreter_version_once(python_executable: str) -> None:
 
 
 class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
+    # W-1b: process-lifetime cache for the G-4 traversal probe (PASS only).
+    _traversal_probe_passed: bool = False
+
     """Landlock sandbox backend for tool execution.
 
     Uses a wrapper script (letta_landlock_wrapper.py) that applies Landlock
@@ -158,9 +161,13 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
         # error instead. Cached per process: /root's mode doesn't change
         # while the server runs, and the probe spawns setpriv+cat — once
         # is enough (one process spawn per SERVER lifetime, not per call).
-        if not getattr(self, "_traversal_probe_passed", False):
+        # W-1b: CLASS-level cache — a new AsyncToolSandboxLandlock is built
+        # per tool call (sandbox_tool_executor), so an instance flag would
+        # re-run the probe every call. Only the PASS is cached; a failure
+        # keeps raising the named error every time.
+        if not AsyncToolSandboxLandlock._traversal_probe_passed:
             await self._traversal_probe(exec_dir)
-            self._traversal_probe_passed = True
+            AsyncToolSandboxLandlock._traversal_probe_passed = True
         # v0.16.41 (S-2/U-5): the exec dir is the sandbox subprocess's
         # HOME/TMPDIR — it must be owned by the sandbox uid. A failure here
         # is a REFUSAL, not a warning: the subprocess would run as uid 1000
@@ -341,10 +348,18 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                 await asyncio.to_thread(shutil.rmtree, exec_dir, True)
 
     async def _traversal_probe(self, exec_dir: str) -> None:
-        """G-4: prove the sandbox uid can traverse to (and read from) the
-        exec dir. A named RuntimeError (with the migration instruction) on
-        failure; silent pass on success. setpriv absence (macOS dev) also
-        passes — the container always has it."""
+        """G-4 (W-1 fixed): prove the sandbox uid can traverse to (and read
+        from) the exec dir. A named RuntimeError (with the migration
+        instruction) on failure; silent pass on success. setpriv absence
+        (macOS dev) also passes — the container always has it.
+
+        W-1: the original `await asyncio.to_thread(open, _probe, "w").close()`
+        was `await (coroutine.close())` — the coroutine was closed without
+        running (TypeError: NoneType can't be awaited), the probe file was
+        never created, and the finally's os.remove raised FileNotFoundError
+        from OUTSIDE the except clauses. Reproduced and fixed with a lambda
+        (the whole open/close runs INSIDE the thread)."""
+        import contextlib
         import pwd as _pwd
         import subprocess as _sp
 
@@ -354,7 +369,7 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
             return  # U-5's named refusal fires later in the exec path
         _probe = os.path.join(exec_dir, ".uid_probe")
         try:
-            await asyncio.to_thread(open, _probe, "w").close()
+            await asyncio.to_thread(lambda: open(_probe, "w").close())
             await asyncio.to_thread(os.chown, _probe, _pw.pw_uid, _pw.pw_gid)
             _r = await asyncio.to_thread(
                 _sp.run,
@@ -374,7 +389,11 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                 f"tool execution is disabled until then. Detail: {exc}"
             ) from exc
         finally:
-            await asyncio.to_thread(os.remove, _probe)
+            # W-1: tolerant removal — if the probe file was never created
+            # (the binding bug, or an early failure), don't raise from the
+            # finally and mask the real error.
+            with contextlib.suppress(FileNotFoundError):
+                await asyncio.to_thread(os.remove, _probe)
 
     async def _prepare_venv(self, landlock_config, venv_path: str, env: Dict[str, str]):
         """Prepare virtual environment asynchronously (in a background thread).

@@ -153,6 +153,15 @@ else
     # Wait for PostgreSQL to be ready
     wait_for_postgres
 
+    # v0.16.41 (interim-6 W-2): a FRESH volume just initdb'd under .41 —
+    # the auth is already scram + the generated password. Write the marker
+    # NOW, or every later boot of this healthy install would take the
+    # convergence branch and warn about a legacy password that never
+    # existed (misleading operators to set LEGACY_PG_PASSWORD).
+    if [ "${PG_EXISTED}" = "0" ]; then
+        touch "$PGDATA_DIR/.letta_v041_scram"
+    fi
+
     # v0.16.41 (interim-4 G-2, interim-5 V-1): on a pre-.41 DATABASE, initdb
     # never re-runs — converge auth to the .41 posture: ALTER USER to the
     # generated password (statement via STDIN — V-2: never argv; PGPASSWORD
@@ -189,8 +198,12 @@ PSQLALTER
                     # effective reload the running server kept the OLD
                     # (trust) hba in memory and the old password still
                     # authenticated.
-                    PGPASSWORD="${LEGACY_PG_PASSWORD:-letta}" psql -h localhost -U "${POSTGRES_USER:-letta}" -d postgres -tAc "SELECT pg_reload_conf();" >/dev/null 2>&1 || true
-                    echo "  pg_hba.conf converged to scram-sha-256 (reloaded)"
+                    if PGPASSWORD="${LEGACY_PG_PASSWORD:-letta}" psql -h localhost -U "${POSTGRES_USER:-letta}" -d postgres -tAc "SELECT pg_reload_conf();" >/dev/null 2>&1; then
+                        echo "  pg_hba.conf converged to scram-sha-256 (reloaded)"
+                    else
+                        echo "  WARNING: pg_reload_conf() failed — the new hba applies on the next postgres restart"
+                        echo "  (the next boot re-runs this check via the marker's absence logic; data is intact)"
+                    fi
                 fi
                 # Marker IN the database dir: the db's own auth state now
                 # matches .41. Idempotent for every later boot.
