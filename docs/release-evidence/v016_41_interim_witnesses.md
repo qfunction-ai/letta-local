@@ -72,10 +72,37 @@ boot one, fresh and upgraded volumes alike.
   restarts silent (previously every restart warned about a legacy password
   that never existed).
 
+## Z-2: all three X-3 branches THROUGH THE REAL startup.sh
+
+Witness script: `scripts/witness/v041_pg_upgrade.sh` (MODE=happy|restart|exit).
+The branch modes build derived images with witness-only seds (never committed
+as test knobs).
+
+- **happy** (unmodified startup.sh): convergence lines from the script,
+  old password rejected, rows=1, `127.0.0.1 | command line`, server up.
+- **restart** (reload query swapped for `SELECT 1/0`): the script's own
+  `pg_reload_conf() failed — restarting postgres to load the new hba (fail
+  closed)` line fires; afterwards old password rejected, rows=1, server up,
+  **23 postgres LOG lines present (Z-1: the un-redirected restart keeps
+  post-restart logs flowing to the container)**.
+- **exit** (reload broken AND restart pointed at a wrong -D — BOTH breaks
+  required; a broken restart alone never runs because the normal reload
+  succeeds and the restart branch is never entered): the named ERROR lines
+  print, container exits code 1, zero `Application startup complete`.
+
+Witness-script engineering notes (all caught by runs, all fixed in the
+script): the server-verdict check must run before the EXIT trap's cleanup
+(a post-cleanup check sees a ghost container and reports DOWN); stale
+containers from prior runs block docker run (pre-clean added); a sed
+pattern that goes stale when the target line changes silently no-ops
+(the exit mode gained a took-guard — grep for the broken marker in the
+built image); unbound-variable heredocs when the sed body needs a literal
+$VAR (quoted heredoc); the exit-code inspect races container removal
+(capture at the moment of the exited-state poll).
+
 ## V-1 witness script (reproducible)
 
-Seeds a .40.1-era volume (trust hba + password `letta`), boots the .41
-startup path on it, asserts: convergence lines, migration completed with
-the generated password, the seeded row surviving, the old password
-rejected. Script logic preserved in the commit history (interim-5 commit
-message) and re-runnable as documented there.
+`scripts/witness/v041_pg_upgrade.sh` — seeds a .40.1-era volume (trust hba
++ password `letta`), boots the .41 startup path, asserts convergence,
+migration with the generated password, the seeded row surviving, the old
+password rejected. Runnable from the repo (the Z-2 modes above).

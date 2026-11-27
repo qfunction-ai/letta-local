@@ -211,7 +211,11 @@ PSQLALTER
                         _reloaded=1
                     else
                         echo "  pg_reload_conf() failed — restarting postgres to load the new hba (fail closed)"
-                        if gosu postgres pg_ctl -D "$PGDATA_DIR" restart -w -t 60 >/dev/null 2>&1; then
+                        # Z-1 (interim-9): NO output redirect — without -l the
+                        # restarted postmaster inherits pg_ctl's stdout/stderr;
+                        # redirecting them to /dev/null would discard every
+                        # Postgres log line for the rest of the boot.
+                        if gosu postgres pg_ctl -D "$PGDATA_DIR" restart -w -t 60; then
                             wait_for_postgres
                             _reloaded=1
                         else
