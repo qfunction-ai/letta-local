@@ -25,7 +25,9 @@ else
         echo "and move your existing data (agents, secrets, config) into it, e.g.:"
         echo "  docker compose down"
         echo "  docker run --rm -v <your-volume>:/from -v <your-new-volume>:/to alpine sh -c 'cp -a /from/. /to/'"
-        echo "Then re-up. Continuing with the OLD path so your data keeps working this boot."
+        echo "Then re-up. Continuing with the OLD path this boot: agents and data load,"
+        echo "BUT TOOL EXECUTION IS DISABLED (the sandbox uid cannot traverse /root)."
+        echo "Every tool call returns a named refusal until the volume is moved."
         LETTA_DIR_OVERRIDE_BANNER=1
     fi
     if [ "${LETTA_DIR_OVERRIDE_BANNER:-0}" != "1" ]; then
@@ -129,11 +131,63 @@ else
     export POSTGRES_HOST_AUTH_METHOD="${POSTGRES_HOST_AUTH_METHOD:-scram-sha-256}"
     export POSTGRES_INITDB_ARGS="${POSTGRES_INITDB_ARGS:---auth-local=scram-sha-256 --auth-host=scram-sha-256}"
 
-    # Start PostgreSQL using the base image's entrypoint script
-    /usr/local/bin/docker-entrypoint.sh postgres &
+    # Start PostgreSQL using the base image's entrypoint script.
+    # v0.16.41 (interim-4 G-3.1): loopback only — the image default is '*'.
+    # listen_addresses is not a secret; the command line is fine (U-3).
+    /usr/local/bin/docker-entrypoint.sh postgres -c listen_addresses=127.0.0.1 &
 
     # Wait for PostgreSQL to be ready
     wait_for_postgres
+
+    # v0.16.41 (interim-4 G-2): on a PRE-.41 volume, initdb never re-runs,
+    # so the database user's password is whatever the volume was created
+    # with (the old default 'letta'), and pg_hba.conf keeps its old auth
+    # lines. After the server starts, converge BOTH to the .41 posture:
+    # ALTER USER to the generated password, and scram-sha-256 in pg_hba.
+    # psql reads the old password via PGPASSWORD (env — never argv, U-3).
+    if [ -f "${LETTA_DIR:-/data/letta}/pg_password" ]; then
+        # Fresh .41 volume: the password was applied at initdb. Nothing to do.
+        :
+    else
+        # Pre-.41 volume (or an unexplained absence): converge now.
+        PGDATA_DIR="${PGDATA:-/var/lib/postgresql/data}"
+        if [ -d "$PGDATA_DIR" ] && [ -f "$PGDATA_DIR/PG_VERSION" ]; then
+            echo "Pre-v0.16.41 Postgres volume detected: converging auth to scram + generated password"
+            PGPASSWORD="${LEGACY_PG_PASSWORD:-letta}" psql -h localhost -U "${POSTGRES_USER:-letta}" -d postgres >/dev/null 2>&1 <<'PSQLSQL'
+DO $$
+BEGIN
+    RAISE NOTICE 'connected';
+END $$;
+PSQLSQL
+            if [ $? -eq 0 ]; then
+                PGPASSWORD="${LEGACY_PG_PASSWORD:-letta}" psql -h localhost -U "${POSTGRES_USER:-letta}" -d postgres >/dev/null 2>&1 -c "ALTER USER ${POSTGRES_USER:-letta} WITH PASSWORD '${POSTGRES_PASSWORD}';"
+                if [ $? -eq 0 ]; then
+                    echo "  ALTER USER applied"
+                    # Rewrite pg_hba.conf: scram for local + host
+                    HBA="$PGDATA_DIR/pg_hba.conf"
+                    if [ -f "$HBA" ]; then
+                        sed -i -E 's/^(local\s+all\s+all\s+)(peer|trust|md5|password|scram-sha-256)\b/\1scram-sha-256/' "$HBA"
+                        sed -i -E 's/^(host\s+all\s+all\s+[^\s]+\s+)(trust|md5|password|scram-sha-256)\b/\1scram-sha-256/' "$HBA"
+                        # Any 'trust' entries are the real risk — force scram
+                        sed -i -E 's/\btrust\b/scram-sha-256/g' "$HBA"
+                        pg_ctl reload -D "$PGDATA_DIR" >/dev/null 2>&1 || psql -h localhost -U "${POSTGRES_USER:-letta}" -d postgres -c "SELECT pg_reload_conf();" >/dev/null 2>&1 || true
+                        echo "  pg_hba.conf converged to scram-sha-256"
+                    fi
+                    # Persist the password file so subsequent boots take the fresh-volume path
+                    mkdir -p "${LETTA_DIR:-/data/letta}"
+                    printf '%s' "$POSTGRES_PASSWORD" > "${LETTA_DIR:-/data/letta}/pg_password"
+                    chmod 600 "${LETTA_DIR:-/data/letta}/pg_password"
+                else
+                    echo "  WARNING: could not ALTER USER (old password not 'letta'?)."
+                    echo "  Set LEGACY_PG_PASSWORD to the volume's actual password and re-run."
+                    echo "  The server will try the generated password and may fail to connect."
+                fi
+            else
+                echo "  WARNING: cannot connect with the legacy default password."
+                echo "  Set LEGACY_PG_PASSWORD to the volume's actual password and re-run."
+            fi
+        fi
+    fi
 
     # Set default connection URI for internal postgres
     export LETTA_PG_URI="postgresql://${POSTGRES_USER:-letta}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB:-letta}"

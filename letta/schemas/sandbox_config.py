@@ -1,7 +1,7 @@
 import hashlib
 import json
 import os
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union, ClassVar
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -128,14 +128,28 @@ class LandlockSandboxConfig(BaseModel):
     )
 
     # Syscall filtering (via libseccomp)
+    # v0.16.41 (interim-4 G-1): MANDATORY set — always applied, NOT
+    # user-replaceable. io_uring creates and connects sockets INSIDE the
+    # kernel (IORING_OP_SOCKET/CONNECT) — seccomp never sees socket()/
+    # connect() for those, so a network-enabled tool could reach the
+    # Postgres socket or send UDP around the R-2 condition-2 filter.
+    # blocked below for EVERY sandbox, network or not. The user list
+    # (blocked_syscalls) is ADDITIVE on top of this set.
+    mandatory_blocked_syscalls: ClassVar[List[str]] = [
+        "ptrace", "mount", "umount2", "chroot",
+        "pivot_root", "reboot", "swapon", "swapoff",
+        "init_module", "finit_module", "delete_module",
+        "kexec_load", "kexec_file_load",
+        # io_uring family (G-1): socket creation/connect in-kernel bypass
+        "io_uring_setup", "io_uring_enter", "io_uring_register",
+    ]
     blocked_syscalls: List[str] = Field(
-        default_factory=lambda: [
-            "ptrace", "mount", "umount2", "chroot",
-            "pivot_root", "reboot", "swapon", "swapoff",
-            "init_module", "finit_module", "delete_module",
-            "kexec_load", "kexec_file_load",
-        ],
-        description="Additional syscalls to block via seccomp-BPF.",
+        default_factory=lambda: [],
+        description=(
+            "ADDITIONAL syscalls to block via seccomp-BPF, applied on top of "
+            "the mandatory set (which includes the io_uring family and cannot "
+            "be replaced by config)."
+        ),
     )
     block_fork: bool = Field(
         True,

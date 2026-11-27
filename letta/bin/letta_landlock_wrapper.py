@@ -199,7 +199,20 @@ def apply_seccomp(config):
     """Apply seccomp-BPF syscall filter via libseccomp."""
     from letta.services.tool_sandbox._landlock_ctypes import apply_seccomp_filter
 
+    # v0.16.41 (interim-4 G-1): the MANDATORY set is always applied on top
+    # of any configured list — io_uring creates/connects sockets in-kernel,
+    # invisible to socket()-based seccomp rules. A config cannot remove it.
     blocked = config.get("blocked_syscalls", [])
+    MANDATORY_BLOCKED = [
+        "ptrace", "mount", "umount2", "chroot",
+        "pivot_root", "reboot", "swapon", "swapoff",
+        "init_module", "finit_module", "delete_module",
+        "kexec_load", "kexec_file_load",
+        "io_uring_setup", "io_uring_enter", "io_uring_register",
+    ]
+    for _name in MANDATORY_BLOCKED:
+        if _name not in blocked:
+            blocked.append(_name)
     block_fork = config.get("block_fork", True)
     allow_network = config.get("allow_tcp_connect", False)
     apply_seccomp_filter(blocked, block_fork=block_fork, allow_network=allow_network)
