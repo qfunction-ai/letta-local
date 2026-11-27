@@ -198,16 +198,36 @@ PSQLALTER
                     # effective reload the running server kept the OLD
                     # (trust) hba in memory and the old password still
                     # authenticated.
-                    if PGPASSWORD="${LEGACY_PG_PASSWORD:-letta}" psql -h localhost -U "${POSTGRES_USER:-letta}" -d postgres -tAc "SELECT pg_reload_conf();" >/dev/null 2>&1; then
+                    # X-3 (interim-7): a failed reload means the RUNNING
+                    # postgres still honors the old TRUST hba — every local
+                    # connection gets in without a password for the whole
+                    # boot, defeating the SCRAM change. FAIL CLOSED:
+                    # restart postgres so the new hba is loaded from disk,
+                    # then re-wait. A failed restart aborts the boot with a
+                    # named error (better than running on trust auth).
+                    _reloaded=0
+                    if PGPASSWORD="${POSTGRES_PASSWORD}" psql -h localhost -U "${POSTGRES_USER:-letta}" -d postgres -tAc "SELECT pg_reload_conf();" >/dev/null 2>&1; then
                         echo "  pg_hba.conf converged to scram-sha-256 (reloaded)"
+                        _reloaded=1
                     else
-                        echo "  WARNING: pg_reload_conf() failed — the new hba applies on the next postgres restart"
-                        echo "  (the next boot re-runs this check via the marker's absence logic; data is intact)"
+                        echo "  pg_reload_conf() failed — restarting postgres to load the new hba (fail closed)"
+                        if gosu postgres pg_ctl -D "$PGDATA_DIR" restart -w -t 60 >/dev/null 2>&1; then
+                            wait_for_postgres
+                            _reloaded=1
+                        else
+                            echo "  ERROR: postgres restart after hba convergence failed."
+                            echo "  The running server still honors the OLD (trust) pg_hba. Refusing to start"
+                            echo "  the Letta server on trust auth (S-2). Fix pg_hba.conf manually and re-run."
+                            exit 1
+                        fi
                     fi
                 fi
                 # Marker IN the database dir: the db's own auth state now
-                # matches .41. Idempotent for every later boot.
-                touch "$PGDATA_DIR/.letta_v041_scram"
+                # matches .41 AND the running server loaded it. Idempotent
+                # for every later boot. (X-3: only after _reloaded=1.)
+                if [ "${_reloaded:-0}" = "1" ]; then
+                    touch "$PGDATA_DIR/.letta_v041_scram"
+                fi
                 # Keep the LETTA_DIR password file in sync (a fresh LETTA_DIR
                 # paired with an old db volume needs it for later boots).
                 if [ ! -f "${LETTA_DIR:-/data/letta}/pg_password" ]; then

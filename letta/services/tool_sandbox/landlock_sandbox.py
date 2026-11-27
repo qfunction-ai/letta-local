@@ -69,9 +69,6 @@ def _log_interpreter_version_once(python_executable: str) -> None:
 
 
 class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
-    # W-1b: process-lifetime cache for the G-4 traversal probe (PASS only).
-    _traversal_probe_passed: bool = False
-
     """Landlock sandbox backend for tool execution.
 
     Uses a wrapper script (letta_landlock_wrapper.py) that applies Landlock
@@ -79,6 +76,9 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
     exec'ing the tool script. The wrapper is launched as a separate process
     to avoid fork-in-thread issues.
     """
+
+    # W-1b: process-lifetime cache for the G-4 traversal probe (PASS only).
+    _traversal_probe_passed: bool = False
 
     def __init__(
         self,
@@ -161,13 +161,7 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
         # error instead. Cached per process: /root's mode doesn't change
         # while the server runs, and the probe spawns setpriv+cat — once
         # is enough (one process spawn per SERVER lifetime, not per call).
-        # W-1b: CLASS-level cache — a new AsyncToolSandboxLandlock is built
-        # per tool call (sandbox_tool_executor), so an instance flag would
-        # re-run the probe every call. Only the PASS is cached; a failure
-        # keeps raising the named error every time.
-        if not AsyncToolSandboxLandlock._traversal_probe_passed:
-            await self._traversal_probe(exec_dir)
-            AsyncToolSandboxLandlock._traversal_probe_passed = True
+        await self._ensure_traversal(exec_dir)
         # v0.16.41 (S-2/U-5): the exec dir is the sandbox subprocess's
         # HOME/TMPDIR — it must be owned by the sandbox uid. A failure here
         # is a REFUSAL, not a warning: the subprocess would run as uid 1000
@@ -394,6 +388,17 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
             # finally and mask the real error.
             with contextlib.suppress(FileNotFoundError):
                 await asyncio.to_thread(os.remove, _probe)
+
+    async def _ensure_traversal(self, exec_dir: str) -> None:
+        """X-2 (interim-7): the cache gate lives HERE, not at the call
+        site, so tests exercise the real logic instead of a copied if.
+        CLASS-level cache — the executor builds a new sandbox per tool
+        call, so an instance flag would re-run the probe (setpriv+cat)
+        every call. Only the PASS is cached: a failing probe keeps
+        raising the named error on every call (visible, actionable)."""
+        if not AsyncToolSandboxLandlock._traversal_probe_passed:
+            await self._traversal_probe(exec_dir)
+            AsyncToolSandboxLandlock._traversal_probe_passed = True
 
     async def _prepare_venv(self, landlock_config, venv_path: str, env: Dict[str, str]):
         """Prepare virtual environment asynchronously (in a background thread).
