@@ -31,7 +31,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - smoke-data:/root/.letta
+      - smoke-data:/data/letta
 
 volumes:
   smoke-data:
