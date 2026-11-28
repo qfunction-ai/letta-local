@@ -1565,13 +1565,13 @@ out = []
 for m in d.get("messages", []):
     if m.get("message_type") == "tool_return_message":
         tr = m.get("tool_return") or ""
-        out.append(f"tool_return: {tr[:400]}")
+        out.append(f"tool_return: {tr}")
         st = m.get("stdout") or []
         for ln in st:
             out.append(f"stdout: {ln}")
         se = m.get("stderr") or []
         for ln in se:
-            out.append(f"stderr: {ln[:200]}")
+            out.append(f"stderr: {ln}")  # full — no truncation (v16 cut the crash)
         status = m.get("status")
         out.append(f"status: {status}")
 open(sys.argv[2], "w").write("\n".join(out) if out else "NO_TOOL_RETURN")
