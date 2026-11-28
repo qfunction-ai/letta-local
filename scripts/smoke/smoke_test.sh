@@ -1518,6 +1518,10 @@ PY27MSG
       -H "User-Agent: letta-client/1.0" \
       -d @"${R27_MSG}")"
     rm -f "${R27_MSG}"
+    echo "--- R27_RAW (agent response) ---"
+    echo "${R27_RAW}" | head -c 800
+    echo
+    echo "--- end R27_RAW ---"
 
     # 27.1–27.4 verdicts (AA-1: capture-then-herestring)
     verdict_check27_ports "${R27_RAW}"
