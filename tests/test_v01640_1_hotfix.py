@@ -194,9 +194,16 @@ class TestS1SourceGuards:
     def test_allow_unsafe_eval_removed(self):
         src = open(os.path.join(REPO_ROOT, "letta/services/tool_sandbox/base.py")).read()
         assert "allow_unsafe_eval=True" not in src, "allow_unsafe_eval=True must not exist anywhere"
-        # v0.16.41 (R2A-1/F-3, on the hardening branch): the ENTIRE in-sandbox
-        # coercion block removal is asserted in the .41 branch's test update —
-        # main's tree still carries the block until that branch merges.
+        # v0.16.41 (R2A-1/F-3): the ENTIRE in-sandbox coercion block was
+        # removed (canonicalization happens server-side before the checks).
+        # The only remaining allow_unsafe_eval=True site is tool_manager's
+        # in-process builtin-tool path, which feeds no policy checks.
+        assert "coerce_dict_args_by_annotations(" not in src, (
+            "the in-sandbox coercion block must stay removed (F-3): a retained "
+            "in-sandbox rewriter re-decodes values the policy already approved"
+        )
+        tm_src = open(os.path.join(REPO_ROOT, "letta/services/tool_manager.py")).read()
+        assert "allow_unsafe_eval=True" not in tm_src
 
     def test_typescript_generator_uses_choke_point(self):
         """The TS route is behind the same choke point (call order guard above
