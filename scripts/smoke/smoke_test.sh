@@ -1388,73 +1388,105 @@ import json, sys
 source = r"""
 import json, socket, os, glob
 import ctypes
+import subprocess
+import sys
 
 results = {}
 
+# Each risky probe runs in a SUBPROCESS so a seccomp SIGKILL
+# (SECCOMP_RET_KILL kills the process, not just the syscall) can't take
+# out the whole report — v13 showed the probe dying with an empty error.
+def probe(code):
+    try:
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() or f"CRASHED(rc={r.returncode})"
+    except Exception as e:
+        return f"ERROR:{e}"
+
 # 27.1: datastore ports on loopback
 for port, name in ((5432, "pg"), (6379, "redis")):
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(3)
-    try:
-        s.connect(("127.0.0.1", port))
-        results[f"27.1-{name}"] = "CONNECTED"
-    except ConnectionRefusedError:
-        results[f"27.1-{name}"] = "REFUSED"
-    except OSError as e:
-        results[f"27.1-{name}"] = f"DENIED({e.errno})"
-    finally:
-        s.close()
+    code = (
+        "import socket\n"
+        "s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+        "s.settimeout(3)\n"
+        "try:\n"
+        f"    s.connect((\"127.0.0.1\", {port}))\n"
+        "    print(\"CONNECTED\")\n"
+        "except ConnectionRefusedError:\n"
+        "    print(\"REFUSED\")\n"
+        "except OSError as e:\n"
+        "    print(f\"DENIED({e.errno})\")\n"
+    )
+    results[f"27.1-{name}"] = probe(code)
 
-# 27.1 positive (in-sandbox): internet 443 must be reachable — proves
-# networking is ON and the port block is selective, not a blanket deny
-try:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(5)
-    s.connect(("1.1.1.1", 443))
-    results["27.1-net-443"] = "CONNECTED"
-    s.close()
-except OSError as e:
-    results["27.1-net-443"] = f"DENIED({e.errno})"
+# 27.1 positive (in-sandbox): internet 443 must be reachable
+code443 = (
+    "import socket\n"
+    "s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+    "s.settimeout(5)\n"
+    "try:\n"
+    "    s.connect((\"1.1.1.1\", 443))\n"
+    "    print(\"CONNECTED\")\n"
+    "    s.close()\n"
+    "except OSError as e:\n"
+    "    print(f\"DENIED({e.errno})\")\n"
+)
+results["27.1-net-443"] = probe(code443)
 
-# 27.2: credential files — record per-file verdicts; a MISSING file is a
-# check failure (glob must not silently skip)
+# 27.2: credential files (MISSING = check failure, no silent skip)
 for cp in ["/data/letta/pg_password", "/data/letta/redis.conf"]:
     key = f"27.2-{os.path.basename(cp)}"
-    if not os.path.exists(cp):
-        results[key] = "MISSING"
-        continue
-    try:
-        with open(cp) as f:
-            results[key] = "READ:" + f.read(8)
-    except PermissionError:
-        results[key] = "DENIED"
-    except OSError as e:
-        results[key] = f"DENIED({e.errno})"
+    code = (
+        "import os\n"
+        f"cp = {cp!r}\n"
+        "if not os.path.exists(cp):\n"
+        "    print(\"MISSING\")\n"
+        "else:\n"
+        "    try:\n"
+        "        with open(cp) as f:\n"
+        "            print(\"READ:\" + f.read(8))\n"
+        "    except PermissionError:\n"
+        "        print(\"DENIED\")\n"
+        "    except OSError as e:\n"
+        "        print(f\"DENIED({e.errno})\")\n"
+    )
+    results[key] = probe(code)
 
-# /proc/1/environ — the server's environment
-try:
-    with open("/proc/1/environ") as f:
-        results["27.2-proc1-environ"] = "READ:" + f.read(16)
-except PermissionError:
-    results["27.2-proc1-environ"] = "DENIED"
-except OSError as e:
-    results["27.2-proc1-environ"] = f"DENIED({e.errno})"
+# /proc/1/environ
+code_proc1 = (
+    "try:\n"
+    "    with open(\"/proc/1/environ\") as f:\n"
+    "        print(\"READ:\" + f.read(16))\n"
+    "except PermissionError:\n"
+    "    print(\"DENIED\")\n"
+    "except OSError as e:\n"
+    "    print(f\"DENIED({e.errno})\")\n"
+)
+results["27.2-proc1-environ"] = probe(code_proc1)
 
-# 27.3: socket families
-for name, args in [("af-unix", (1, 1)), ("udp", (2, 2)), ("raw", (2, 3))]:
-    try:
-        s = socket.socket(*args)
-        results[f"27.3-{name}"] = "CREATED"
-        s.close()
-    except OSError as e:
-        results[f"27.3-{name}"] = f"DENIED({e.errno})"
+# 27.3: socket families (each isolated)
+for name, args in [("af-unix", "1, 1"), ("udp", "2, 2"), ("raw", "2, 3")]:
+    code = (
+        "import socket\n"
+        "try:\n"
+        f"    s = socket.socket({args})\n"
+        "    print(\"CREATED\")\n"
+        "    s.close()\n"
+        "except OSError as e:\n"
+        "    print(f\"DENIED({e.errno})\")\n"
+    )
+    results[f"27.3-{name}"] = probe(code)
 
 # 27.4: io_uring_setup via raw syscall
-libc = ctypes.CDLL(None, use_errno=True)
-libc.syscall.restype = ctypes.c_long
-ret = libc.syscall(425, 4, 0)
-err = ctypes.get_errno()
-results["27.4-io-uring"] = f"ret={ret} errno={err}"
+code_uring = (
+    "import ctypes\n"
+    "libc = ctypes.CDLL(None, use_errno=True)\n"
+    "libc.syscall.restype = ctypes.c_long\n"
+    "ret = libc.syscall(425, 4, 0)\n"
+    "err = ctypes.get_errno()\n"
+    "print(f\"ret={ret} errno={err}\")\n"
+)
+results["27.4-io-uring"] = probe(code_uring)
 
 for k, v in results.items():
     print(f"R27:{k}={v}")
@@ -1548,8 +1580,19 @@ PY27REPORT
     echo "${R27_REPORT}"
     echo "--- end probe report ---"
 
-    # 27.1–27.4 verdicts (AA-1: capture-then-herestring) — on the REPORT
-    verdict_check27_ports "${R27_REPORT}"
+    # 27.1–27.4 verdicts (AA-1: capture-then-herestring) — on the REPORT.
+    # 27.1's enforcement layer is Landlock NETWORK rules; on kernels that
+    # reject them (linuxkit/Docker Desktop, ABI>=4 but net-port add_rule
+    # fails), the wrapper degrades to net-unrestricted and prints the
+    # WARNING to stderr. That's an environment limitation, not a control
+    # failure: record it as SKIP-WITH-REASON (A-10) and rely on the
+    # positive control to show the environment's real behavior. The control
+    # IS enforced: seccomp families + credential-file perms (27.2/27.3/27.4).
+    if echo "${R27_RAW}" | grep -q "kernel rejected network rules"; then
+      bad "27.1 ENV-LIMITED: kernel rejected Landlock net rules (linuxkit) — port refusal NOT testable here; I12-7's seccomp port allowlist is the enforcing layer (pending)"
+    else
+      verdict_check27_ports "${R27_REPORT}"
+    fi
     verdict_check27_creds "${R27_REPORT}"
     verdict_check27_families "${R27_REPORT}"
     verdict_check27_io_uring "${R27_REPORT}"
