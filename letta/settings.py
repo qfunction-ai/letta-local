@@ -300,7 +300,7 @@ import sys
 
 if "--use-file-pg-uri" in sys.argv:
     try:
-        with open(Path.home() / ".letta/pg_uri", "r") as f:
+        with open(os.environ.get("LETTA_DIR", str(Path.home() / ".letta")) + "/pg_uri", "r") as f:
             default_pg_uri = f.read()
             print(f"Read pg_uri from ~/.letta/pg_uri: {default_pg_uri}")
     except FileNotFoundError:
@@ -315,7 +315,10 @@ class DatabaseChoice(str, Enum):
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="letta_", extra="ignore")
 
-    letta_dir: Optional[Path] = Field(Path.home() / ".letta", alias="LETTA_DIR")
+    letta_dir: Optional[Path] = Field(
+        Path(os.environ.get("LETTA_DIR", str(Path.home() / ".letta"))),
+        alias="LETTA_DIR",
+    )
     debug: Optional[bool] = False
     cors_origins: Optional[list] = cors_origins
     environment: Optional[str] = Field(
@@ -589,7 +592,9 @@ class LogSettings(BaseSettings):
         description="Enable structured JSON logging (recommended).",
     )
     log_level: str | None = Field("WARNING", description="Logging level")
-    letta_log_path: Path | None = Field(Path.home() / ".letta" / "logs" / "Letta.log")
+    letta_log_path: Path | None = Field(
+        Path(os.environ.get("LETTA_DIR", str(Path.home() / ".letta"))) / "logs" / "Letta.log"
+    )
     verbose_telemetry_logging: bool = Field(default=False)
 
 

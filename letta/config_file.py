@@ -52,7 +52,7 @@ from typing import Any
 import yaml
 
 # Config file locations
-DEFAULT_USER_CONFIG = Path.home() / ".letta" / "conf.yaml"
+DEFAULT_USER_CONFIG = Path(os.environ.get("LETTA_DIR", str(Path.home() / ".letta"))) / "conf.yaml"
 DEFAULT_PROJECT_CONFIG = Path.cwd() / "conf.yaml"
 
 
