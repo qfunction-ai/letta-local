@@ -466,6 +466,21 @@ for m in d.get("messages", []):
 print("no_file_write_return")' 2>/dev/null || echo PARSE_ERROR)"
     if [ "${R495_STATUS}" = "success" ]; then
       ok "4.95 file tools under Landlock (write staged + promoted)"
+      # I25-2 (rig half): the written file must exist under
+      # /data/letta/agent_files ON THE VOLUME, and NOTHING new may appear
+      # under /root/.letta (the pre-.41 path).
+      R495_FIND="$(docker compose -f "${COMPOSE_FILE}" exec -T letta sh -c '
+        find /data/letta/agent_files -type f -name "*.txt" 2>/dev/null | head -2
+        echo "---rootdot---"
+        find /root/.letta -type f -newer /data/letta/logs 2>/dev/null | grep -v logs | head -3
+      ')" 2>/dev/null || R495_FIND=""
+      echo "${R495_FIND}" | grep -qE "/data/letta/agent_files/.*/notes\.txt" \
+        && ok "I25-2 volume check: notes.txt landed under /data/letta/agent_files" \
+        || bad "I25-2 volume check: notes.txt NOT found under /data/letta/agent_files"
+      ROOTDOT_COUNT=$(echo "${R495_FIND}" | sed -n '/---rootdot---/,$p' | grep -cv "^---rootdot---$" || true)
+      [ "${ROOTDOT_COUNT}" = "0" ] \
+        && ok "I25-2 volume check: nothing new under /root/.letta" \
+        || bad "I25-2 volume check: files appeared under /root/.letta (${ROOTDOT_COUNT})"
     else
       R495_ERR="$(echo "${R495}" | python3 -c '
 import sys, json
