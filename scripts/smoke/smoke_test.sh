@@ -1486,10 +1486,8 @@ PY27REQ
   # Attach the tool to the probe agent and run it — the /v1/tools/run path
   # runs the tool without agent context, so the requires_network metadata
   # on the TOOL is what enables network in the sandbox.
-  R27_ATTACH="$(curl -s -X POST "${BASE}/v1/agents/${R27_AGENT_ID}/tools" \
+  R27_ATTACH="$(curl -s -X PATCH "${BASE}/v1/agents/${R27_AGENT_ID}/tools/attach/${R27_TOOL_ID}" \
     -H "Authorization: Bearer ${SMOKE_PASSWORD}" \
-    -H "Content-Type: application/json" \
-    -d "{\"id\": \"${R27_TOOL_ID}\"}" \
     -w "%{http_code}" -o /dev/null)"
   if [ "${R27_ATTACH}" != "200" ] && [ "${R27_ATTACH}" != "201" ]; then
     bad "27. could not attach probe tool to agent (HTTP ${R27_ATTACH})"
