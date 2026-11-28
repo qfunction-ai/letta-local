@@ -1476,11 +1476,14 @@ PY27REQ
   # Create the probe as a TOOL first (with requires_network metadata), then
   # attach and run it — the /v1/tools/run path doesn't carry metadata, so we
   # register the tool with requires_network and invoke via the agent.
-  command curl -s -X POST "${BASE}/v1/tools/" \
+  R27_CREATE_CODE="$(command curl -s -X POST "${BASE}/v1/tools/" \
     -H "Authorization: Bearer ${SMOKE_PASSWORD}" \
     -H "Content-Type: application/json" \
-    -o "${R27_RESP}" \
-    --data @"${R27_REQ}"
+    -o "${R27_RESP}" -w "%{http_code}" \
+    --data @"${R27_REQ}")"
+  echo "--- tool create: HTTP ${R27_CREATE_CODE} ---"
+  head -c 300 "${R27_RESP}" 2>/dev/null
+  echo
   R27_TOOL_ID="$(python3 -c "import json; print(json.load(open('${R27_RESP}')).get('id',''))" 2>/dev/null || true)"
 
   # Attach the tool to the probe agent and run it — the /v1/tools/run path
