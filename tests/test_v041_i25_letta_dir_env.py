@@ -79,6 +79,37 @@ class TestLettaDirEnvHonor:
         assert 'os.path.expanduser("~/.letta/agent_files")' not in src
 
 
+class TestLettaDirEmptyValue:
+    """I26-1: LETTA_DIR="" (empty) must behave as unset — home fallback
+    everywhere, not a cwd-relative "" path."""
+
+    @pytest.fixture
+    def _empty_letta_env(self, monkeypatch):
+        monkeypatch.setenv("LETTA_DIR", "")
+        import sys
+        for mod in list(sys.modules):
+            if mod.startswith("letta"):
+                del sys.modules[mod]
+        yield
+        for mod in list(sys.modules):
+            if mod.startswith("letta"):
+                del sys.modules[mod]
+
+    def test_constants_empty_is_home(self, _empty_letta_env):
+        import letta.constants as C
+        assert str(C.LETTA_DIR) == os.path.expanduser("~/.letta")
+
+    def test_settings_empty_is_home(self, _empty_letta_env):
+        from letta.settings import Settings
+        s = Settings()
+        assert str(s.letta_dir) == os.path.expanduser("~/.letta")
+
+    def test_log_path_empty_is_home(self, _empty_letta_env):
+        from letta.settings import LogSettings
+        ls = LogSettings()
+        assert str(ls.letta_log_path).startswith(os.path.expanduser("~/.letta"))
+
+
 class TestLettaDirFallback:
     """I25-2 canary: without the env var, paths fall back to ~/.letta."""
 

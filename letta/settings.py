@@ -3,7 +3,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from pydantic import AliasChoices, Field
+from pydantic import field_validator, AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Load config file and apply to environment before settings are created
@@ -292,6 +292,16 @@ cors_origins = [
 if env_cors_origins:
     cors_origins.extend(env_cors_origins.split(","))
 
+def _constants_letta_dir() -> str:
+    """I26-1: single source of truth — constants.LETTA_DIR honors the env
+    var AND treats an empty value as unset (falling back to ~/.letta),
+    unlike os.environ.get with a default. Without this, LETTA_DIR="" gave
+    settings a "" path (cwd-relative logs/pg_uri/conf.yaml)."""
+    from letta.constants import LETTA_DIR
+
+    return str(LETTA_DIR)
+
+
 # read pg_uri from ~/.letta/pg_uri or set to none, this is to support Letta Desktop
 default_pg_uri = None
 
@@ -300,7 +310,7 @@ import sys
 
 if "--use-file-pg-uri" in sys.argv:
     try:
-        with open(os.environ.get("LETTA_DIR", str(Path.home() / ".letta")) + "/pg_uri", "r") as f:
+        with open(str(Path(_constants_letta_dir()) / "pg_uri"), "r") as f:
             default_pg_uri = f.read()
             print("Read pg_uri from the pg_uri file (value not printed — may contain credentials)")
     except (FileNotFoundError, PermissionError, OSError):
@@ -316,9 +326,18 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="letta_", extra="ignore")
 
     letta_dir: Optional[Path] = Field(
-        Path(os.environ.get("LETTA_DIR", str(Path.home() / ".letta"))),
+        Path(_constants_letta_dir()),
         alias="LETTA_DIR",
     )
+
+    @field_validator("letta_dir", mode="before")
+    @classmethod
+    def _empty_letta_dir_is_unset(cls, v):
+        # I26-1: LETTA_DIR="" via the env alias yields Path("") == "." —
+        # treat empty as unset and fall back to the constants default.
+        if v is None or (isinstance(v, (str, Path)) and not str(v).strip()):
+            return Path(_constants_letta_dir())
+        return v
     debug: Optional[bool] = False
     cors_origins: Optional[list] = cors_origins
     environment: Optional[str] = Field(
@@ -593,7 +612,7 @@ class LogSettings(BaseSettings):
     )
     log_level: str | None = Field("WARNING", description="Logging level")
     letta_log_path: Path | None = Field(
-        Path(os.environ.get("LETTA_DIR", str(Path.home() / ".letta"))) / "logs" / "Letta.log"
+        Path(_constants_letta_dir()) / "logs" / "Letta.log"
     )
     verbose_telemetry_logging: bool = Field(default=False)
 
