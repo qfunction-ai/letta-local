@@ -72,7 +72,18 @@ verdict_check27_families() {
   grep -q "R27:27.3-raw=DENIED" <<< "$1" || bad "27.3 RAW NOT denied"
 }
 verdict_check27_io_uring() {
-  grep -q "R27:27.4-io-uring=ret=-1 errno=1" <<< "$1" || bad "27.4 io_uring not denied as expected"
+  # I23-3: either reading is accepted, with the reading LABELLED:
+  #   errno=1  (EPERM)  — seccomp filter denial
+  #   errno=13 (EACCES) — Landlock/hardened path denial
+  # A ret=0 (success) is the only failure.
+  if grep -q "R27:27.4-io-uring=ret=0" <<< "$1"; then
+    bad "27.4 io_uring_setup SUCCEEDED (not denied)"
+  elif grep -qE "R27:27.4-io-uring=ret=-1 errno=(1|13)" <<< "$1"; then
+    READING=$(grep -oE "errno=[0-9]+" <<< "$1" | head -1)
+    ok "27.4 io_uring_setup denied (${READING})"
+  else
+    bad "27.4 io_uring unparseable/no reading"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1544,6 +1555,7 @@ except Exception:
     open(sys.argv[2], "w").write("PARSE_FAIL: response unparseable")
     raise SystemExit
 out = []
+r27 = []
 for m in d.get("messages", []):
     if m.get("message_type") == "tool_return_message":
         tr = m.get("tool_return") or ""
@@ -1551,12 +1563,17 @@ for m in d.get("messages", []):
         st = m.get("stdout") or []
         for ln in st:
             out.append(f"stdout: {ln}")
+            # R27: lines ride stdout (print() in the probe) — collect for verdicts
+            if ln.startswith("R27:"):
+                r27.extend(l2 for l2 in ln.split("\n") if l2.startswith("R27:"))
         se = m.get("stderr") or []
         for ln in se:
             out.append(f"stderr: {ln}")  # full — no truncation (v16 cut the crash)
         status = m.get("status")
         out.append(f"status: {status}")
-open(sys.argv[2], "w").write("\n".join(out) if out else "NO_TOOL_RETURN")
+# verdict input: the R27: lines; fall back to a marker if none
+open(sys.argv[2], "w").write("\n".join(r27) if r27 else ("\n".join(out) + "\nNO_R27_LINES"))
+open(sys.argv[2] + ".full", "w").write("\n".join(out))
 PY27REPORT
     echo "--- probe result (tool_return + stdout + stderr + status) ---"
     cat "${R27_REPORT_FILE}"
