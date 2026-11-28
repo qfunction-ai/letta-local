@@ -186,3 +186,46 @@ explicit operator step. The consumer notice must call this out.
 **Recording:** this section is the evidence-doc record. The consumer
 notice for .41 gains a "volume mount path changed" entry pointing at the
 startup banner's commands.
+
+
+## I12-6 CLOSED: rig check 27 full output (the evidence run)
+
+**Rig commit:** 23044201c (scripts/smoke/smoke_test.sh)
+**Image:** letta-local:v041-dev (local image ID sha256:346e825b69189330546f7a1cc1562b1d392af37dcbbe0d1df3dd2de8a5f8cb53), built from the branch head
+**Result:** smoke: 33 passed, 0 failed (rig_exit=0)
+
+Verbatim check 27 block:
+
+```
+== check 27: datastore hardening (R-2 conditions 1-4) ==
+--- tool create: HTTP 200 ---
+--- probe result (tool_return + stdout + stderr + status) ---
+R27:27.1-pg=DENIED(13)
+R27:27.1-redis=DENIED(13)
+R27:27.1-net-443=CONNECTED
+R27:27.1-net-8080=DENIED(13)
+R27:27.2-pg_password=DENIED
+R27:27.2-redis.conf=DENIED
+R27:27.2-proc1-environ=DENIED
+R27:27.3-af-unix=DENIED(13)
+R27:27.3-udp=DENIED(13)
+R27:27.3-raw=DENIED(13)
+R27:27.4-io-uring=ret=-1 errno=13
+--- end probe result ---
+  PASS  27.1 ports selective: datastore+8080 denied, 443 connected
+  PASS  27.2 credentials unreadable from sandbox
+  PASS  27.3 socket families denied
+  PASS  27.4 io_uring_setup denied (errno=13 — seccomp filter enforced)
+--- positive control (outside sandbox) ---
+PC:TCP=OK
+PC:UNIX=OK
+PC:UDP=OK
+PC:RAW=DENIED(93)
+PC:io-uring=ret=-1 errno=1
+  PASS  positive control: TCP allowed outside sandbox
+  PASS  positive control: sibling probes ran outside sandbox
+```
+
+Also in the run: 4.95 PASS (second consecutive). I31-3 correction applied:
+Landlock per-port rules enforce 27.1 on linuxkit (fixed struct works);
+"ENV-LIMITED" dropped. The I29-1 pre-fix EINVAL: Inferred (no saved line).

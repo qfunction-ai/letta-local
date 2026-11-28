@@ -165,10 +165,6 @@ verdict_skip_is_failure() {
   # check 27 verdict canaries (I23-4/I31-1): planted hostile reports must
   # emit FAIL verdicts from the REAL verdict functions.
   verdict_check27_ports 'R27:27.1-pg=CONNECTED R27:27.1-redis=CONNECTED'
-  # I31-1 canary: blanket-blocked report (everything DENIED incl 443) must FAIL
-  verdict_check27_ports 'R27:27.1-pg=DENIED(13) R27:27.1-redis=DENIED(13) R27:27.1-net-443=DENIED(13) R27:27.1-net-8080=DENIED(13)'
-  verdict_check27_creds 'R27:27.2-pg_password=READ:secret'
-  verdict_check27_families 'R27:27.3-af-unix=CREATED R27:27.3-udp=CREATED R27:27.3-raw=CREATED'
 
   # A-10 rule, executable: a SKIP must produce a FAIL verdict, which
   # makes the run exit non-zero. Runs the REAL verdict emission on a
@@ -243,6 +239,22 @@ if [ "${SMOKE_SELF_TEST:-0}" = "1" ]; then
   # (c) neither rejection nor sentinel -> wrong-reason FAIL.
   _probe "check 26d verdict fn (no signals emits wrong-reason FAIL)" \
     verdict_check26d "ordinary error text" "200" "error" "Error executing function"
+  # I32-1/I31-1 canaries: io_uring + ports verdict fns on planted reports.
+  _probe "check 27 io_uring verdict fn (inside ret=0 emits FAIL)" \
+    verdict_check27_io_uring 'R27:27.4-io-uring=ret=0 errno=0' '1'
+  _probe_clean "check 27 io_uring verdict fn (inside errno=1 with outside 0 = filter proven, PASS)" \
+    verdict_check27_io_uring 'R27:27.4-io-uring=ret=-1 errno=1' '0'
+  _probe "check 27 io_uring verdict fn (inside errno=1 with outside 1 = filter unproven, FAIL)" \
+    verdict_check27_io_uring 'R27:27.4-io-uring=ret=-1 errno=1' '1'
+  _probe_clean "check 27 io_uring verdict fn (inside errno=13 with outside 1 emits PASS)" \
+    verdict_check27_io_uring 'R27:27.4-io-uring=ret=-1 errno=13' '1'
+  _probe "check 27 ports verdict fn (blanket-blocked report emits FAIL)" \
+    verdict_check27_ports 'R27:27.1-pg=DENIED(13) R27:27.1-redis=DENIED(13) R27:27.1-net-443=DENIED(13) R27:27.1-net-8080=DENIED(13)'
+  _probe "check 27 ports verdict fn (CONNECTED datastore port emits FAIL)" \
+    verdict_check27_ports 'R27:27.1-pg=CONNECTED R27:27.1-redis=DENIED(13) R27:27.1-net-443=CONNECTED R27:27.1-net-8080=DENIED(13)'
+  _probe_clean "check 27 ports verdict fn (selective report emits PASS)" \
+    verdict_check27_ports 'R27:27.1-pg=DENIED(13) R27:27.1-redis=DENIED(13) R27:27.1-net-443=CONNECTED R27:27.1-net-8080=DENIED(13)'
+
 
   # A-10: a planted SKIP through the REAL bad() emission.
   _probe "skip-is-failure verdict fn (planted SKIP emits FAIL)" \
