@@ -46,7 +46,10 @@ fi
 # into first.)
 if [ -n "${LETTA_DIR:-}" ] && [ -d /data/letta ] && id letta >/dev/null 2>&1; then
     mkdir -p "${LETTA_DIR}/tool_execution_dir" 2>/dev/null || true
+    mkdir -p "${LETTA_DIR}/logs" 2>/dev/null || true
     chown letta:letta "${LETTA_DIR}/tool_execution_dir" 2>/dev/null || true
+    chown letta:letta "${LETTA_DIR}/logs" 2>/dev/null || true
+    chown -R letta:letta "${LETTA_DIR}/agent_files" 2>/dev/null || true
 fi
 
 # v0.16.40 (U-6, review P-2): the CONTAINER requires secure mode. A 0.0.0.0

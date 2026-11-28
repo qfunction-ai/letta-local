@@ -303,8 +303,8 @@ if "--use-file-pg-uri" in sys.argv:
         with open(os.environ.get("LETTA_DIR", str(Path.home() / ".letta")) + "/pg_uri", "r") as f:
             default_pg_uri = f.read()
             print(f"Read pg_uri from ~/.letta/pg_uri: {default_pg_uri}")
-    except FileNotFoundError:
-        pass
+    except (FileNotFoundError, PermissionError, OSError):
+        pass  # absent OR unreadable (sandbox uid: /root is EACCES) — treat as absent
 
 
 class DatabaseChoice(str, Enum):

@@ -69,21 +69,34 @@ def load_config_file(config_path: str | Path | None = None) -> dict[str, Any]:
     paths_to_check = []
 
     # Check in order of precedence (lowest to highest)
-    if DEFAULT_USER_CONFIG.exists():
+    # v0.16.41 (I25-3/sandbox crash): stat() on /root/.letta/conf.yaml
+    # raises EACCES when the process runs as the sandbox uid (via setpriv)
+    # and /root is mode 700 — Path.exists() propagates that OSError on some
+    # paths. Sandbox tool processes import letta.settings →
+    # apply_config_to_env, and the unhandled EACCES killed the tool with
+    # an empty error. A config we cannot stat is a config we cannot read:
+    # treat as absent.
+    def _safe_exists(p: Path) -> bool:
+        try:
+            return p.exists()
+        except OSError:
+            return False
+
+    if _safe_exists(DEFAULT_USER_CONFIG):
         paths_to_check.append(DEFAULT_USER_CONFIG)
 
-    if DEFAULT_PROJECT_CONFIG.exists():
+    if _safe_exists(DEFAULT_PROJECT_CONFIG):
         paths_to_check.append(DEFAULT_PROJECT_CONFIG)
 
     # Environment variable override
     env_path = os.environ.get("LETTA_CONFIG_PATH")
-    if env_path and Path(env_path).exists():
+    if env_path and _safe_exists(Path(env_path)):
         paths_to_check.append(Path(env_path))
 
     # Explicit path has highest precedence
     if config_path:
         p = Path(config_path)
-        if p.exists():
+        if _safe_exists(p):
             paths_to_check.append(p)
 
     # Merge configs (later files override earlier)

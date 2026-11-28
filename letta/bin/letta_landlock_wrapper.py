@@ -141,8 +141,38 @@ def apply_landlock(config):
     if net_supported:
         handled_net = NET_BIND_TCP | NET_CONNECT_TCP
     elif abi >= 4 and (config.get("allow_tcp_connect") or config.get("allow_tcp_bind")):
-        print("WARNING: Landlock ABI >= 4 but kernel rejected network rules. "
-              "Network restrictions not enforced.", file=sys.stderr)
+        # I28-2 (Ryan decision): FAIL CLOSED for network-enabled tools. A
+        # kernel that reports ABI >= 4 but rejects Landlock net-port rules
+        # cannot enforce the network boundary this tool was configured with.
+        # Degrading to unrestricted networking would silently strip the
+        # sandbox's network policy. Refuse with a named, actionable error.
+        print(
+            "ERROR: network-enabled tool refused: this kernel reports Landlock "
+            "ABI >= 4 but rejects Landlock network rules (net-port add_rule "
+            "fails), so the network boundary cannot be enforced. Tool config "
+            "requests allow_tcp_connect="
+            f"{bool(config.get('allow_tcp_connect'))} allow_tcp_bind="
+            f"{bool(config.get('allow_tcp_bind'))}. "
+            "Resolution: run the container on a kernel with Landlock ABI >= 4 "
+            "network-rule support (Linux 6.7+ with CONFIG_SECURITY_LANDLOCK "
+            "network patches, e.g. mainline kernels; Docker Desktop's linuxkit "
+            "kernel does NOT qualify). Alternatively mark the tool as NOT "
+            "requires_network if it truly needs no network.",
+            file=sys.stderr,
+        )
+        # Parser-compatible tail: parse_stderr_error_msg matches
+        # "SomeError: message" on the last stderr lines; end with a line it
+        # can extract so the operator sees the refusal in the tool_return
+        # instead of an empty error.
+        print(
+            "LandlockNetworkUnsupportedError: kernel cannot enforce Landlock "
+            "network rules; refusing network-enabled tool (fail-closed). "
+            "Upgrade the host kernel to one with Landlock net-rule support "
+            "(Linux 6.7+ mainline; linuxkit/Docker Desktop kernels do not "
+            "qualify).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     scope = 0
     if abi >= 6:
