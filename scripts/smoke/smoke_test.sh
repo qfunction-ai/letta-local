@@ -1519,15 +1519,40 @@ PY27MSG
       -d @"${R27_MSG}")"
     rm -f "${R27_MSG}"
     echo "--- R27_RAW (agent response) ---"
-    echo "${R27_RAW}" | head -c 800
+    echo "${R27_RAW}" | head -c 2000
     echo
     echo "--- end R27_RAW ---"
 
-    # 27.1–27.4 verdicts (AA-1: capture-then-herestring)
-    verdict_check27_ports "${R27_RAW}"
-    verdict_check27_creds "${R27_RAW}"
-    verdict_check27_families "${R27_RAW}"
-    verdict_check27_io_uring "${R27_RAW}"
+    # Extract the probe report: R27: lines ride the tool_return_message
+    R27_REPORT_FILE="$(mktemp)"
+    echo "${R27_RAW}" > "${R27_REPORT_FILE}.raw"
+    python3 - "${R27_REPORT_FILE}.raw" "${R27_REPORT_FILE}" << 'PY27REPORT'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    open(sys.argv[2], "w").write("PARSE_FAIL")
+    raise SystemExit
+out = []
+for m in d.get("messages", []):
+    if m.get("message_type") == "tool_return_message":
+        tr = m.get("tool_return") or ""
+        for ln in tr.split("\n"):
+            if ln.startswith("R27:"):
+                out.append(ln)
+open(sys.argv[2], "w").write("\n".join(out) if out else "NO_R27_LINES")
+PY27REPORT
+    R27_REPORT="$(cat "${R27_REPORT_FILE}")"
+    rm -f "${R27_REPORT_FILE}" "${R27_REPORT_FILE}.raw"
+    echo "--- probe report (R27: lines) ---"
+    echo "${R27_REPORT}"
+    echo "--- end probe report ---"
+
+    # 27.1–27.4 verdicts (AA-1: capture-then-herestring) — on the REPORT
+    verdict_check27_ports "${R27_REPORT}"
+    verdict_check27_creds "${R27_REPORT}"
+    verdict_check27_families "${R27_REPORT}"
+    verdict_check27_io_uring "${R27_REPORT}"
 
     # POSITIVE CONTROL: same probes from server context (outside sandbox)
     PC_RAW="$(docker compose -f "${COMPOSE_FILE}" exec -T letta python3 - << 'PYPC'
