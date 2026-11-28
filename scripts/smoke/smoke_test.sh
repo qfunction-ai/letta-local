@@ -1460,15 +1460,14 @@ for k, v in results.items():
     print(f"R27:{k}={v}")
 """
 payload = {
-    "name": "rig_probe27",
     "source_code": source,
+    "source_type": "python",
     "json_schema": {
         "name": "rig_probe27",
         "description": "datastore isolation probe (requires network)",
         "parameters": {"type": "object", "properties": {}},
     },
-    "args": {},
-    "requires_network": True,
+    "tags": ["rig_probe27"],
 }
 with open(sys.argv[1], "w") as f:
     json.dump(payload, f)
@@ -1485,6 +1484,14 @@ PY27REQ
   head -c 300 "${R27_RESP}" 2>/dev/null
   echo
   R27_TOOL_ID="$(python3 -c "import json; print(json.load(open('${R27_RESP}')).get('id',''))" 2>/dev/null || true)"
+  # requires_network rides on the Tool's metadata_ (ToolUpdate accepts it)
+  if [ -n "${R27_TOOL_ID}" ]; then
+    command curl -s -X PATCH "${BASE}/v1/tools/${R27_TOOL_ID}" \
+      -H "Authorization: Bearer ${SMOKE_PASSWORD}" \
+      -H "Content-Type: application/json" \
+      -d '{"metadata_": {"requires_network": true}}' \
+      -w "%{http_code}" -o /dev/null
+  fi
 
   # Attach the tool to the probe agent and run it — the /v1/tools/run path
   # runs the tool without agent context, so the requires_network metadata
