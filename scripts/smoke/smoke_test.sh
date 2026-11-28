@@ -1550,12 +1550,8 @@ PY27MSG
       -H "User-Agent: letta-client/1.0" \
       -d @"${R27_MSG}")"
     rm -f "${R27_MSG}"
-    echo "--- R27_RAW (agent response) ---"
-    echo "${R27_RAW}" | head -c 2000
-    echo
-    echo "--- end R27_RAW ---"
-
-    # Extract the probe report: R27: lines ride the tool_return_message
+    # Extract the FULL probe result to a file (head-c truncation hides the
+    # stdout that follows stderr in the JSON — v14's report was invisible)
     R27_REPORT_FILE="$(mktemp)"
     echo "${R27_RAW}" > "${R27_REPORT_FILE}.raw"
     python3 - "${R27_REPORT_FILE}.raw" "${R27_REPORT_FILE}" << 'PY27REPORT'
@@ -1563,22 +1559,29 @@ import json, sys
 try:
     d = json.load(open(sys.argv[1]))
 except Exception:
-    open(sys.argv[2], "w").write("PARSE_FAIL")
+    open(sys.argv[2], "w").write("PARSE_FAIL: response unparseable")
     raise SystemExit
 out = []
 for m in d.get("messages", []):
     if m.get("message_type") == "tool_return_message":
         tr = m.get("tool_return") or ""
-        for ln in tr.split("\n"):
-            if ln.startswith("R27:"):
-                out.append(ln)
-open(sys.argv[2], "w").write("\n".join(out) if out else "NO_R27_LINES")
+        out.append(f"tool_return: {tr[:400]}")
+        st = m.get("stdout") or []
+        for ln in st:
+            out.append(f"stdout: {ln}")
+        se = m.get("stderr") or []
+        for ln in se:
+            out.append(f"stderr: {ln[:200]}")
+        status = m.get("status")
+        out.append(f"status: {status}")
+open(sys.argv[2], "w").write("\n".join(out) if out else "NO_TOOL_RETURN")
 PY27REPORT
-    R27_REPORT="$(cat "${R27_REPORT_FILE}")"
-    rm -f "${R27_REPORT_FILE}" "${R27_REPORT_FILE}.raw"
-    echo "--- probe report (R27: lines) ---"
-    echo "${R27_REPORT}"
-    echo "--- end probe report ---"
+    echo "--- probe result (tool_return + stdout + stderr + status) ---"
+    cat "${R27_REPORT_FILE}"
+    echo "--- end probe result ---"
+
+    # The R27: report lines (from stdout, if the tool completed)
+    R27_REPORT="$(grep "^R27:" "${R27_REPORT_FILE}" 2>/dev/null || echo NO_R27_LINES)"
 
     # 27.1–27.4 verdicts (AA-1: capture-then-herestring) — on the REPORT.
     # 27.1's enforcement layer is Landlock NETWORK rules; on kernels that
