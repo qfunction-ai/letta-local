@@ -194,7 +194,23 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                     temp_file.flush()
                     return temp_file.name
 
-            return await asyncio.to_thread(_write)
+            path = await asyncio.to_thread(_write)
+            # v0.16.41 (I25-3 continuation, root cause of the empty
+            # "Error executing function ... : " errors): mkstemp creates the
+            # script 0600 owned by the SERVER uid. The wrapper process runs
+            # as the SANDBOX uid (user=sandbox_uid on the spawn, S-2/U-5) and
+            # must read the script — without the chown, exec fails with
+            # EACCES ("can't open file ... Permission denied") whose strerror
+            # is empty through the friendly-error path. Same ownership model
+            # as the exec dir itself.
+            import pwd as _pwd
+
+            try:
+                _pw = _pwd.getpwnam("letta")
+                await asyncio.to_thread(os.chown, path, _pw.pw_uid, _pw.pw_gid)
+            except KeyError:
+                pass  # no sandbox user (macOS dev) — server reads it itself
+            return path
 
         temp_file_path = await write_temp_file(exec_dir, code)
 
