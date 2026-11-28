@@ -55,6 +55,26 @@ trap cleanup EXIT
 ok()  { echo "  PASS  $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL  $1"; FAIL=$((FAIL + 1)); }
 
+# --- verdict functions for check 27 (I23-4): real checks and check 0's
+# self-test call the SAME functions on captured output.
+verdict_check27_ports() {
+  grep -qE "R27:27\.1-pg=(REFUSED|DENIED)" <<< "$1" || bad "27.1 pg port NOT refused"
+  grep -qE "R27:27\.1-redis=(REFUSED|DENIED)" <<< "$1" || bad "27.1 redis port NOT refused"
+}
+verdict_check27_creds() {
+  grep -qE "R27:27\.2-[a-z_-]+=READ" <<< "$1" && bad "27.2 credential material READ from the sandbox"
+  grep -q "R27:27.2-pg_password=DENIED" <<< "$1" || bad "27.2 pg_password MISSING"
+  grep -q "R27:27.2-redis.conf=DENIED" <<< "$1" || bad "27.2 redis.conf MISSING"
+}
+verdict_check27_families() {
+  grep -q "R27:27.3-af-unix=DENIED" <<< "$1" || bad "27.3 AF_UNIX NOT denied"
+  grep -q "R27:27.3-udp=DENIED" <<< "$1" || bad "27.3 UDP NOT denied"
+  grep -q "R27:27.3-raw=DENIED" <<< "$1" || bad "27.3 RAW NOT denied"
+}
+verdict_check27_io_uring() {
+  grep -q "R27:27.4-io-uring=ret=-1 errno=1" <<< "$1" || bad "27.4 io_uring not denied as expected"
+}
+
 # ---------------------------------------------------------------------------
 # C2 (v0.16.41): VERDICT FUNCTIONS — the single implementation each
 # negative check uses. The real checks and the SMOKE_SELF_TEST=1 check-0
@@ -109,6 +129,12 @@ verdict_check26d() {
 }
 
 verdict_skip_is_failure() {
+  # check 27 verdict canaries (I23-4): planted CONNECTED / READ must emit
+  # FAIL verdicts from the REAL verdict functions.
+  verdict_check27_ports 'R27:27.1-pg=CONNECTED R27:27.1-redis=CONNECTED'
+  verdict_check27_creds 'R27:27.2-pg_password=READ:secret'
+  verdict_check27_families 'R27:27.3-af-unix=CREATED R27:27.3-udp=CREATED R27:27.3-raw=CREATED'
+
   # A-10 rule, executable: a SKIP must produce a FAIL verdict, which
   # makes the run exit non-zero. Runs the REAL verdict emission on a
   # planted SKIP.
@@ -1451,7 +1477,70 @@ PY27REQ
     -o "${R27_RESP}" \
     --data @"${R27_REQ}"
   R27_TOOL_ID="$(python3 -c "import json; print(json.load(open('${R27_RESP}')).get('id',''))" 2>/dev/null || true)"
-  ...
+
+  # Attach the tool to the probe agent and run it — the /v1/tools/run path
+  # runs the tool without agent context, so the requires_network metadata
+  # on the TOOL is what enables network in the sandbox.
+  R27_ATTACH="$(curl -s -X POST "${BASE}/v1/agents/${R27_AGENT_ID}/tools" \
+    -H "Authorization: Bearer ${SMOKE_PASSWORD}" \
+    -H "Content-Type: application/json" \
+    -d "{\"id\": \"${R27_TOOL_ID}\"}" \
+    -w "%{http_code}" -o /dev/null)"
+  if [ "${R27_ATTACH}" != "200" ] && [ "${R27_ATTACH}" != "201" ]; then
+    bad "27. could not attach probe tool to agent (HTTP ${R27_ATTACH})"
+    curl -s -X DELETE "${BASE}/v1/agents/${R27_AGENT_ID}" >/dev/null 2>&1
+    continue_or_skip=1
+  else
+    # Drive the probe: user message asking the agent to run the tool
+    R27_MSG="$(mktemp)"
+    python3 - "${R27_MSG}" "${R27_AGENT_ID}" << 'PY27MSG'
+import json, sys
+msg = [{"role": "user", "content": "Call rig_probe27 now. Print only its output."}]
+with open(sys.argv[1], "w") as f:
+    json.dump({"messages": msg}, f)
+PY27MSG
+    R27_RAW="$(command curl -s -X POST "${BASE}/v1/agents/${R27_AGENT_ID}/messages" \
+      -H "Authorization: Bearer ${SMOKE_PASSWORD}" \
+      -H "Content-Type: application/json" \
+      -H "User-Agent: letta-client/1.0" \
+      -d @"${R27_MSG}")"
+    rm -f "${R27_MSG}"
+
+    # 27.1–27.4 verdicts (AA-1: capture-then-herestring)
+    verdict_check27_ports "${R27_RAW}"
+    verdict_check27_creds "${R27_RAW}"
+    verdict_check27_families "${R27_RAW}"
+    verdict_check27_io_uring "${R27_RAW}"
+
+    # POSITIVE CONTROL: same probes from server context (outside sandbox)
+    PC_RAW="$(docker compose -f "${COMPOSE_FILE}" exec -T letta python3 - << 'PYPC'
+import socket, ctypes
+out = {}
+for name, args in [("TCP", (2, 1)), ("UNIX", (1, 1)), ("UDP", (2, 2)), ("RAW", (2, 3))]:
+    try:
+        s = socket.socket(*args); out[name] = "OK"; s.close()
+    except OSError as e:
+        out[name] = f"DENIED({e.errno})"
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+ret = libc.syscall(425, 4, 0)
+out["io-uring"] = f"ret={ret} errno={ctypes.get_errno()}"
+for k, v in out.items():
+    print(f"PC:{k}={v}")
+PYPC
+)" 2>/dev/null
+    echo "--- positive control (outside sandbox) ---"
+    echo "${PC_RAW}" | head -6
+    grep -q "PC:TCP=OK" <<< "${PC_RAW}" \
+      && ok "positive control: TCP allowed outside sandbox" \
+      || bad "positive control: TCP denied OUTSIDE sandbox (environment broken)"
+    grep -qE "PC:(UNIX|UDP|RAW)=" <<< "${PC_RAW}" \
+      && ok "positive control: sibling probes ran outside sandbox" \
+      || bad "positive control: sibling probes did not run outside sandbox"
+
+    # Cleanup
+    curl -s -X DELETE "${BASE}/v1/agents/${R27_AGENT_ID}" >/dev/null 2>&1 || true
+  fi
 fi
 
 echo
