@@ -172,7 +172,16 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
 
         try:
             _pw = _pwd.getpwnam("letta")
-            await asyncio.to_thread(os.chown, exec_dir, _pw.pw_uid, _pw.pw_gid)
+            # I27-1: no-follow — open with O_NOFOLLOW and fchown, so a
+            # symlink planted at exec_dir is refused (ELOOP) instead of
+            # chowning the target.
+            fd = await asyncio.to_thread(
+                os.open, exec_dir, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY
+            )
+            try:
+                await asyncio.to_thread(os.fchown, fd, _pw.pw_uid, _pw.pw_gid)
+            finally:
+                await asyncio.to_thread(os.close, fd)
         except KeyError as exc:
             raise RuntimeError(
                 "Sandbox uid unavailable (exec dir chown): the 'letta' user does not "
@@ -207,9 +216,18 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
 
             try:
                 _pw = _pwd.getpwnam("letta")
-                await asyncio.to_thread(os.chown, path, _pw.pw_uid, _pw.pw_gid)
             except KeyError:
-                pass  # no sandbox user (macOS dev) — server reads it itself
+                return path  # no sandbox user (macOS dev) — server reads it itself
+            # I27-1: no-follow fchown (same pattern as the exec dir) —
+            # mkstemp never returns a symlink, but the O_NOFOLLOW open makes
+            # the guarantee structural instead of incidental. ELOOP (a
+            # symlink at the script path) raises from the open and surfaces
+            # through the caller's error handling.
+            fd = await asyncio.to_thread(os.open, path, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                await asyncio.to_thread(os.fchown, fd, _pw.pw_uid, _pw.pw_gid)
+            finally:
+                await asyncio.to_thread(os.close, fd)
             return path
 
         temp_file_path = await write_temp_file(exec_dir, code)
