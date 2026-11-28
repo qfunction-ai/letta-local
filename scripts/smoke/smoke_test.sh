@@ -1396,97 +1396,79 @@ results = {}
 # Each risky probe runs in a SUBPROCESS so a seccomp SIGKILL
 # (SECCOMP_RET_KILL kills the process, not just the syscall) can't take
 # out the whole report — v13 showed the probe dying with an empty error.
+# v19 finding: subprocess-based probing EACCES's — the sandboxed tool
+# cannot spawn children (seccomp blocks fork/clone; block_fork=True), and
+# sys.executable may not carry FS_EXECUTE. In-process probing instead:
+# v18/v19 positive controls show this kernel returns EPERM errno 1 (not
+# SIGKILL) for blocked syscalls, so a try/except survives every probe.
 def probe(code):
     try:
-        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=10)
-        return r.stdout.strip() or f"CRASHED(rc={r.returncode})"
+        exec(code, {})
+        return None  # probe printed its own R27 line
     except Exception as e:
-        return f"ERROR:{e}"
+        return f"ERROR:{type(e).__name__}:{e}"
 
 # 27.1: datastore ports on loopback
 for port, name in ((5432, "pg"), (6379, "redis")):
-    code = (
-        "import socket\n"
-        "s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
-        "s.settimeout(3)\n"
-        "try:\n"
-        f"    s.connect((\"127.0.0.1\", {port}))\n"
-        "    print(\"CONNECTED\")\n"
-        "except ConnectionRefusedError:\n"
-        "    print(\"REFUSED\")\n"
-        "except OSError as e:\n"
-        "    print(f\"DENIED({e.errno})\")\n"
-    )
-    results[f"27.1-{name}"] = probe(code)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(3)
+        s.connect(("127.0.0.1", port))
+        results[f"27.1-{name}"] = "CONNECTED"
+        s.close()
+    except ConnectionRefusedError:
+        results[f"27.1-{name}"] = "REFUSED"
+    except OSError as e:
+        results[f"27.1-{name}"] = f"DENIED({e.errno})"
 
 # 27.1 positive (in-sandbox): internet 443 must be reachable
-code443 = (
-    "import socket\n"
-    "s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
-    "s.settimeout(5)\n"
-    "try:\n"
-    "    s.connect((\"1.1.1.1\", 443))\n"
-    "    print(\"CONNECTED\")\n"
-    "    s.close()\n"
-    "except OSError as e:\n"
-    "    print(f\"DENIED({e.errno})\")\n"
-)
-results["27.1-net-443"] = probe(code443)
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(5)
+    s.connect(("1.1.1.1", 443))
+    results["27.1-net-443"] = "CONNECTED"
+    s.close()
+except OSError as e:
+    results["27.1-net-443"] = f"DENIED({e.errno})"
 
 # 27.2: credential files (MISSING = check failure, no silent skip)
 for cp in ["/data/letta/pg_password", "/data/letta/redis.conf"]:
     key = f"27.2-{os.path.basename(cp)}"
-    code = (
-        "import os\n"
-        f"cp = {cp!r}\n"
-        "if not os.path.exists(cp):\n"
-        "    print(\"MISSING\")\n"
-        "else:\n"
-        "    try:\n"
-        "        with open(cp) as f:\n"
-        "            print(\"READ:\" + f.read(8))\n"
-        "    except PermissionError:\n"
-        "        print(\"DENIED\")\n"
-        "    except OSError as e:\n"
-        "        print(f\"DENIED({e.errno})\")\n"
-    )
-    results[key] = probe(code)
+    if not os.path.exists(cp):
+        results[key] = "MISSING"
+        continue
+    try:
+        with open(cp) as f:
+            results[key] = "READ:" + f.read(8)
+    except PermissionError:
+        results[key] = "DENIED"
+    except OSError as e:
+        results[key] = f"DENIED({e.errno})"
 
 # /proc/1/environ
-code_proc1 = (
-    "try:\n"
-    "    with open(\"/proc/1/environ\") as f:\n"
-    "        print(\"READ:\" + f.read(16))\n"
-    "except PermissionError:\n"
-    "    print(\"DENIED\")\n"
-    "except OSError as e:\n"
-    "    print(f\"DENIED({e.errno})\")\n"
-)
-results["27.2-proc1-environ"] = probe(code_proc1)
+try:
+    with open("/proc/1/environ") as f:
+        results["27.2-proc1-environ"] = "READ:" + f.read(16)
+except PermissionError:
+    results["27.2-proc1-environ"] = "DENIED"
+except OSError as e:
+    results["27.2-proc1-environ"] = f"DENIED({e.errno})"
 
 # 27.3: socket families (each isolated)
-for name, args in [("af-unix", "1, 1"), ("udp", "2, 2"), ("raw", "2, 3")]:
-    code = (
-        "import socket\n"
-        "try:\n"
-        f"    s = socket.socket({args})\n"
-        "    print(\"CREATED\")\n"
-        "    s.close()\n"
-        "except OSError as e:\n"
-        "    print(f\"DENIED({e.errno})\")\n"
-    )
-    results[f"27.3-{name}"] = probe(code)
+for name, af, st in [("af-unix", 1, 1), ("udp", 2, 2), ("raw", 2, 3)]:
+    try:
+        s = socket.socket(af, st)
+        results[f"27.3-{name}"] = "CREATED"
+        s.close()
+    except OSError as e:
+        results[f"27.3-{name}"] = f"DENIED({e.errno})"
 
 # 27.4: io_uring_setup via raw syscall
-code_uring = (
-    "import ctypes\n"
-    "libc = ctypes.CDLL(None, use_errno=True)\n"
-    "libc.syscall.restype = ctypes.c_long\n"
-    "ret = libc.syscall(425, 4, 0)\n"
-    "err = ctypes.get_errno()\n"
-    "print(f\"ret={ret} errno={err}\")\n"
-)
-results["27.4-io-uring"] = probe(code_uring)
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+ret = libc.syscall(425, 4, 0)
+err = ctypes.get_errno()
+results["27.4-io-uring"] = f"ret={ret} errno={err}"
 
 for k, v in results.items():
     print(f"R27:{k}={v}")
