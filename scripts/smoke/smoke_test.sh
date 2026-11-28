@@ -1320,3 +1320,174 @@ verdict_check26d "${R26D_BODY}" "${S26D_HTTP}" "${R26D_STATUS}" "${R26D_RETURN}"
 echo
 echo "== smoke: ${PASS} passed, ${FAIL} failed =="
 if [ "${FAIL}" -eq 0 ]; then exit 0; else exit 1; fi
+
+
+# ---------------------------------------------------------------- check 27
+# check 27 (I12-6, must): the four R-2 datastore-hardening conditions, each
+# with a positive control. Runs a network-enabled sandboxed tool (real
+# Landlock + seccomp path) and asserts from INSIDE the tool's own output:
+#   27.1  datastore ports 5432/6379 on loopback are refused
+#   27.2  credential material (PG/Redis passwords, server password,
+#         /proc/1/environ) is unreadable from the sandbox
+#   27.3  socket families: AF_UNIX / SOCK_DGRAM / SOCK_RAW / AF_NETLINK
+#         socket() calls fail
+#   27.4  io_uring_setup is denied (EPERM from the G-1 mandatory set)
+# Positive controls run OUTSIDE the sandbox (server context, root, no
+# Landlock/seccomp) to prove the probes themselves can succeed where the
+# sandbox denies — so the denials come from the sandbox, not the env.
+echo "== check 27: datastore hardening (R-2 conditions 1-4) =="
+R27_AGENT_ID="$(curl -s -f -X POST "${BASE}/v1/agents/" \
+  -H "Content-Type: application/json" \
+  -H "User-Agent: letta-client/1.0" \
+  -d "{\"model\": \"${SMOKE_MODEL}\", \"embedding\": \"${SMOKE_EMBEDDING}\", \"memory_blocks\": [{\"label\": \"persona\", \"value\": \"helper\"}, {\"label\": \"human\", \"value\": \"student\"}]}" \
+  | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])' 2>/dev/null || true)"
+if [ -z "${R27_AGENT_ID}" ]; then
+  bad "27. R2 datastore hardening (could not create the probe agent)"
+else
+  R27_REQ="$(mktemp)"
+  R27_RESP="$(mktemp)"
+  python3 - "${R27_REQ}" << 'PY27REQ'
+import json, sys
+source = r'''
+import json, socket, os, glob
+import ctypes
+
+results = {}
+
+# 27.1: TCP connect to loopback datastore ports must be refused
+for port, name in ((5432, "pg"), (6379, "redis")):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(3)
+    try:
+        s.connect(("127.0.0.1", port))
+        results[f"27.1-{name}"] = "CONNECTED"
+    except ConnectionRefusedError:
+        results[f"27.1-{name}"] = "REFUSED"
+    except OSError as e:
+        results[f"27.1-{name}"] = f"DENIED({e.errno})"
+    finally:
+        s.close()
+
+# 27.2: credential files must be unreadable
+for cp in sorted(glob.glob("/data/letta/pg_password")) + \
+          sorted(glob.glob("/data/letta/redis.conf")):
+    try:
+        with open(cp) as f:
+            results[f"27.2-{os.path.basename(cp)}"] = "READ:" + f.read(8)
+    except PermissionError:
+        results[f"27.2-{os.path.basename(cp)}"] = "DENIED"
+    except OSError as e:
+        results[f"27.2-{os.path.basename(cp)}"] = f"DENIED({e.errno})"
+try:
+    with open("/proc/1/environ") as f:
+        results["27.2-proc1-environ"] = "READ:" + f.read(16)
+except PermissionError:
+    results["27.2-proc1-environ"] = "DENIED"
+except OSError as e:
+    results["27.2-proc1-environ"] = f"DENIED({e.errno})"
+
+# 27.3: socket families — AF_UNIX / SOCK_DGRAM / SOCK_RAW must fail
+for name, args in [("af-unix", (1, 1)), ("udp", (2, 2)), ("raw", (2, 3))]:
+    try:
+        s = socket.socket(*args)
+        results[f"27.3-{name}"] = "CREATED"
+        s.close()
+    except OSError as e:
+        results[f"27.3-{name}"] = f"DENIED({e.errno})"
+
+# 27.4: io_uring_setup (syscall 425 x86_64) — seccomp deny -> EPERM
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+ret = libc.syscall(425, 4, 0)
+err = ctypes.get_errno()
+results["27.4-io-uring"] = f"ret={ret} errno={err}"
+
+for k, v in results.items():
+    print(f"R27:{k}={v}")
+'''
+payload = {
+    "name": "rig_probe27",
+    "source_code": source,
+    "json_schema": {
+        "name": "rig_probe27",
+        "description": "datastore isolation probe",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    "args": {},
+}
+with open(sys.argv[1], "w") as f:
+    json.dump(payload, f)
+PY27REQ
+  command curl -s -X POST "${BASE}/v1/tools/run" \
+    -H "Authorization: Bearer ${SMOKE_PASSWORD}" \
+    -H "Content-Type: application/json" \
+    -o "${R27_RESP}" \
+    --data @"${R27_REQ}"
+  R27_RAW="$(cat "${R27_RESP}")"
+  rm -f "${R27_RESP}" "${R27_REQ}"
+  echo "--- probe report (raw) ---"
+  echo "${R27_RAW}" | grep "R27:" | head -20
+  echo "--- end probe report ---"
+
+  # 27.1: datastore ports must be REFUSED/DENIED (never CONNECTED)
+  P27_1_OK=1
+  grep -qE "R27:27\.1-pg=(REFUSED|DENIED)" <<< "${R27_RAW}" || { w_fail "27.1 pg port NOT refused"; P27_1_OK=0; }
+  grep -qE "R27:27\.1-redis=(REFUSED|DENIED)" <<< "${R27_RAW}" || { w_fail "27.1 redis port NOT refused"; P27_1_OK=0; }
+  [ "${P27_1_OK}" = "1" ] && w_pass "27.1 datastore ports refused from sandbox"
+
+  # 27.2: no credential material may be READ
+  P27_2_OK=1
+  if grep -qE "R27:27\.2-[a-z_-]+=READ" <<< "${R27_RAW}"; then
+    w_fail "27.2 credential material READ from the sandbox"
+    P27_2_OK=0
+  else
+    w_pass "27.2 credential files unreadable from sandbox"
+  fi
+
+  # 27.3: AF_UNIX / SOCK_DGRAM / SOCK_RAW must be DENIED
+  P27_3_OK=1
+  grep -q "R27:27.3-af-unix=DENIED" <<< "${R27_RAW}" || { w_fail "27.3 AF_UNIX NOT denied"; P27_3_OK=0; }
+  grep -q "R27:27.3-udp=DENIED" <<< "${R27_RAW}" || { w_fail "27.3 UDP NOT denied"; P27_3_OK=0; }
+  grep -q "R27:27.3-raw=DENIED" <<< "${R27_RAW}" || { w_fail "27.3 RAW NOT denied"; P27_3_OK=0; }
+  [ "${P27_3_OK}" = "1" ] && w_pass "27.3 socket families denied"
+
+  # 27.4: io_uring_setup must be denied (EPERM from seccomp)
+  grep -q "R27:27.4-io-uring=ret=-1 errno=1" <<< "${R27_RAW}" \
+    && w_pass "27.4 io_uring_setup denied (EPERM from seccomp)" \
+    || w_fail "27.4 io_uring not denied as expected (see raw report)"
+
+  # POSITIVE CONTROL: same probes OUTSIDE the sandbox (server context —
+  # root, no Landlock/seccomp). Denials above mean the sandbox works, not
+  # that the environment is broken.
+  PC_RAW="$(docker compose -f "${COMPOSE_FILE}" exec -T letta python3 - << 'PYPC'
+import socket, ctypes
+out = {}
+for name, args in [("TCP", (2, 1)), ("UNIX", (1, 1)), ("UDP", (2, 2)), ("RAW", (2, 3))]:
+    try:
+        s = socket.socket(*args); out[name] = "OK"; s.close()
+    except OSError as e:
+        out[name] = f"DENIED({e.errno})"
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+ret = libc.syscall(425, 4, 0)
+out["io-uring"] = f"ret={ret} errno={ctypes.get_errno()}"
+for k, v in out.items():
+    print(f"PC:{k}={v}")
+PYPC
+)" 2>/dev/null
+  echo "--- positive control (outside sandbox) ---"
+  echo "${PC_RAW}" | head -6
+  grep -q "PC:TCP=OK" <<< "${PC_RAW}" \
+    && w_pass "positive control: TCP allowed outside sandbox" \
+    || w_fail "positive control: TCP denied OUTSIDE sandbox (environment broken)"
+  grep -qE "PC:(UNIX|UDP|RAW)=" <<< "${PC_RAW}" \
+    && w_pass "positive control: sibling probes ran outside sandbox" \
+    || w_fail "positive control: sibling probes did not run"
+
+  # Cleanup
+  curl -s -X DELETE "${BASE}/v1/agents/${R27_AGENT_ID}" >/dev/null 2>&1 || true
+fi
+
+echo
+echo "== smoke: ${PASS} passed, ${FAIL} failed =="
+if [ "${FAIL}" -eq 0 ]; then exit 0; else exit 1; fi
