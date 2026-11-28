@@ -44,12 +44,19 @@ fi
 # mkdtemp calls succeed. (The per-exec chown at runtime is still enforced
 # in landlock_sandbox.py — this fixes the parent dir the sandbox writes
 # into first.)
+# I29-3: logs/ stays root:root 0755 — sandboxed tools NEVER write the
+# server log (LETTA_SANDBOXED_TOOL_EXECUTION forces console-only logging;
+# a letta-owned logs/ with root appending into it is the symlink-race
+# pattern). agent_files/ IS letta-owned: file tools (running as the
+# sandbox uid) are its only writers.
 if [ -n "${LETTA_DIR:-}" ] && [ -d /data/letta ] && id letta >/dev/null 2>&1; then
     mkdir -p "${LETTA_DIR}/tool_execution_dir" 2>/dev/null || true
     mkdir -p "${LETTA_DIR}/logs" 2>/dev/null || true
+    mkdir -p "${LETTA_DIR}/agent_files" 2>/dev/null || true
     chown letta:letta "${LETTA_DIR}/tool_execution_dir" 2>/dev/null || true
-    chown letta:letta "${LETTA_DIR}/logs" 2>/dev/null || true
     chown -R letta:letta "${LETTA_DIR}/agent_files" 2>/dev/null || true
+    # logs/ deliberately NOT chowned (see comment above)
+    chmod 755 "${LETTA_DIR}/logs" 2>/dev/null || true
 fi
 
 # v0.16.40 (U-6, review P-2): the CONTAINER requires secure mode. A 0.0.0.0

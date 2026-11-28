@@ -302,7 +302,7 @@ if "--use-file-pg-uri" in sys.argv:
     try:
         with open(os.environ.get("LETTA_DIR", str(Path.home() / ".letta")) + "/pg_uri", "r") as f:
             default_pg_uri = f.read()
-            print(f"Read pg_uri from ~/.letta/pg_uri: {default_pg_uri}")
+            print("Read pg_uri from the pg_uri file (value not printed — may contain credentials)")
     except (FileNotFoundError, PermissionError, OSError):
         pass  # absent OR unreadable (sandbox uid: /root is EACCES) — treat as absent
 
