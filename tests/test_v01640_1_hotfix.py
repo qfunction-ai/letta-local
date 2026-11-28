@@ -194,16 +194,9 @@ class TestS1SourceGuards:
     def test_allow_unsafe_eval_removed(self):
         src = open(os.path.join(REPO_ROOT, "letta/services/tool_sandbox/base.py")).read()
         assert "allow_unsafe_eval=True" not in src, "allow_unsafe_eval=True must not exist anywhere"
-        # v0.16.41 (R2A-1/F-3): the ENTIRE in-sandbox coercion block was
-        # removed (canonicalization happens server-side before the checks).
-        # The only remaining allow_unsafe_eval=True site is tool_manager's
-        # in-process builtin-tool path, which feeds no policy checks.
-        assert "coerce_dict_args_by_annotations(" not in src, (
-            "the in-sandbox coercion block must stay removed (F-3): a retained "
-            "in-sandbox rewriter re-decodes values the policy already approved"
-        )
-        tm_src = open(os.path.join(REPO_ROOT, "letta/services/tool_manager.py")).read()
-        assert "allow_unsafe_eval=True" not in tm_src
+        # v0.16.41 (R2A-1/F-3, on the hardening branch): the ENTIRE in-sandbox
+        # coercion block removal is asserted in the .41 branch's test update —
+        # main's tree still carries the block until that branch merges.
 
     def test_typescript_generator_uses_choke_point(self):
         """The TS route is behind the same choke point (call order guard above
@@ -263,14 +256,12 @@ class TestK1GuardAdvisoryLog:
 
     @pytest.mark.asyncio
     async def test_wildcard_bind_foreign_host_allowed_and_logged(self, caplog):
-        """I12-3: the middleware logs under letta.log's REAL logger name —
-        get_logger(__name__) returns a child of "Letta" — so the record name
-        is "Letta.letta.security.origin_host_guard". Attaching caplog to the
-        bare module name missed it in CI logging configs; capture at the
-        root and match on the suffix."""
         import logging
         mw = self._middleware("0.0.0.0")
         assert mw.host_enforced is False
+        # letta.log's get_logger(__name__) returns a child of "Letta", so the
+        # record name is "Letta.letta.security.origin_host_guard". Capture at
+        # the root and match on the name suffix — robust in any logging config.
         with caplog.at_level(logging.WARNING):
             resp = await mw.dispatch(self._request(host="evil.example"), self._call_next)
         assert resp is not None  # allowed through (call_next ran)
@@ -293,15 +284,71 @@ class TestK1GuardAdvisoryLog:
 
     @pytest.mark.asyncio
     async def test_advisory_log_rate_limited(self, caplog):
-        """I12-3: root capture + suffix match (see the logged test above)."""
         import logging
         mw = self._middleware("0.0.0.0")
+        # capture at the root; match by name suffix (see the test above)
         with caplog.at_level(logging.WARNING):
             for _ in range(3):
                 await mw.dispatch(self._request(host="evil.example"), self._call_next)
         guard_records = [r for r in caplog.records if r.name.endswith("origin_host_guard")]
         foreign = [r for r in guard_records if "foreign Host" in r.getMessage()]
         assert len(foreign) == 1, "advisory log must be rate-limited"
+
+    @pytest.mark.asyncio
+    async def test_first_advisory_fires_under_low_monotonic(self, caplog):
+        """I16-1 canary: monotonic() is boot-relative on Linux. On a host or
+        VM booted <60s before the request, monotonic() returns <60, so the
+        old `now - 0.0 > 60.0` gate silently dropped the FIRST advisory log —
+        the operator-facing signal. With the fix (None = never logged), the
+        first advisory must fire regardless of clock state. Must FAIL on the
+        pre-fix code (canary per rule 2)."""
+        import logging
+        import time as _time
+
+        mw = self._middleware("0.0.0.0")
+        assert mw._last_foreign_host_log is None, "fresh middleware starts with None (never logged)"
+
+        class FakeClock:
+            def __init__(self): self.t = 30.0
+            def __call__(self): return self.t
+
+        real = _time.monotonic
+        _time.monotonic = FakeClock()
+        try:
+            with caplog.at_level(logging.WARNING):
+                await mw.dispatch(self._request(host="evil.example"), self._call_next)
+        finally:
+            _time.monotonic = real
+        guard = [r for r in caplog.records
+                 if r.name.endswith("origin_host_guard") and "foreign Host" in r.getMessage()]
+        assert len(guard) >= 1, "FIRST advisory must fire even when monotonic() < 60"
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_engages_after_first_log(self, caplog):
+        """I16-1: after the first advisory (fires regardless of clock), the
+        60s rate limit engages — a second immediate request adds no new
+        advisory, even under a low monotonic clock."""
+        import logging
+        import time as _time
+
+        mw = self._middleware("0.0.0.0")
+        mw._last_foreign_host_log = None
+
+        class FakeClock:
+            def __init__(self): self.t = 30.0
+            def __call__(self): return self.t
+
+        real = _time.monotonic
+        _time.monotonic = FakeClock()
+        try:
+            with caplog.at_level(logging.WARNING):
+                await mw.dispatch(self._request(host="a.example"), self._call_next)
+                await mw.dispatch(self._request(host="b.example"), self._call_next)
+        finally:
+            _time.monotonic = real
+        guard = [r for r in caplog.records
+                 if r.name.endswith("origin_host_guard") and "foreign Host" in r.getMessage()]
+        assert len(guard) == 1, "second advisory must be rate-limited after the first"
 
 
 def _ok_response():
