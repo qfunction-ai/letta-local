@@ -58,29 +58,51 @@ bad() { echo "  FAIL  $1"; FAIL=$((FAIL + 1)); }
 # --- verdict functions for check 27 (I23-4): real checks and check 0's
 # self-test call the SAME functions on captured output.
 verdict_check27_ports() {
+  # I31-1: the 443 CONNECT is REQUIRED — without it, a blanket-blocked
+  # sandbox would satisfy the REFUSED/DENIED checks and "selective" would
+  # be indistinguishable from "blanket".
   grep -qE "R27:27\.1-pg=(REFUSED|DENIED)" <<< "$1" || bad "27.1 pg port NOT refused"
   grep -qE "R27:27\.1-redis=(REFUSED|DENIED)" <<< "$1" || bad "27.1 redis port NOT refused"
+  grep -q "R27:27.1-net-443=CONNECTED" <<< "$1" || bad "27.1 allowed port 443 NOT reachable (network blanket-blocked?)"
+  grep -qE "R27:27\.1-net-8080=DENIED" <<< "$1" || bad "27.1 non-allowlisted port 8080 NOT denied"
+  # I31-2: emit a pass when all conditions hold
+  if grep -qE "R27:27\.1-pg=(REFUSED|DENIED)" <<< "$1" \
+     && grep -qE "R27:27\.1-redis=(REFUSED|DENIED)" <<< "$1" \
+     && grep -q "R27:27.1-net-443=CONNECTED" <<< "$1" \
+     && grep -qE "R27:27\.1-net-8080=DENIED" <<< "$1"; then
+    ok "27.1 ports selective: datastore+8080 denied, 443 connected"
+  fi
 }
 verdict_check27_creds() {
-  grep -qE "R27:27\.2-[a-z_-]+=READ" <<< "$1" && bad "27.2 credential material READ from the sandbox"
-  grep -q "R27:27.2-pg_password=DENIED" <<< "$1" || bad "27.2 pg_password MISSING"
-  grep -q "R27:27.2-redis.conf=DENIED" <<< "$1" || bad "27.2 redis.conf MISSING"
+  local __ok=1
+  grep -qE "R27:27\.2-[a-z_-]+=READ" <<< "$1" && { bad "27.2 credential material READ from the sandbox"; __ok=0; }
+  grep -q "R27:27.2-pg_password=DENIED" <<< "$1" || { bad "27.2 pg_password MISSING"; __ok=0; }
+  grep -q "R27:27.2-redis.conf=DENIED" <<< "$1" || { bad "27.2 redis.conf MISSING"; __ok=0; }
+  [ "$__ok" = "1" ] && ok "27.2 credentials unreadable from sandbox"
 }
 verdict_check27_families() {
-  grep -q "R27:27.3-af-unix=DENIED" <<< "$1" || bad "27.3 AF_UNIX NOT denied"
-  grep -q "R27:27.3-udp=DENIED" <<< "$1" || bad "27.3 UDP NOT denied"
-  grep -q "R27:27.3-raw=DENIED" <<< "$1" || bad "27.3 RAW NOT denied"
+  local __ok=1
+  grep -q "R27:27.3-af-unix=DENIED" <<< "$1" || { bad "27.3 AF_UNIX NOT denied"; __ok=0; }
+  grep -q "R27:27.3-udp=DENIED" <<< "$1" || { bad "27.3 UDP NOT denied"; __ok=0; }
+  grep -q "R27:27.3-raw=DENIED" <<< "$1" || { bad "27.3 RAW NOT denied"; __ok=0; }
+  [ "$__ok" = "1" ] && ok "27.3 socket families denied"
 }
 verdict_check27_io_uring() {
-  # I23-3: either reading is accepted, with the reading LABELLED:
-  #   errno=1  (EPERM)  — seccomp filter denial
-  #   errno=13 (EACCES) — Landlock/hardened path denial
-  # A ret=0 (success) is the only failure.
+  # I31-4: on a host whose kernel already blocks io_uring (outside errno=1),
+  # inside errno=1 would appear WITHOUT the seccomp filter — only errno=13
+  # proves the filter acted. Accept 1 inside ONLY if outside also failed,
+  # labeled "filter unproven on this host".
+  local outside_reading="${2:-}"
   if grep -q "R27:27.4-io-uring=ret=0" <<< "$1"; then
     bad "27.4 io_uring_setup SUCCEEDED (not denied)"
-  elif grep -qE "R27:27.4-io-uring=ret=-1 errno=(1|13)" <<< "$1"; then
-    READING=$(grep -oE "errno=[0-9]+" <<< "$1" | head -1)
-    ok "27.4 io_uring_setup denied (${READING})"
+  elif grep -qE "R27:27.4-io-uring=ret=-1 errno=13" <<< "$1"; then
+    ok "27.4 io_uring_setup denied (errno=13 — seccomp filter enforced)"
+  elif grep -qE "R27:27.4-io-uring=ret=-1 errno=1" <<< "$1"; then
+    if [ "${outside_reading}" = "1" ]; then
+      bad "27.4 io_uring denied inside (errno=1) but kernel already blocks it — filter UNPROVEN on this host"
+    else
+      ok "27.4 io_uring_setup denied (errno=1 — seccomp filter)"
+    fi
   else
     bad "27.4 io_uring unparseable/no reading"
   fi
@@ -140,9 +162,11 @@ verdict_check26d() {
 }
 
 verdict_skip_is_failure() {
-  # check 27 verdict canaries (I23-4): planted CONNECTED / READ must emit
-  # FAIL verdicts from the REAL verdict functions.
+  # check 27 verdict canaries (I23-4/I31-1): planted hostile reports must
+  # emit FAIL verdicts from the REAL verdict functions.
   verdict_check27_ports 'R27:27.1-pg=CONNECTED R27:27.1-redis=CONNECTED'
+  # I31-1 canary: blanket-blocked report (everything DENIED incl 443) must FAIL
+  verdict_check27_ports 'R27:27.1-pg=DENIED(13) R27:27.1-redis=DENIED(13) R27:27.1-net-443=DENIED(13) R27:27.1-net-8080=DENIED(13)'
   verdict_check27_creds 'R27:27.2-pg_password=READ:secret'
   verdict_check27_families 'R27:27.3-af-unix=CREATED R27:27.3-udp=CREATED R27:27.3-raw=CREATED'
 
@@ -1442,6 +1466,18 @@ try:
 except OSError as e:
     results["27.1-net-443"] = f"DENIED({e.errno})"
 
+# I31-1: 8080 — a non-allowlisted non-datastore port must also be denied
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(3)
+    s.connect(("127.0.0.1", 8080))
+    results["27.1-net-8080"] = "CONNECTED"
+    s.close()
+except ConnectionRefusedError:
+    results["27.1-net-8080"] = "REFUSED"
+except OSError as e:
+    results["27.1-net-8080"] = f"DENIED({e.errno})"
+
 # 27.2: credential files (MISSING = check failure, no silent skip)
 for cp in ["/data/letta/pg_password", "/data/letta/redis.conf"]:
     key = f"27.2-{os.path.basename(cp)}"
@@ -1597,7 +1633,7 @@ PY27REPORT
     fi
     verdict_check27_creds "${R27_REPORT}"
     verdict_check27_families "${R27_REPORT}"
-    verdict_check27_io_uring "${R27_REPORT}"
+    verdict_check27_io_uring "${R27_REPORT}" "$(grep -oE 'PC:io-uring=ret=-1 errno=[0-9]+' <<< "${PC_RAW}" | grep -oE 'errno=[0-9]+' | cut -d= -f2)"
 
     # POSITIVE CONTROL: same probes from server context (outside sandbox)
     PC_RAW="$(docker compose -f "${COMPOSE_FILE}" exec -T letta python3 - << 'PYPC'
