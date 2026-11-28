@@ -38,6 +38,17 @@ if [ -n "${LETTA_DIR:-}" ]; then
     mkdir -p "${LETTA_DIR}" 2>/dev/null || true
 fi
 
+# v0.16.41 (I25-2/I25-3): the sandbox uid must be able to create its
+# per-execution dirs under ${LETTA_DIR}/tool_execution_dir. The server
+# creates the parent as root; chown it to the letta user so the sandbox's
+# mkdtemp calls succeed. (The per-exec chown at runtime is still enforced
+# in landlock_sandbox.py — this fixes the parent dir the sandbox writes
+# into first.)
+if [ -n "${LETTA_DIR:-}" ] && [ -d /data/letta ] && id letta >/dev/null 2>&1; then
+    mkdir -p "${LETTA_DIR}/tool_execution_dir" 2>/dev/null || true
+    chown letta:letta "${LETTA_DIR}/tool_execution_dir" 2>/dev/null || true
+fi
+
 # v0.16.40 (U-6, review P-2): the CONTAINER requires secure mode. A 0.0.0.0
 # bind in a container is what makes the port reachable from outside it, so
 # insecure mode in a container is exactly the case U-6 exists to prevent.
