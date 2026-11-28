@@ -161,11 +161,13 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
         # error instead. Cached per process: /root's mode doesn't change
         # while the server runs, and the probe spawns setpriv+cat — once
         # is enough (one process spawn per SERVER lifetime, not per call).
-        await self._ensure_traversal(exec_dir)
-        # v0.16.41 (S-2/U-5): the exec dir is the sandbox subprocess's
-        # HOME/TMPDIR — it must be owned by the sandbox uid. A failure here
-        # is a REFUSAL, not a warning: the subprocess would run as uid 1000
-        # unable to write its own working dir.
+        # v0.16.41 (I25-3 root cause, found by the 4.95 rig failure): the
+        # chown MUST precede the traversal probe. The probe setpriv's to the
+        # sandbox uid and cats a file it creates in exec_dir — if the dir is
+        # still root-owned (mkdtemp's 0700 default), the probe fails on EVERY
+        # call, raising the "old /root/.letta volume" error even when the
+        # volume is fine. The class-level cache made the first call's
+        # failure look like a persistent misconfiguration.
         import pwd as _pwd
 
         try:
@@ -182,6 +184,8 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                 f"Cannot chown exec dir {exec_dir} to the sandbox uid (running "
                 "unprivileged?). Refusing to run the tool with an unwritable exec dir."
             ) from exc
+
+        await self._ensure_traversal(exec_dir)
 
         async def write_temp_file(dir, content):
             def _write():
