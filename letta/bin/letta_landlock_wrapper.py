@@ -57,10 +57,11 @@ def _probe_net_rules(abi, NET_BIND_TCP, NET_CONNECT_TCP, landlock_create_ruleset
     # Create a throwaway ruleset to test network rule support
     test_fd = landlock_create_ruleset(0, NET_BIND_TCP | NET_CONNECT_TCP, 0)
     try:
-        if config.get("allow_tcp_connect"):
-            landlock_add_net_rule(test_fd, NET_CONNECT_TCP)
+        # I30-1: probe with a REAL port (443). Port 0 is a literal port in
+        # Landlock, not a wildcard — a port-0 probe tested nothing useful.
+        landlock_add_net_rule(test_fd, NET_CONNECT_TCP, port=443)
         if config.get("allow_tcp_bind"):
-            landlock_add_net_rule(test_fd, NET_BIND_TCP)
+            landlock_add_net_rule(test_fd, NET_BIND_TCP, port=443)
         return True
     except OSError:
         return False
@@ -208,12 +209,28 @@ def apply_landlock(config):
         except (FileNotFoundError, OSError):
             pass  # /proc/self should always exist, but be safe
 
-        # Add network rules if kernel actually supports them
+        # Add network rules if kernel actually supports them.
+        # I30-1 (I29-1 follow-up): with the struct fix, a rule's port is
+        # LITERAL — the old port-less calls allowed ONLY port 0. Connect is
+        # granted per allowed port from allowed_tcp_connect_ports
+        # (default [80, 443]); each rule is one (right, port) pair.
         if net_supported:
             if config.get("allow_tcp_connect"):
-                landlock_add_net_rule(ruleset_fd, NET_CONNECT_TCP)
+                ports = config.get("allowed_tcp_connect_ports")
+                if not ports:
+                    ports = [80, 443]
+                for _p in ports:
+                    landlock_add_net_rule(ruleset_fd, NET_CONNECT_TCP, port=_p)
+            # Bind: network tools don't need it (they connect out). Handle
+            # the right in the ruleset (so it's DENIED, not default-allowed)
+            # and add NO bind rule — bind is denied entirely. (I30-1 item 2.)
             if config.get("allow_tcp_bind"):
-                landlock_add_net_rule(ruleset_fd, NET_BIND_TCP)
+                # Only grant bind when explicitly requested AND only on the
+                # specific ports requested; otherwise the right stays handled
+                # with no rule = denied.
+                ports = config.get("allowed_tcp_bind_ports") or []
+                for _p in ports:
+                    landlock_add_net_rule(ruleset_fd, NET_BIND_TCP, port=_p)
 
         # Apply the sandbox — IRREVERSIBLE
         landlock_restrict_self(ruleset_fd)
