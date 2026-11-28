@@ -257,10 +257,14 @@ class TestK1GuardAdvisoryLog:
         import logging
         mw = self._middleware("0.0.0.0")
         assert mw.host_enforced is False
-        with caplog.at_level(logging.WARNING, logger="letta.security.origin_host_guard"):
+        # letta.log's get_logger(__name__) returns a child of "Letta", so the
+        # record name is "Letta.letta.security.origin_host_guard". Capture at
+        # the root and match on the name suffix — robust in any logging config.
+        with caplog.at_level(logging.WARNING):
             resp = await mw.dispatch(self._request(host="evil.example"), self._call_next)
         assert resp is not None  # allowed through (call_next ran)
-        assert any("foreign Host" in r.getMessage() for r in caplog.records), \
+        guard_records = [r for r in caplog.records if r.name.endswith("origin_host_guard")]
+        assert any("foreign Host" in r.getMessage() for r in guard_records), \
             "the advisory log line the docstring promises must fire"
 
     @pytest.mark.asyncio
@@ -280,10 +284,12 @@ class TestK1GuardAdvisoryLog:
     async def test_advisory_log_rate_limited(self, caplog):
         import logging
         mw = self._middleware("0.0.0.0")
-        with caplog.at_level(logging.WARNING, logger="letta.security.origin_host_guard"):
+        # capture at the root; match by name suffix (see the test above)
+        with caplog.at_level(logging.WARNING):
             for _ in range(3):
                 await mw.dispatch(self._request(host="evil.example"), self._call_next)
-        foreign = [r for r in caplog.records if "foreign Host" in r.getMessage()]
+        guard_records = [r for r in caplog.records if r.name.endswith("origin_host_guard")]
+        foreign = [r for r in guard_records if "foreign Host" in r.getMessage()]
         assert len(foreign) == 1, "advisory log must be rate-limited"
 
 
