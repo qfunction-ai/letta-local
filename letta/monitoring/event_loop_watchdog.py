@@ -46,7 +46,9 @@ class EventLoopWatchdog:
         self._heartbeat_lock = threading.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._monitoring = False
-        self._last_dump_time = 0.0  # Cooldown between task dumps
+        # v0.16.41 (I16-1 sibling): None = never dumped — 0.0 suppressed the
+        # first dump on hosts booted <60s ago (monotonic is boot-relative)
+        self._last_dump_time = None  # Cooldown between task dumps
         self._saturation_start: Optional[float] = None  # Track when saturation began
         self._degraded_since: Optional[float] = None  # Track when we entered sustained overload
         self._recovery_since: Optional[float] = None  # Track when we started recovering
@@ -171,7 +173,7 @@ class EventLoopWatchdog:
                     )
 
                     # Only dump stack traces with 60s cooldown to avoid spam
-                    if (now - self._last_dump_time) > 60.0:
+                    if self._last_dump_time is None or (now - self._last_dump_time) > 60.0:
                         self._dump_asyncio_tasks()  # Dump async tasks
                         self._dump_state()  # Dump thread stacks
                         self._last_dump_time = now
