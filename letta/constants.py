@@ -2,7 +2,10 @@ import os
 import re
 from logging import CRITICAL, DEBUG, ERROR, INFO, NOTSET, WARN, WARNING
 
-LETTA_DIR = os.path.join(os.path.expanduser("~"), ".letta")
+# v0.16.41 (S-2/F-5): honor the LETTA_DIR env var so the container can
+# relocate the data dir to /data/letta (the sandbox uid cannot traverse
+# /root). Falls back to ~/.letta for non-container environments.
+LETTA_DIR = os.environ.get("LETTA_DIR") or os.path.join(os.path.expanduser("~"), ".letta")
 LETTA_TOOL_EXECUTION_DIR = os.path.join(LETTA_DIR, "tool_execution_dir")
 
 DEFAULT_TIMEZONE = "UTC"
