@@ -15,9 +15,33 @@
 #   MODE=exit bash scripts/witness/v041_pg_upgrade.sh     # X-3 exit branch
 set -uo pipefail
 MODE="${MODE:-happy}"
+CANARY="${CANARY:-}"
 IMG="${WITNESS_IMAGE:-letta-local:v041-dev}"
 NET=w041net
 FAIL=0
+
+# I12-2 canaries: prove the asserts can fail.
+#   CANARY=restart: the restart-mode checks run against an UNMODIFIED image
+#   (the reload is NOT broken) — the restart-branch-line assert must FAIL.
+#   CANARY=exit: the container exits early for an UNRELATED reason (entry
+#   replaced) — the named-ERROR assert must FAIL (an unrelated crash must
+#   not pass the exit-mode verdict).
+if [ "$CANARY" = "restart" ]; then
+  MODE=restart
+  # no derived image: run the unmodified dev image with restart-mode checks
+  IMG=w041-canary-restart
+  docker build -t $IMG -f - . <<'DOCKERFILE'
+FROM letta-local:v041-dev
+DOCKERFILE
+elif [ "$CANARY" = "exit" ]; then
+  MODE=exit
+  # exit early with a message that has NO named ERROR line (unrelated crash)
+  IMG=w041-canary-exit
+  docker build -t $IMG -f - . <<'DOCKERFILE'
+FROM letta-local:v041-dev
+ENTRYPOINT ["sh", "-c", "echo 'unrelated early exit (canary)' && exit 7"]
+DOCKERFILE
+fi
 
 w_fail() { echo "  CHECK FAILED: $1"; FAIL=$((FAIL + 1)); }
 w_pass() { echo "  PASS: $1"; }
@@ -29,7 +53,7 @@ cleanup() {
   docker volume rm w041-pgdata w041-letta-data >/dev/null 2>&1 || true
   # AA-2 nit: remove the derived witness images too (leaving them was
   # cluttering the host with multi-GB layers).
-  docker image rm w041-brokenreload w041-brokenrestart >/dev/null 2>&1 || true
+  docker image rm w041-brokenreload w041-brokenrestart w041-canary-restart w041-canary-exit >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 # Pre-clean stale containers from prior runs (a leftover w-new blocks the
@@ -50,7 +74,7 @@ docker rm -f w-old >/dev/null
 # Branch modes build derived images with witness-only seds (never committed
 # as test knobs). Each gains a TOOK guard — a stale sed pattern silently
 # no-ops and the mode boots the normal path (the exit-mode lesson).
-if [ "$MODE" = "restart" ]; then
+if [ "$MODE" = "restart" ] && [ "$CANARY" != "restart" ]; then
   echo "=== MODE=restart: swapping the reload query for SELECT 1/0 (broken reload) ==="
   IMG=w041-brokenreload
   docker build -t $IMG -f - . <<'DOCKERFILE'
@@ -60,7 +84,7 @@ DOCKERFILE
   docker run --rm $IMG sh -c 'grep -q "SELECT 1/0" /app/letta/server/startup.sh' \
     || { echo "SED DID NOT APPLY (stale pattern)"; exit 1; }
   w_pass "took-guard: the broken-reload sed is in the image"
-elif [ "$MODE" = "exit" ]; then
+elif [ "$MODE" = "exit" ] && [ "$CANARY" != "exit" ]; then
   echo "=== MODE=exit: broken reload AND broken restart (the composition is REQUIRED) ==="
   IMG=w041-brokenrestart
   docker build -t $IMG -f - . <<'DOCKERFILE'
@@ -172,15 +196,16 @@ fi
 # caught by the restructured script's first run (the old script printed the
 # same race as a line and ignored it).
 for i in $(seq 1 90); do
-  if docker logs w-new 2>&1 | grep -q "Application startup complete"; then break; fi
+  LOGS_NOW=$(docker logs w-new 2>&1)
+  grep -q "Application startup complete" <<< "$LOGS_NOW" && break
   STATE=$(docker inspect -f '{{.State.Status}}' w-new 2>/dev/null)
   [ "$STATE" = "exited" ] && break
   sleep 1
 done
 STARTUPS=$(docker logs w-new 2>&1 | grep -c "Application startup complete")
 [ "$STARTUPS" -ge 1 ] && w_pass "server up" || w_fail "SERVER DOWN"
-# (no pipe-grep verdict: grep -c has no early-exit problem; the wait-loop
-# pipe above breaks on match and its exit status is discarded, not tested)
+# (AA-1 form throughout: capture, then herestring. The wait loop's own grep
+# is also capture-form; grep -c for the count has no early-exit problem.)
 
 if [ "$FAIL" -eq 0 ]; then
   echo "WITNESS MODE=${MODE}: PASS"

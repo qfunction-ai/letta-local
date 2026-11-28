@@ -106,3 +106,54 @@ $VAR (quoted heredoc); the exit-code inspect races container removal
 + password `letta`), boots the .41 startup path, asserts convergence,
 migration with the generated password, the seeded row surviving, the old
 password rejected. Runnable from the repo (the Z-2 modes above).
+
+
+## I12-2: witness-script canaries (rule 2)
+
+Both canaries run through the same witness script (the CANARY env var selects
+them; the took-guards are bypassed by design because the canary images are
+unbroken in the relevant way):
+
+- **Restart-mode canary** (CANARY=restart — the UNMODIFIED image, no
+  `SELECT 1/0` swap; the reload succeeds so the restart branch never runs):
+  ```
+  CHECK FAILED: restart branch line MISSING (stale sed would boot the normal path)
+  CHECK FAILED: no postgres READY line after the restart marker (Z-1 broken?)
+  WITNESS MODE=restart: FAIL (2 checks failed)
+  ```
+  Exactly the two restart-mode asserts, failing for the right reason.
+
+- **Exit-mode canary** (CANARY=exit — the container exits early for an
+  UNRELATED reason: entry replaced with `echo 'unrelated early exit' && exit 7`):
+  ```
+  CHECK FAILED: the named ERROR line is MISSING (an unrelated crash must not pass)
+  CHECK FAILED: refuse line missing
+  X-3 EXIT BRANCH: FAIL (2 checks)
+  ```
+  The named-ERROR requirement works: an unrelated crash cannot pass the exit
+  verdict.
+
+Real modes re-verified after the canary edits: restart PASS, exit PASS,
+happy PASS (the canary paths don't disturb the genuine paths).
+
+## I12-5: known issues surfaced by the hosted CI runs (product findings)
+
+Recorded for tracking; each has a proposed release:
+
+1. **Postgres autogenerate drift** — the models and migrations disagree
+   (`alembic check` reports new upgrade operations: index/unique-constraint
+   differences on blocks_tags, provider_trace_metadata, tool_call_policies).
+   This is the migration-agreement gap the .42 plan's B1 item (H-4's
+   first-diff-allowlist pattern) exists to close. **Proposed: v0.16.42**
+   (data safety, with the B1 check and the A1 upgrade fixture).
+2. **SQLite migration env imports asyncpg** — the alembic env imports
+   asyncpg unconditionally, but the sqlite extra doesn't provide it; SQLite
+   users running migrations hit ModuleNotFoundError. A packaging defect for
+   the sqlite path. **Proposed: v0.16.41.1 or v0.16.42** (with the R2A-5
+   SQLite decision in .42 — either the import gets conditional or SQLite
+   migration support is declared unsupported).
+3. **~189 lint findings on main** — surfaced when core-lint first actually
+   ran on hosted runners (it had queued forever on nonexistent self-hosted
+   runners). A dedicated cleanup PR (ruff check+format over the tree), after
+   which lint returns as a required check in tests.yml. **Proposed: its own
+   cleanup PR, then re-enable as required check.**
