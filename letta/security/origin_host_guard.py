@@ -61,7 +61,12 @@ class OriginHostGuardMiddleware(BaseHTTPMiddleware):
             self.allowed_hosts |= {h.strip().lower() for h in extra_hosts.split(",") if h.strip()}
         # wildcard bind: Host checking is advisory (log only)
         self.host_enforced = bind_host.strip().lower() not in ("0.0.0.0", "*", "::")
-        self._last_foreign_host_log = 0.0  # rate limit for the advisory log
+        # v0.16.41 (interim-16 I16-1): init to None — 0.0 made the FIRST
+        # advisory log silently drop whenever monotonic() (boot-relative on
+        # Linux) was under 60s at request time: a freshly booted host or VM
+        # suppressed the operator-facing signal entirely. None means "never
+        # logged" and always logs the first time.
+        self._last_foreign_host_log = None  # rate limit (None = never logged; see I16-1)
         # v0.16.40.1 (T-2): the middleware is constructed at app import
         # time; `letta server --host` (recorded by start_server into the
         # environment) may arrive AFTER construction. Re-read HOST once on
@@ -96,7 +101,7 @@ class OriginHostGuardMiddleware(BaseHTTPMiddleware):
             host_name = _host_only(host.strip().lower())
             if host_name not in self.allowed_hosts and host.strip().lower() not in self.allowed_hosts:
                 now = time.monotonic()
-                if now - self._last_foreign_host_log > 60.0:
+                if self._last_foreign_host_log is None or now - self._last_foreign_host_log > 60.0:
                     self._last_foreign_host_log = now
                     logger.warning(
                         "Advisory (allowed, wildcard bind): request with foreign Host header "
