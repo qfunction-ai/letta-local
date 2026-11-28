@@ -418,6 +418,7 @@ print(" ".join(m.get("message_type", "?") for m in d.get("messages", [])))' 2>/d
       -H "Content-Type: application/json" \
       -H "User-Agent: letta-client/1.0" \
       -d '{"messages": [{"role": "user", "content": "Use file_write to save the text smoke-check to notes.txt."}], "stream": false}' || true)"
+    echo "${R495}" > /tmp/r495_response.json
     R495_STATUS="$(echo "${R495}" | python3 -c '
 import sys, json
 try:
@@ -431,7 +432,17 @@ print("no_file_write_return")' 2>/dev/null || echo PARSE_ERROR)"
     if [ "${R495_STATUS}" = "success" ]; then
       ok "4.95 file tools under Landlock (write staged + promoted)"
     else
-      bad "4.95 file tools under Landlock (file_write status: ${R495_STATUS})"
+      R495_ERR="$(echo "${R495}" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("unparseable"); raise SystemExit
+for m in d.get("messages", []):
+    if m.get("message_type") == "tool_return_message":
+        print((m.get("tool_return") or "")[:250]); raise SystemExit
+print("no tool_return found")' 2>/dev/null || echo "no tool_return")"
+      bad "4.95 file tools under Landlock (file_write status: ${R495_STATUS}; tool_return: ${R495_ERR})"
     fi
     curl -s -o /dev/null -X DELETE "${BASE}/v1/agents/${FILE_AGENT_ID}" -H "User-Agent: letta-client/1.0"
   else
