@@ -157,3 +157,32 @@ Recorded for tracking; each has a proposed release:
    runners). A dedicated cleanup PR (ruff check+format over the tree), after
    which lint returns as a required check in tests.yml. **Proposed: its own
    cleanup PR, then re-enable as required check.**
+
+
+## I26-2: agent_files + memfs on a .40.1 install (upgrade question)
+
+**Facts (Verified on the published ghcr.io/qfunction-ai/letta-local:0.16.40.1 image):**
+- .40.1 code paths: `os.path.expanduser("~/.letta/agent_files")` and
+  `os.path.expanduser("~/.letta/memfs")` (tool_sandbox/base.py:146/:706,
+  memory_repo/memfs_client_base.py:33, storage/local.py:42). With
+  HOME=/root those resolve to /root/.letta/agent_files and
+  /root/.letta/memfs.
+- Volume-mounted deployments (.40.1 smoke rig, and any compose following
+  it): the volume was mounted AT /root/.letta — so agent_files and memfs
+  WERE on the volume.
+
+**Conclusion: no pre-existing data loss** for volume-mounted .40.1
+deployments. (Non-volume deployments lose ALL state on recreate —
+pre-existing, unrelated to .41.)
+
+**Upgrade path for .41:** the paths now resolve under /data/letta. The
+one-time migration is the operator's volume-mount change, which the
+startup banner documents with exact commands (docker compose down; cp -a
+from the old volume to the new; re-up). Nothing is auto-copied: /data/letta
+and /root/.letta on an upgraded host are distinct mounts, and silently
+copying credential-adjacent state across mounts is a bigger risk than an
+explicit operator step. The consumer notice must call this out.
+
+**Recording:** this section is the evidence-doc record. The consumer
+notice for .41 gains a "volume mount path changed" entry pointing at the
+startup banner's commands.
