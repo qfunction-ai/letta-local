@@ -1354,12 +1354,6 @@ R26D_RETURN="$(python3 -c "import json,sys; d=json.load(sys.stdin); print((d.get
 # function the self-test drives on planted payloads.
 verdict_check26d "${R26D_BODY}" "${S26D_HTTP}" "${R26D_STATUS}" "${R26D_RETURN}"
 
-echo
-echo "== smoke: ${PASS} passed, ${FAIL} failed =="
-if [ "${FAIL}" -eq 0 ]; then exit 0; else exit 1; fi
-
-
-
 # ---------------------------------------------------------------- check 27
 # check 27 (I12-6, must; I23 fixes): the four R-2 datastore-hardening
 # conditions, verified INSIDE a requires_network sandboxed tool (real
@@ -1553,6 +1547,7 @@ PYPC
     curl -s -X DELETE "${BASE}/v1/agents/${R27_AGENT_ID}" >/dev/null 2>&1 || true
   fi
 fi
+
 
 echo
 echo "== smoke: ${PASS} passed, ${FAIL} failed =="
