@@ -153,11 +153,9 @@ def apply_landlock(config):
             "requests allow_tcp_connect="
             f"{bool(config.get('allow_tcp_connect'))} allow_tcp_bind="
             f"{bool(config.get('allow_tcp_bind'))}. "
-            "Resolution: run the container on a kernel with Landlock ABI >= 4 "
-            "network-rule support (Linux 6.7+ with CONFIG_SECURITY_LANDLOCK "
-            "network patches, e.g. mainline kernels; Docker Desktop's linuxkit "
-            "kernel does NOT qualify). Alternatively mark the tool as NOT "
-            "requires_network if it truly needs no network.",
+            "Resolution: run the container on a kernel that accepts Landlock "
+            "net-port rules, or mark the tool as NOT requires_network if it "
+            "truly needs no network.",
             file=sys.stderr,
         )
         # Parser-compatible tail: parse_stderr_error_msg matches
@@ -167,9 +165,7 @@ def apply_landlock(config):
         print(
             "LandlockNetworkUnsupportedError: kernel cannot enforce Landlock "
             "network rules; refusing network-enabled tool (fail-closed). "
-            "Upgrade the host kernel to one with Landlock net-rule support "
-            "(Linux 6.7+ mainline; linuxkit/Docker Desktop kernels do not "
-            "qualify).",
+            "Resolution: use a kernel that accepts Landlock net-port rules.",
             file=sys.stderr,
         )
         sys.exit(1)

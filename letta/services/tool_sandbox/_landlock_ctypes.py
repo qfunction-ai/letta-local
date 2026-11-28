@@ -195,17 +195,26 @@ def landlock_add_net_rule(ruleset_fd, allowed_access, port=0):
     Args:
         ruleset_fd: File descriptor from landlock_create_ruleset.
         allowed_access: Bitmask of network access rights (NET_BIND_TCP or NET_CONNECT_TCP).
-        port: Port number (0 means any port).
+        port: Concrete TCP port number (0-65535). NOTE: port 0 is a real
+            port number in Landlock, NOT a wildcard — a rule for port 0
+            matches traffic on port 0 only. To allow "any port", add rules
+            for each port explicitly (or handle the net right with no
+            rule, which denies all — the deny-by-default design).
 
     Raises:
         OSError: If the rule cannot be added.
     """
     _, SYS_add, _ = _get_syscall_numbers()
-    # struct landlock_net_port_attr {
-    #   __u64 port;
-    #   __u64 allowed_access;
-    # }
-    attr = struct.pack("QQ", port, allowed_access)
+    # struct landlock_net_port_attr (I29-1/I28-1): the kernel layout is
+    #   __u64 allowed_access;  <- FIRST
+    #   __u64 port;            <- SECOND
+    # (include/uapi/linux/landlock.h). The previous pack was reversed, so
+    # every net rule was rejected (EINVAL) and the wrapper degraded to
+    # net-unrestricted; I28-2's fail-closed then refused ALL network tools
+    # on every host.
+    # Note on port: port 0 is a real port number, NOT a wildcard. Callers
+    # probing rule support should pass a concrete port.
+    attr = struct.pack("QQ", allowed_access, port)
     ret = _libc.syscall(SYS_add, ruleset_fd, LANDLOCK_RULE_NET_PORT, attr, 0)
     if ret != 0:
         raise OSError(ctypes.get_errno(), "landlock_add_rule (net) failed")
