@@ -10,6 +10,8 @@ HTTP service instead.
 
 import hashlib
 import os
+
+from letta.constants import LETTA_DIR as LETTA_DIR_CONST
 import uuid
 from typing import List, Optional
 
@@ -30,7 +32,7 @@ logger = get_logger(__name__)
 # File paths within the memory repository (blocks stored at repo root as {label}.md)
 
 # Default local storage path
-DEFAULT_LOCAL_PATH = os.path.expanduser("~/.letta/memfs")
+DEFAULT_LOCAL_PATH = os.path.join(LETTA_DIR_CONST, "memfs")
 
 
 class MemfsClient:

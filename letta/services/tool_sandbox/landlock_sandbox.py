@@ -252,7 +252,7 @@ class AsyncToolSandboxLandlock(AsyncToolSandboxBase):
                     from letta.settings import file_persistence_settings, settings
                     base = file_persistence_settings.agent_files_dir or os.path.join(str(settings.letta_dir), "agent_files")
                 except Exception:
-                    base = os.path.expanduser("~/.letta/agent_files")
+                    base = str(settings.letta_dir / "agent_files")
                 staging_dir = os.path.join(base, self.agent_id, ".staging")
                 # Ensure staging dir exists so Landlock can grant write access
                 os.makedirs(staging_dir, exist_ok=True)

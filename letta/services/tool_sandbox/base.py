@@ -143,7 +143,7 @@ class AsyncToolSandboxBase(ABC):
             from letta.settings import file_persistence_settings, settings
             base = file_persistence_settings.agent_files_dir or os.path.join(str(settings.letta_dir), "agent_files")
         except Exception:
-            base = os.path.expanduser("~/.letta/agent_files")
+            base = str(settings.letta_dir / "agent_files")
 
         staging_dir = os.path.join(base, self.agent_id, ".staging")
         agent_files_dir = os.path.join(base, self.agent_id)
@@ -722,7 +722,7 @@ class AsyncToolSandboxBase(ABC):
                 from letta.settings import file_persistence_settings, settings
                 base = file_persistence_settings.agent_files_dir or os.path.join(str(settings.letta_dir), "agent_files")
             except Exception:
-                base = os.path.expanduser("~/.letta/agent_files")
+                base = str(settings.letta_dir / "agent_files")
             agent_files_dir = os.path.join(base, self.agent_id)
             env["LETTA_AGENT_FILES_DIR"] = agent_files_dir
             env["LETTA_STAGING_DIR"] = os.path.join(agent_files_dir, ".staging")

@@ -54,7 +54,7 @@ def _agent_file_dir(agent_state) -> Path:
 
         base = Path(file_persistence_settings.agent_files_dir or os.path.join(str(settings.letta_dir), "agent_files"))
     except Exception:
-        base = Path(os.path.expanduser("~/.letta/agent_files"))
+        base = Path(str(settings.letta_dir / "agent_files"))
     agent_dir = base / agent_state.id
     agent_dir.mkdir(parents=True, exist_ok=True)
     return agent_dir

@@ -8,6 +8,8 @@ Ideal for self-hosted OSS deployments.
 import os
 import shutil
 from pathlib import Path
+
+from letta.constants import LETTA_DIR as LETTA_DIR_CONST
 from typing import List, Optional
 
 from letta.log import get_logger
@@ -39,7 +41,7 @@ class LocalStorageBackend(StorageBackend):
             prefix: Prefix for all paths in this backend (default: "repository")
         """
         if base_path is None:
-            base_path = os.path.expanduser("~/.letta/memfs")
+            base_path = os.path.join(LETTA_DIR_CONST, "memfs")
 
         self._base_path = Path(base_path)
         self._prefix = prefix.rstrip("/")
